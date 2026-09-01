@@ -212,6 +212,6 @@ Bei Kalendern werden in der normalen Logik nur Start-/Endzeiten genutzt. Titel, 
 
 JackenBerater ist ein Komfortberater und keine Sicherheits- oder Gesundheitsanwendung. Bei extremen Wetterlagen, amtlichen Warnungen oder gesundheitlichen Besonderheiten haben geeignete Schutzmaßnahmen und offizielle Warnhinweise Vorrang.
 
-## Review-Status v0.1.0
+## Teststatus v0.1.0
 
-Nach mehreren unabhängigen Fehlerreviews wurden insbesondere Feedback-Phasen, Session-Lifecycle, Jackengrenzen-Confidence, Böenlernen, Shared-Tablet-Profilwechsel, Work/Home-Zeitlinien, Wettereinheiten und Frontend-Zustände gehärtet. Die lokale Regressionstest-Suite umfasst aktuell **36 Python-Tests** sowie einen kleinen funktionalen JavaScript-Test für den Feedback-Session-Pfad. Zusätzlich werden Python-Kompilierung, JavaScript-Syntax und JSON-Dateien geprüft. Details stehen in `REVIEW_FINDINGS_ROUND3.md`.
+Die lokale Regressionstest-Suite umfasst aktuell **36 Python-Tests** sowie einen funktionalen JavaScript-Test für den Feedback-Session-Pfad. Zusätzlich prüft der CI-Workflow Python-Kompilierung, JavaScript-Syntax, hassfest und HACS.
