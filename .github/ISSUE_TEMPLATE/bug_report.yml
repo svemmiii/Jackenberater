@@ -1,0 +1,30 @@
+name: Fehler melden
+description: Melde ein reproduzierbares Problem im JackenBerater.
+title: "[Bug] "
+labels: [bug]
+body:
+  - type: input
+    id: ha
+    attributes:
+      label: Home-Assistant-Version
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: JackenBerater-Version
+      value: "0.1.0"
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: Was ist passiert und was wurde erwartet?
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevante Logs
+      render: text
