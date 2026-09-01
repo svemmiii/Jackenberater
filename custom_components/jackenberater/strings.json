@@ -1,0 +1,178 @@
+{
+  "title": "Jacket Advisor",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Set up Jacket Advisor",
+        "description": "Choose only the context you actually want to use. Weather is the only required input; indoor, work and shift context are optional.",
+        "sections": {
+          "basic": {
+            "name": "Basics",
+            "description": "Weather and optionally a representative living-room temperature for the indoor-to-outdoor transition.",
+            "data": {
+              "weather_entity": "Weather source",
+              "indoor_temperature": "Indoor comfort temperature",
+              "fallback_indoor_temperature": "Fallback indoor temperature",
+              "rain_advice": "Include rain protection"
+            },
+            "data_description": {
+              "weather_entity": "Weather entity for the current location. Hourly forecasts improve the later/take-with-you recommendation.",
+              "indoor_temperature": "Optional representative comfort room, for example the living room. Deliberately unusually warm rooms are less suitable.",
+              "fallback_indoor_temperature": "Used when no indoor sensor is selected or when it is temporarily unavailable.",
+              "rain_advice": "Assesses precipitation risk separately from warmth. Weather forecasts are never retrained from user feedback."
+            }
+          },
+          "context": {
+            "name": "Time context (optional)",
+            "description": "A selected calendar can use start/end times only to indicate that a later period may be relevant. Title, description and location are not interpreted.",
+            "data": {
+              "context_calendar_entity": "Appointment/outings calendar"
+            },
+            "data_description": {
+              "context_calendar_entity": "Only timed events are considered. An event is explicitly not treated as proof that you are outdoors."
+            }
+          },
+          "work": {
+            "name": "Work context (optional)",
+            "description": "Can include a significantly different work location. Calendar contents are not interpreted; only time windows are used.",
+            "data": {
+              "work_zone": "Work zone",
+              "work_weather_entity": "Weather at work",
+              "work_calendar_entity": "Work/shift calendar",
+              "vacation_calendar_entity": "Vacation/absence calendar"
+            },
+            "data_description": {
+              "work_zone": "Existing Home Assistant zone used as context/display. Weather itself comes from the separate weather entity below.",
+              "work_weather_entity": "Weather entity for the work location. Requires a work/shift calendar or rotating shift cycle.",
+              "work_calendar_entity": "Optional. Only start/end times of timed events are used as probable work windows.",
+              "vacation_calendar_entity": "Optional. Only overlapping absence windows suppress probable work windows."
+            }
+          },
+          "shift": {
+            "name": "Rotating shift cycle (optional)",
+            "description": "Fallback for cycles that are independent of weekdays. Example: F,F,S,S,N,N,N,X,X. F = early, S = late, N = night, X = off.",
+            "data": {
+              "shift_pattern": "Shift sequence",
+              "shift_anchor_date": "Anchor date",
+              "shift_early_start": "Early shift start",
+              "shift_early_end": "Early shift end",
+              "shift_late_start": "Late shift start",
+              "shift_late_end": "Late shift end",
+              "shift_night_start": "Night shift start",
+              "shift_night_end": "Night shift end"
+            }
+          },
+          "shared": {
+            "name": "Gemeinsames Wandtablet",
+            "description": "Nur ausgewählte Home-Assistant-Konten dürfen andere Jackenprofile ansehen oder bewerten.",
+            "data": {
+              "shared_user_ids": "Freigegebene Tablet-/Gemeinschaftskonten"
+            },
+            "data_description": {
+              "shared_user_ids": "Normale Benutzer bleiben strikt auf ihr eigenes Profil beschränkt. Administratoren dürfen Profile ebenfalls wechseln."
+            }
+          }
+        }
+      },
+      "reconfigure": {
+        "title": "Adjust Jacket Advisor",
+        "description": "Adjust weather, indoor or optional work context.",
+        "sections": {
+          "basic": {
+            "name": "Basics",
+            "data": {
+              "weather_entity": "Weather source",
+              "indoor_temperature": "Indoor comfort temperature",
+              "fallback_indoor_temperature": "Fallback indoor temperature",
+              "rain_advice": "Include rain protection"
+            },
+            "data_description": {
+              "weather_entity": "Weather entity for the current location. Hourly forecasts improve the later/take-with-you recommendation.",
+              "indoor_temperature": "Optional representative comfort room, for example the living room. Deliberately unusually warm rooms are less suitable.",
+              "fallback_indoor_temperature": "Used when no indoor sensor is selected or when it is temporarily unavailable.",
+              "rain_advice": "Assesses precipitation risk separately from warmth. Weather forecasts are never retrained from user feedback."
+            }
+          },
+          "context": {
+            "name": "Time context (optional)",
+            "description": "A selected calendar can use start/end times only to indicate that a later period may be relevant. Title, description and location are not interpreted.",
+            "data": {
+              "context_calendar_entity": "Appointment/outings calendar"
+            },
+            "data_description": {
+              "context_calendar_entity": "Only timed events are considered. An event is explicitly not treated as proof that you are outdoors."
+            }
+          },
+          "work": {
+            "name": "Work context (optional)",
+            "data": {
+              "work_zone": "Work zone",
+              "work_weather_entity": "Weather at work",
+              "work_calendar_entity": "Work/shift calendar",
+              "vacation_calendar_entity": "Vacation/absence calendar"
+            },
+            "data_description": {
+              "work_zone": "Existing Home Assistant zone used as context/display. Weather itself comes from the separate weather entity below.",
+              "work_weather_entity": "Weather entity for the work location. Requires a work/shift calendar or rotating shift cycle.",
+              "work_calendar_entity": "Optional. Only start/end times of timed events are used as probable work windows.",
+              "vacation_calendar_entity": "Optional. Only overlapping absence windows suppress probable work windows."
+            }
+          },
+          "shift": {
+            "name": "Rotating shift cycle (optional)",
+            "data": {
+              "shift_pattern": "Shift sequence",
+              "shift_anchor_date": "Anchor date",
+              "shift_early_start": "Early shift start",
+              "shift_early_end": "Early shift end",
+              "shift_late_start": "Late shift start",
+              "shift_late_end": "Late shift end",
+              "shift_night_start": "Night shift start",
+              "shift_night_end": "Night shift end"
+            }
+          },
+          "shared": {
+            "name": "Gemeinsames Wandtablet",
+            "description": "Nur ausgewählte Home-Assistant-Konten dürfen andere Jackenprofile ansehen oder bewerten.",
+            "data": {
+              "shared_user_ids": "Freigegebene Tablet-/Gemeinschaftskonten"
+            },
+            "data_description": {
+              "shared_user_ids": "Normale Benutzer bleiben strikt auf ihr eigenes Profil beschränkt. Administratoren dürfen Profile ebenfalls wechseln."
+            }
+          }
+        }
+      }
+    },
+    "error": {
+      "invalid_shift_pattern": "The shift sequence may only contain F, S, N and X separated by commas.",
+      "shift_anchor_required": "A shift sequence requires an anchor date.",
+      "work_weather_required": "Work context requires a weather source for the work location.",
+      "work_time_required": "Weather at work requires either a work/shift calendar or a rotating shift cycle."
+    },
+    "abort": {
+      "already_configured": "Jacket Advisor is already configured.",
+      "reconfigure_successful": "Jacket Advisor was updated."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "learning_status": {
+        "name": "Lernstand {name}"
+      }
+    },
+    "switch": {
+      "learning_enabled": {
+        "name": "Lernen {name}"
+      }
+    },
+    "button": {
+      "reset_learning": {
+        "name": "Lernprofil {name} zurücksetzen"
+      },
+      "undo_feedback": {
+        "name": "Letzte Bewertung {name} zurücknehmen"
+      }
+    }
+  }
+}

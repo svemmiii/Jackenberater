@@ -1,0 +1,13 @@
+{
+  "domain": "jackenberater",
+  "name": "JackenBerater",
+  "codeowners": ["@svemmiii"],
+  "config_flow": true,
+  "dependencies": ["http", "lovelace", "weather", "websocket_api"],
+  "documentation": "https://github.com/svemmiii/jackenberater",
+  "integration_type": "service",
+  "iot_class": "calculated",
+  "issue_tracker": "https://github.com/svemmiii/jackenberater/issues",
+  "requirements": [],
+  "version": "0.1.0"
+}

@@ -1,0 +1,171 @@
+{
+  "title": "JackenBerater",
+  "config": {
+    "step": {
+      "user": {
+        "title": "JackenBerater einrichten",
+        "description": "Wähle nur die Daten, die du wirklich verwenden möchtest. Wetter ist die einzige Pflichtangabe; Innenraum, Arbeit und Schichtkontext sind optional.",
+        "sections": {
+          "basic": {
+            "name": "Grundlage",
+            "description": "Wetter und optional ein repräsentativer Wohnraumsensor für den Übergang von drinnen nach draußen.",
+            "data": {
+              "weather_entity": "Wetterquelle",
+              "indoor_temperature": "Wohnraumtemperatur",
+              "fallback_indoor_temperature": "Fallback-Innentemperatur",
+              "rain_advice": "Regenschutz berücksichtigen"
+            },
+            "data_description": {
+              "weather_entity": "Die Wetter-Entität für den aktuellen Ort. Stündliche Forecasts verbessern die Empfehlung für später.",
+              "indoor_temperature": "Optional: ein typischer gemütlicher Wohnraum, z. B. Wohnzimmer. Bad oder bewusst besonders warme Räume sind weniger geeignet.",
+              "fallback_indoor_temperature": "Wird verwendet, wenn kein Innenraumsensor gewählt wurde oder dieser gerade nicht verfügbar ist.",
+              "rain_advice": "Bewertet Niederschlagsrisiko separat von der benötigten Wärme. Regenprognosen werden nicht aus Nutzerfeedback angelernt."
+            }
+          },
+          "context": {
+            "name": "Zeitkontext (optional)",
+            "description": "Ein ausgewählter Kalender kann nur über Start/Ende darauf hinweisen, dass ein späterer Zeitraum interessant sein könnte. Titel, Beschreibung und Ort werden nicht ausgewertet.",
+            "data": {
+              "context_calendar_entity": "Termin-/Ausgehkalender"
+            },
+            "data_description": {
+              "context_calendar_entity": "Nur zeitlich begrenzte Termine werden berücksichtigt. Ein Termin gilt ausdrücklich nicht als Beweis, dass du draußen bist."
+            }
+          },
+          "work": {
+            "name": "Arbeitskontext (optional)",
+            "description": "Kann einen deutlich anderen Arbeitsort in die Empfehlung einbeziehen. Kalenderinhalte werden nicht ausgewertet; für Arbeits- und Urlaubskalender werden nur Zeiträume verwendet.",
+            "data": {
+              "work_zone": "Arbeitszone",
+              "work_weather_entity": "Wetter am Arbeitsort",
+              "work_calendar_entity": "Arbeits-/Schichtkalender",
+              "vacation_calendar_entity": "Urlaubs-/Abwesenheitskalender"
+            },
+            "data_description": {
+              "work_zone": "Vorhandene Home-Assistant-Zone für die Zuordnung. In v0.1.0 dient sie als Kontext/Anzeige; das Wetter kommt aus der separaten Wetterquelle darunter.",
+              "work_weather_entity": "Wetter-Entität am Arbeitsort. Nützlich, wenn dort z. B. Höhe oder Wind deutlich anders sind.",
+              "work_calendar_entity": "Optional. Nur Start und Ende zeitlich begrenzter Termine werden als wahrscheinliche Arbeitsfenster verwendet.",
+              "vacation_calendar_entity": "Optional. Ein vorhandener Termin in diesem Kalender setzt die normale Arbeitsannahme für den betrachteten Zeitraum aus."
+            }
+          },
+          "shift": {
+            "name": "Rotierender Schichtzyklus (optional)",
+            "description": "Fallback für feste Zyklen, die nicht an Montag–Sonntag gebunden sind. Beispiel: F,F,S,S,N,N,N,X,X. F = Früh, S = Spät, N = Nacht, X = frei.",
+            "data": {
+              "shift_pattern": "Schichtfolge",
+              "shift_anchor_date": "Ankerdatum",
+              "shift_early_start": "Frühschicht Start",
+              "shift_early_end": "Frühschicht Ende",
+              "shift_late_start": "Spätschicht Start",
+              "shift_late_end": "Spätschicht Ende",
+              "shift_night_start": "Nachtschicht Start",
+              "shift_night_end": "Nachtschicht Ende"
+            },
+            "data_description": {
+              "shift_pattern": "Kommagetrennte Folge aus F, S, N und X. Der Zyklus wiederholt sich unabhängig vom Wochentag.",
+              "shift_anchor_date": "Datum, an dem der erste Eintrag der Schichtfolge gilt."
+            }
+          },
+          "shared": {
+            "name": "Gemeinsames Wandtablet",
+            "description": "Nur ausgewählte Home-Assistant-Konten dürfen andere Jackenprofile ansehen oder bewerten.",
+            "data": {
+              "shared_user_ids": "Freigegebene Tablet-/Gemeinschaftskonten"
+            },
+            "data_description": {
+              "shared_user_ids": "Normale Benutzer bleiben strikt auf ihr eigenes Profil beschränkt. Administratoren dürfen Profile ebenfalls wechseln."
+            }
+          }
+        }
+      },
+      "reconfigure": {
+        "title": "JackenBerater anpassen",
+        "description": "Passe Wetter-, Innenraum- oder optionalen Arbeitskontext an.",
+        "sections": {
+          "basic": {
+            "name": "Grundlage",
+            "description": "Wetter und optional ein repräsentativer Wohnraumsensor.",
+            "data": {
+              "weather_entity": "Wetterquelle",
+              "indoor_temperature": "Wohnraumtemperatur",
+              "fallback_indoor_temperature": "Fallback-Innentemperatur",
+              "rain_advice": "Regenschutz berücksichtigen"
+            }
+          },
+          "context": {
+            "name": "Zeitkontext (optional)",
+            "description": "Ein ausgewählter Kalender kann nur über Start/Ende darauf hinweisen, dass ein späterer Zeitraum interessant sein könnte. Titel, Beschreibung und Ort werden nicht ausgewertet.",
+            "data": {
+              "context_calendar_entity": "Termin-/Ausgehkalender"
+            },
+            "data_description": {
+              "context_calendar_entity": "Nur zeitlich begrenzte Termine werden berücksichtigt. Ein Termin gilt ausdrücklich nicht als Beweis, dass du draußen bist."
+            }
+          },
+          "work": {
+            "name": "Arbeitskontext (optional)",
+            "data": {
+              "work_zone": "Arbeitszone",
+              "work_weather_entity": "Wetter am Arbeitsort",
+              "work_calendar_entity": "Arbeits-/Schichtkalender",
+              "vacation_calendar_entity": "Urlaubs-/Abwesenheitskalender"
+            }
+          },
+          "shift": {
+            "name": "Rotierender Schichtzyklus (optional)",
+            "data": {
+              "shift_pattern": "Schichtfolge",
+              "shift_anchor_date": "Ankerdatum",
+              "shift_early_start": "Frühschicht Start",
+              "shift_early_end": "Frühschicht Ende",
+              "shift_late_start": "Spätschicht Start",
+              "shift_late_end": "Spätschicht Ende",
+              "shift_night_start": "Nachtschicht Start",
+              "shift_night_end": "Nachtschicht Ende"
+            }
+          },
+          "shared": {
+            "name": "Gemeinsames Wandtablet",
+            "description": "Nur ausgewählte Home-Assistant-Konten dürfen andere Jackenprofile ansehen oder bewerten.",
+            "data": {
+              "shared_user_ids": "Freigegebene Tablet-/Gemeinschaftskonten"
+            },
+            "data_description": {
+              "shared_user_ids": "Normale Benutzer bleiben strikt auf ihr eigenes Profil beschränkt. Administratoren dürfen Profile ebenfalls wechseln."
+            }
+          }
+        }
+      }
+    },
+    "error": {
+      "invalid_shift_pattern": "Die Schichtfolge darf nur F, S, N und X enthalten, jeweils durch Kommas getrennt.",
+      "shift_anchor_required": "Für eine Schichtfolge wird ein Ankerdatum benötigt.",
+      "work_weather_required": "Für den Arbeitskontext wird eine Wetterquelle am Arbeitsort benötigt.",
+      "work_time_required": "Wetter am Arbeitsort benötigt entweder einen Arbeits-/Schichtkalender oder einen rotierenden Schichtzyklus."
+    },
+    "abort": {
+      "already_configured": "JackenBerater ist bereits eingerichtet.",
+      "reconfigure_successful": "JackenBerater wurde aktualisiert."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "learning_status": {
+        "name": "Lernstand {name}"
+      }
+    },
+    "switch": {
+      "learning_enabled": {
+        "name": "Lernen {name}"
+      }
+    },
+    "button": {
+      "reset_learning": {
+        "name": "Lernprofil {name} zurücksetzen"
+      },
+      "undo_feedback": {
+        "name": "Letzte Bewertung {name} zurücknehmen"
+      }
+    }
+  }
+}

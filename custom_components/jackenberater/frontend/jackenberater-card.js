@@ -1,0 +1,627 @@
+const JB_I18N = {
+  de: {
+    title: "JackenBerater",
+    setupTitle: "Kurz kennenlernen",
+    setupText: "Vier kleine Startwerte helfen dem Berater, schon vor den ersten Bewertungen näher an deinem Empfinden zu liegen.",
+    cold: "Wie schnell frierst du?",
+    warm: "Wie schnell wird dir zu warm?",
+    wind: "Wie empfindlich bist du bei Wind?",
+    evening: "Wie oft bist du abends länger unterwegs?",
+    scale: ["Sehr wenig", "Eher wenig", "Neutral", "Eher stark", "Sehr stark"],
+    frequency: ["Fast nie", "Eher selten", "Gemischt", "Eher häufig", "Fast immer"],
+    save: "Profil starten",
+    none: "Keine Jacke nötig",
+    light: "Leichte Jacke",
+    warmJacket: "Warme Jacke",
+    winter: "Winterjacke",
+    takeLater: "mitnehmen",
+    now: "jetzt",
+    later: "später",
+    current: "Aktuell",
+    rainTake: "Regenjacke vorsichtshalber mitnehmen",
+    rainRecommended: "Regenschutz empfohlen",
+    why: "Warum?",
+    close: "Schließen",
+    open: "Beratung öffnen",
+    feedbackOpen: "Bewertung offen",
+    feedbackPlural: "Bewertungen offen",
+    feedbackQuestion: "Wie hat diese Empfehlung gepasst?",
+    tooCold: "Zu kalt",
+    perfect: "Perfekt",
+    tooWarm: "Zu warm",
+    notUsed: "Nicht genutzt",
+    manualFeedback: "Aktuelle Empfehlung bewerten",
+    oldRecommendation: "frühere Empfehlung",
+    currentRecommendation: "aktuelle Empfehlung",
+    profile: "Profil",
+    confidence: "Lernstand",
+    feedbackCount: "Bewertungen",
+    windReason: "Wind kühlt die Situation zusätzlich ab.",
+    transitionReason: "Der Wechsel von drinnen nach draußen wirkt in den ersten Minuten kühler.",
+    sunReason: "Sonne mildert das Kältegefühl etwas.",
+    wetReason: "Nasses Wetter erhöht den Wärmeverlust.",
+    personalReason: "Dein bisheriges Wärmeprofil verschiebt die Empfehlung.",
+    forecastReason: "Im betrachteten Zeitraum ändert sich die sinnvolle Jackenstufe.",
+    workReason: "Am hinterlegten Arbeitsort werden anspruchsvollere Bedingungen erwartet.",
+    calendarReason: "Ein ausgewählter Kalenderzeitraum wurde nur zeitlich als möglicher Kontext berücksichtigt.",
+    rainReason: "Im Zeitraum besteht ein relevantes Niederschlagsrisiko.",
+    thresholdReason: "Die Lage liegt nahe an einer deiner persönlichen Jackengrenzen.",
+    setupRequired: "Persönliches Profil einrichten",
+    noData: "Aktuell keine zuverlässige Wetterbewertung möglich.",
+    profileFor: "Empfehlung für",
+    phaseAsk: "Wann hat es hauptsächlich nicht gepasst?",
+    phaseStart: "Am Anfang",
+    phaseLater: "Später",
+    phaseAll: "Durchgehend",
+    cancel: "Abbrechen",
+    submitted: "Danke – Bewertung übernommen.",
+    effective: "thermisch etwa",
+    work: "Arbeit",
+    editorTitle: "Titel",
+    editorShared: "Gemeinsames Wandtablet",
+    selectProfile: "Profil auswählen",
+    selectProfileText: "Wähle zuerst aus, für wen diese Beratung gedacht ist.",
+    unusualDay: "Heute war ungewöhnlich – schwächer gewichten",
+  },
+  en: {
+    title: "Jacket Advisor",
+    setupTitle: "Quick setup",
+    setupText: "Four small starting values help the advisor get closer to your comfort before enough feedback exists.",
+    cold: "How quickly do you feel cold?",
+    warm: "How quickly do you feel too warm?",
+    wind: "How sensitive are you to wind?",
+    evening: "How often are you out for longer in the evening?",
+    scale: ["Very little", "Rather little", "Neutral", "Rather strong", "Very strong"],
+    frequency: ["Almost never", "Rather rarely", "Mixed", "Rather often", "Almost always"],
+    save: "Start profile",
+    none: "No jacket needed",
+    light: "Light jacket",
+    warmJacket: "Warm jacket",
+    winter: "Winter jacket",
+    takeLater: "take it with you",
+    now: "now",
+    later: "later",
+    current: "Current",
+    rainTake: "Consider taking a rain jacket",
+    rainRecommended: "Rain protection recommended",
+    why: "Why?",
+    close: "Close",
+    open: "Open advice",
+    feedbackOpen: "rating open",
+    feedbackPlural: "ratings open",
+    feedbackQuestion: "How well did this recommendation fit?",
+    tooCold: "Too cold",
+    perfect: "Perfect",
+    tooWarm: "Too warm",
+    notUsed: "Not used",
+    manualFeedback: "Rate current recommendation",
+    oldRecommendation: "previous recommendation",
+    currentRecommendation: "current recommendation",
+    profile: "Profile",
+    confidence: "Confidence",
+    feedbackCount: "Ratings",
+    windReason: "Wind makes the conditions feel colder.",
+    transitionReason: "The indoor-to-outdoor change feels cooler during the first minutes.",
+    sunReason: "Sunshine softens the cold sensation somewhat.",
+    wetReason: "Wet weather increases heat loss.",
+    personalReason: "Your learned comfort profile shifts this recommendation.",
+    forecastReason: "The useful jacket level changes during the forecast window.",
+    workReason: "More demanding conditions are expected at the configured work location.",
+    calendarReason: "A selected calendar time window was considered only as possible timing context.",
+    rainReason: "There is a relevant precipitation risk during the period.",
+    thresholdReason: "Conditions are close to one of your personal jacket boundaries.",
+    setupRequired: "Set up personal profile",
+    noData: "No reliable weather assessment is available right now.",
+    profileFor: "Advice for",
+    phaseAsk: "When did it mainly not fit?",
+    phaseStart: "At the start",
+    phaseLater: "Later",
+    phaseAll: "Throughout",
+    cancel: "Cancel",
+    submitted: "Thanks – rating saved.",
+    effective: "thermally about",
+    work: "Work",
+    editorTitle: "Title",
+    editorShared: "Shared wall tablet",
+    selectProfile: "Select profile",
+    selectProfileText: "First choose who this recommendation is for.",
+    unusualDay: "Today was unusual — give this rating less weight",
+  },
+};
+
+function jbEscape(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;");
+}
+
+class JackenBeraterCard extends HTMLElement {
+  setConfig(config) {
+    this._config = { ...config };
+    this._open = false;
+    this._preview = null;
+    this._session = null;
+    this._loading = false;
+    this._setup = { cold: 3, warm: 3, wind: 3, evening: 3 };
+    this._selectedProfile = config.shared ? null : (config.profile_id || null);
+    this._phasePending = null;
+    this._notice = "";
+    this._lastRefreshAt = 0;
+    this._stateRefreshTimer = null;
+    this._render();
+  }
+
+  set hass(hass) {
+    const first = !this._hass;
+    this._hass = hass;
+    if (first) {
+      this._refresh();
+    } else {
+      this._scheduleStateRefresh();
+    }
+  }
+
+  connectedCallback() {
+    if (!this._timer) {
+      this._timer = setInterval(() => this._refresh(), 5 * 60 * 1000);
+    }
+  }
+
+  disconnectedCallback() {
+    if (this._timer) clearInterval(this._timer);
+    if (this._stateRefreshTimer) clearTimeout(this._stateRefreshTimer);
+    this._timer = null;
+    this._stateRefreshTimer = null;
+  }
+
+  _scheduleStateRefresh() {
+    if (!this._hass || this._loading) return;
+    const elapsed = Date.now() - (this._lastRefreshAt || 0);
+    if (elapsed >= 60 * 1000) {
+      this._refresh();
+      return;
+    }
+    if (!this._stateRefreshTimer) {
+      this._stateRefreshTimer = setTimeout(() => {
+        this._stateRefreshTimer = null;
+        this._refresh();
+      }, Math.max(1000, 60 * 1000 - elapsed));
+    }
+  }
+
+  getCardSize() {
+    const hidden = this._preview?.recommendation?.display_mode === "hidden";
+    const setup = this._preview?.profile?.setup_complete;
+    const pending = this._preview?.feedback || [];
+    const latest = this._preview?.latest_session;
+    if (hidden && setup && pending.length === 0 && !(latest && !latest.feedback)) return 0;
+    return this._open ? 6 : 2;
+  }
+
+  static getConfigElement() {
+    return document.createElement("jackenberater-card-editor");
+  }
+
+  static getStubConfig() {
+    return { type: "custom:jackenberater-card" };
+  }
+
+  _lang() {
+    const lang = (this._hass?.language || this._hass?.locale?.language || "de").toLowerCase();
+    return lang.startsWith("de") ? "de" : "en";
+  }
+
+  _t(key) {
+    return JB_I18N[this._lang()][key] ?? JB_I18N.de[key] ?? key;
+  }
+
+  async _send(type, extra = {}) {
+    if (!this._hass) return null;
+    return this._hass.connection.sendMessagePromise({
+      type,
+      ...(this._config?.entry_id ? { entry_id: this._config.entry_id } : {}),
+      ...(this._selectedProfile ? { profile_id: this._selectedProfile } : {}),
+      ...extra,
+    });
+  }
+
+  async _refresh() {
+    if (!this._hass || this._loading) return;
+    this._loading = true;
+    try {
+      if (this._config?.shared) {
+        const profiles = await this._send("jackenberater/profiles");
+        this._profiles = profiles?.profiles || [];
+        if (!this._selectedProfile) {
+          this._preview = null;
+          this._error = "";
+          this._lastRefreshAt = Date.now();
+          return;
+        }
+      }
+      this._preview = await this._send("jackenberater/preview");
+      this._error = "";
+      this._lastRefreshAt = Date.now();
+    } catch (err) {
+      this._error = err?.message || String(err);
+    } finally {
+      this._loading = false;
+      this._render();
+    }
+  }
+
+  async _openAdvice() {
+    if (this._config?.shared && !this._selectedProfile) {
+      this._render();
+      return;
+    }
+    if (this._preview?.profile && !this._preview.profile.setup_complete) {
+      this._notice = "";
+      this._open = true;
+      this._render();
+      return;
+    }
+    if (this._open) {
+      this._open = false;
+      this._phasePending = null;
+      this._notice = "";
+      if (this._config?.shared) {
+        this._selectedProfile = null;
+        this._preview = null;
+        this._session = null;
+        await this._refresh();
+        return;
+      }
+      this._render();
+      return;
+    }
+
+    this._notice = "";
+    this._open = true;
+    try {
+      const response = await this._send("jackenberater/open_session");
+      this._session = response?.session || null;
+      if (response?.recommendation) this._preview.recommendation = response.recommendation;
+      if (response?.feedback) this._preview.feedback = response.feedback;
+      this._error = "";
+    } catch (err) {
+      this._error = err?.message || String(err);
+    }
+    this._render();
+  }
+
+  async _saveSetup() {
+    try {
+      await this._send("jackenberater/profile_setup", this._setup);
+      this._error = "";
+      this._open = false;
+      if (this._config?.shared) {
+        this._selectedProfile = null;
+        this._preview = null;
+        this._session = null;
+      }
+      await this._refresh();
+    } catch (err) {
+      this._error = err?.message || String(err);
+      this._render();
+    }
+  }
+
+  _setScale(key, value) {
+    this._setup[key] = Number(value);
+    this._render();
+  }
+
+  async _feedback(session, rating, voluntary = false, phase = null, unusualDay = false) {
+    const rec = session?.recommendation || {};
+    if (!phase && ["too_cold", "too_warm"].includes(rating) && rec.jacket_now !== rec.jacket_later) {
+      this._phasePending = { session, rating, voluntary, unusualDay };
+      this._render();
+      return;
+    }
+    try {
+      await this._send("jackenberater/feedback", {
+        session_id: session.id,
+        rating,
+        phase,
+        recommendation_used: rating !== "not_used",
+        unusual_day: unusualDay,
+        voluntary,
+      });
+      this._phasePending = null;
+      this._error = "";
+      this._notice = this._t("submitted");
+      // The backend session is already answered. Drop the local copy before
+      // refreshing so the detail panel cannot offer the same feedback twice.
+      if (this._session?.id === session.id) {
+        this._session = null;
+      }
+      await this._refresh();
+    } catch (err) {
+      this._error = err?.message || String(err);
+      this._render();
+    }
+  }
+
+  async _manualFeedback(rating) {
+    if (!this._session) {
+      const response = await this._send("jackenberater/open_session");
+      this._session = response?.session || null;
+    }
+    if (this._session) await this._feedback(this._session, rating, true);
+  }
+
+  _jacketLabel(value) {
+    return {
+      none: this._t("none"),
+      light: this._t("light"),
+      warm: this._t("warmJacket"),
+      winter: this._t("winter"),
+    }[value] || value;
+  }
+
+  _jacketIcon(value) {
+    return {
+      none: "mdi:tshirt-crew",
+      light: "mdi:coat-rack",
+      warm: "mdi:coat-rack",
+      winter: "mdi:snowflake",
+    }[value] || "mdi:coat-rack";
+  }
+
+  _relativeDate(iso) {
+    const dt = new Date(iso);
+    if (Number.isNaN(dt.getTime())) return "";
+    const now = new Date();
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const day = new Date(dt.getFullYear(), dt.getMonth(), dt.getDate());
+    const diff = Math.round((today - day) / 86400000);
+    const time = new Intl.DateTimeFormat(this._lang() === "de" ? "de-DE" : "en-GB", { hour: "2-digit", minute: "2-digit" }).format(dt);
+    if (this._lang() === "de") {
+      if (diff === 0) return `Heute, ${time}`;
+      if (diff === 1) return `Gestern, ${time}`;
+      if (diff === 2) return `Vorgestern, ${time}`;
+    } else {
+      if (diff === 0) return `Today, ${time}`;
+      if (diff === 1) return `Yesterday, ${time}`;
+      if (diff === 2) return `Two days ago, ${time}`;
+    }
+    return new Intl.DateTimeFormat(this._lang() === "de" ? "de-DE" : "en-GB", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }).format(dt);
+  }
+
+  _laterText(rec) {
+    if (!rec?.later_at || rec.jacket_later === rec.jacket_now) return "";
+    const when = new Intl.DateTimeFormat(this._lang() === "de" ? "de-DE" : "en-GB", { hour: "2-digit", minute: "2-digit" }).format(new Date(rec.later_at));
+    const warmer = ["none", "light", "warm", "winter"].indexOf(rec.jacket_later) > ["none", "light", "warm", "winter"].indexOf(rec.jacket_now);
+    if (this._lang() === "de") {
+      return warmer
+        ? `Ab etwa ${when} ${this._jacketLabel(rec.jacket_later).toLowerCase()} ${this._t("takeLater")}.`
+        : `Ab etwa ${when} dürfte ${this._jacketLabel(rec.jacket_now).toLowerCase()} nicht mehr nötig sein.`;
+    }
+    return warmer
+      ? `From about ${when}, ${this._jacketLabel(rec.jacket_later).toLowerCase()} — ${this._t("takeLater")}.`
+      : `From about ${when}, ${this._jacketLabel(rec.jacket_now).toLowerCase()} will probably no longer be needed.`;
+  }
+
+  _reasonText(reason) {
+    return {
+      wind: this._t("windReason"),
+      transition: this._t("transitionReason"),
+      sun: this._t("sunReason"),
+      wet: this._t("wetReason"),
+      personal: this._t("personalReason"),
+      forecast_change: this._t("forecastReason"),
+      work_location: this._t("workReason"),
+      rain: this._t("rainReason"),
+      near_threshold: this._t("thresholdReason"),
+      calendar_context: this._t("calendarReason"),
+    }[reason] || "";
+  }
+
+  _render() {
+    if (!this._config) return;
+    if (this._config.shared && !this._selectedProfile && this._profiles) {
+      const title = this._config.title || this._t("title");
+      this.innerHTML = `<ha-card class="jb-card">${this._profilePicker({})}<div class="jb-main shared-select"><div class="jb-icon setup"><ha-icon icon="mdi:account-multiple-outline"></ha-icon></div><div class="jb-copy"><div class="jb-kicker">${jbEscape(title)}</div><div class="jb-headline">${this._t("selectProfile")}</div><div class="jb-sub">${this._t("selectProfileText")}</div></div></div></ha-card>${this._styles()}`;
+      this._bind();
+      return;
+    }
+    if (!this._preview && !this._error) {
+      this.innerHTML = `<ha-card><div class="jb-loading">${this._t("title")} …</div></ha-card>`;
+      return;
+    }
+    if (this._error) {
+      this.innerHTML = `<ha-card><div class="jb-error"><ha-icon icon="mdi:alert-circle-outline"></ha-icon>${jbEscape(this._error)}</div></ha-card>${this._styles()}`;
+      return;
+    }
+
+    const profile = this._preview?.profile || {};
+    const rec = this._preview?.recommendation || {};
+    const pending = this._preview?.feedback || [];
+    const latest = this._preview?.latest_session;
+    const hasRecentManualFeedback = Boolean(latest && !latest.feedback);
+    if (rec.display_mode === "hidden" && profile.setup_complete && !this._open && pending.length === 0 && !hasRecentManualFeedback) {
+      this.innerHTML = `<div style="display:none"></div>`;
+      return;
+    }
+
+    const compact = (rec.display_mode === "compact" || (rec.display_mode === "hidden" && hasRecentManualFeedback)) && profile.setup_complete && !this._open;
+    const title = this._config.title || this._t("title");
+    const profilePicker = this._config.shared ? this._profilePicker(profile) : "";
+    const feedbackBadge = pending.length
+      ? `<span class="jb-badge">${pending.length} ${pending.length === 1 ? this._t("feedbackOpen") : this._t("feedbackPlural")}</span>`
+      : "";
+
+    let content = "";
+    if (!profile.setup_complete) {
+      content = this._open ? this._setupPanel() : `
+        <div class="jb-main" data-action="open">
+          <div class="jb-icon setup"><ha-icon icon="mdi:account-heart-outline"></ha-icon></div>
+          <div class="jb-copy"><div class="jb-kicker">${jbEscape(title)}</div><div class="jb-headline">${this._t("setupRequired")}</div><div class="jb-sub">${this._t("setupText")}</div></div>
+          <ha-icon class="jb-chevron" icon="mdi:chevron-right"></ha-icon>
+        </div>`;
+    } else if (compact) {
+      content = `
+        <div class="jb-main compact" data-action="open">
+          <div class="jb-icon ${rec.jacket_now}"><ha-icon icon="${this._jacketIcon(rec.jacket_now)}"></ha-icon></div>
+          <div class="jb-copy"><div class="jb-kicker">${jbEscape(title)}</div><div class="jb-headline">${jbEscape(this._jacketLabel(rec.jacket_now))}</div><div class="jb-sub">${Math.round(rec.current_temperature_c * 10) / 10} °C · ${this._t("effective")} ${Math.round(rec.effective_now_c * 10) / 10} °C</div></div>
+          ${feedbackBadge}<ha-icon class="jb-chevron" icon="mdi:chevron-right"></ha-icon>
+        </div>`;
+    } else {
+      content = `
+        <div class="jb-main" data-action="open">
+          <div class="jb-icon ${rec.jacket_now}"><ha-icon icon="${this._jacketIcon(rec.jacket_now)}"></ha-icon></div>
+          <div class="jb-copy"><div class="jb-kicker">${jbEscape(title)}</div><div class="jb-headline">${jbEscape(this._jacketLabel(rec.jacket_now))}</div>
+            <div class="jb-sub">${jbEscape(this._laterText(rec) || `${rec.current_temperature_c ?? "–"} °C · ${this._t("effective")} ${rec.effective_now_c ?? "–"} °C`)}</div>
+          </div>
+          ${feedbackBadge}<ha-icon class="jb-chevron" icon="mdi:${this._open ? "chevron-up" : "chevron-right"}"></ha-icon>
+        </div>
+        ${this._open ? this._details(rec, profile, pending) : ""}`;
+    }
+
+    this.innerHTML = `<ha-card class="jb-card">${profilePicker}${content}</ha-card>${this._styles()}`;
+    this._bind();
+  }
+
+  _profilePicker(profile) {
+    const profiles = this._profiles || [];
+    const placeholder = `<option value="" ${this._selectedProfile ? "" : "selected"}>— ${this._t("selectProfile")} —</option>`;
+    return `<div class="jb-profile-row"><span>${this._t("profileFor")}</span><select id="jb-profile">${placeholder}${profiles.map(p => `<option value="${jbEscape(p.id)}" ${p.id === profile.id ? "selected" : ""}>${jbEscape(p.name)}</option>`).join("")}</select></div>`;
+  }
+
+  _setupPanel() {
+    const scale = (key, labels) => `<div class="jb-question"><div>${this._t(key)}</div><div class="jb-scale">${labels.map((label, idx) => `<button class="${this._setup[key] === idx + 1 ? "active" : ""}" data-scale="${key}" data-value="${idx + 1}" title="${jbEscape(label)}">${idx + 1}</button>`).join("")}</div><div class="jb-scale-label"><span>${jbEscape(labels[0])}</span><span>${jbEscape(labels[4])}</span></div></div>`;
+    return `<div class="jb-panel"><div class="jb-panel-title">${this._t("setupTitle")}</div><div class="jb-panel-text">${this._t("setupText")}</div>${scale("cold", this._t("scale"))}${scale("warm", this._t("scale"))}${scale("wind", this._t("scale"))}${scale("evening", this._t("frequency"))}<div class="jb-actions"><button class="primary" id="jb-save-setup">${this._t("save")}</button></div></div>`;
+  }
+
+  _details(rec, profile, pending) {
+    const reasons = (rec.reasons || []).map(reason => this._reasonText(reason)).filter(Boolean);
+    const rain = rec.rain_status === "recommended"
+      ? `<div class="jb-rain strong"><ha-icon icon="mdi:weather-rainy"></ha-icon>${this._t("rainRecommended")}</div>`
+      : rec.rain_status === "take"
+        ? `<div class="jb-rain"><ha-icon icon="mdi:weather-partly-rainy"></ha-icon>${this._t("rainTake")}</div>`
+        : "";
+    const pendingHtml = pending.length ? `<div class="jb-divider"></div><div class="jb-section-title">${pending.length} ${pending.length === 1 ? this._t("feedbackOpen") : this._t("feedbackPlural")}</div>${pending.map(session => this._feedbackCard(session, true)).join("")}` : "";
+    const pendingIds = new Set(pending.map(session => session.id));
+    const latest = this._preview?.latest_session;
+    const previousManual = latest && !latest.feedback && !pendingIds.has(latest.id) && latest.id !== this._session?.id
+      ? this._feedbackCard(latest, true, true)
+      : "";
+    const currentSession = this._session && !this._session.feedback ? this._feedbackCard(this._session, false, true) : "";
+    const manualHtml = previousManual || currentSession
+      ? `<div class="jb-divider"></div><div class="jb-section-title">${this._t("manualFeedback")}</div>${previousManual}${currentSession}`
+      : "";
+    const phase = this._phasePending ? this._phasePanel() : "";
+    return `<div class="jb-panel">
+      ${rain}
+      <div class="jb-metrics"><span>${rec.current_temperature_c ?? "–"} °C</span><span>${rec.current_wind_kmh != null ? `${rec.current_wind_kmh} km/h` : "–"}</span><span>${rec.horizon_hours} h</span></div>
+      ${rec.work_context && rec.work_jacket ? `<div class="jb-context"><ha-icon icon="mdi:briefcase-outline"></ha-icon>${jbEscape(rec.work_name || this._t("work"))}: ${this._jacketLabel(rec.work_jacket)}</div>` : ""}
+      ${reasons.length ? `<div class="jb-section-title">${this._t("why")}</div><ul class="jb-reasons">${reasons.map(x => `<li>${jbEscape(x)}</li>`).join("")}</ul>` : ""}
+      <div class="jb-learning"><span>${this._t("confidence")}: ${Math.round((profile.confidence || 0) * 100)} %</span><span>${this._t("feedbackCount")}: ${profile.total_feedback || 0}</span></div>
+      ${pendingHtml}
+      ${manualHtml}
+      ${phase}
+      ${this._notice ? `<div class="jb-notice">${jbEscape(this._notice)}</div>` : ""}
+    </div>`;
+  }
+
+  _feedbackCard(session, historical, manual = false) {
+    const rec = session.recommendation || {};
+    const weather = session.weather || {};
+    const title = historical ? `${this._relativeDate(session.created_at)} · ${this._t("oldRecommendation")}` : `${this._relativeDate(session.created_at)} · ${this._t("currentRecommendation")}`;
+    const voluntary = manual ? "true" : "false";
+    return `<div class="jb-feedback" data-session="${jbEscape(session.id)}">
+      <div class="jb-feedback-time">${jbEscape(title)}</div>
+      <div class="jb-feedback-rec">${jbEscape(this._jacketLabel(rec.jacket_now))}<span>${weather.temperature_c ?? rec.current_temperature_c ?? "–"} °C${weather.wind_kmh != null ? ` · ${weather.wind_kmh} km/h` : ""}</span></div>
+      <label class="jb-unusual"><input type="checkbox" data-unusual> ${this._t("unusualDay")}</label>
+      <div class="jb-feedback-buttons">
+        <button data-feedback="too_cold" data-voluntary="${voluntary}">🥶 ${this._t("tooCold")}</button>
+        <button data-feedback="perfect" data-voluntary="${voluntary}">✓ ${this._t("perfect")}</button>
+        <button data-feedback="too_warm" data-voluntary="${voluntary}">🥵 ${this._t("tooWarm")}</button>
+        <button data-feedback="not_used" data-voluntary="${voluntary}">${this._t("notUsed")}</button>
+      </div>
+    </div>`;
+  }
+
+  _phasePanel() {
+    return `<div class="jb-phase"><div>${this._t("phaseAsk")}</div><div class="jb-phase-buttons"><button data-phase="start">${this._t("phaseStart")}</button><button data-phase="later">${this._t("phaseLater")}</button><button data-phase="all">${this._t("phaseAll")}</button><button data-phase="cancel">${this._t("cancel")}</button></div></div>`;
+  }
+
+  _bind() {
+    this.querySelector("[data-action='open']")?.addEventListener("click", () => this._openAdvice());
+    this.querySelector("#jb-save-setup")?.addEventListener("click", () => this._saveSetup());
+    this.querySelectorAll("[data-scale]").forEach(el => el.addEventListener("click", () => this._setScale(el.dataset.scale, el.dataset.value)));
+    this.querySelector("#jb-profile")?.addEventListener("change", async ev => {
+      this._selectedProfile = ev.target.value || null;
+      this._setup = { cold: 3, warm: 3, wind: 3, evening: 3 };
+      this._open = false;
+      this._session = null;
+      this._phasePending = null;
+      this._notice = "";
+      this._error = "";
+      await this._refresh();
+    });
+    this.querySelectorAll("[data-feedback]").forEach(el => el.addEventListener("click", async () => {
+      const root = el.closest("[data-session]");
+      const id = root?.dataset.session;
+      const sessions = [...(this._preview?.feedback || []), this._preview?.latest_session, this._session].filter(Boolean);
+      const session = sessions.find(s => s.id === id);
+      const unusual = Boolean(root?.querySelector("[data-unusual]")?.checked);
+      if (session) await this._feedback(session, el.dataset.feedback, el.dataset.voluntary === "true", null, unusual);
+    }));
+    this.querySelectorAll("[data-phase]").forEach(el => el.addEventListener("click", async () => {
+      if (!this._phasePending) return;
+      if (el.dataset.phase === "cancel") {
+        this._phasePending = null;
+        this._render();
+        return;
+      }
+      const p = this._phasePending;
+      await this._feedback(p.session, p.rating, p.voluntary, el.dataset.phase, p.unusualDay);
+    }));
+  }
+
+  _styles() {
+    return `<style>
+      .jb-card{overflow:hidden;border-radius:var(--ha-card-border-radius,16px);background:var(--ha-card-background,var(--card-background-color));}
+      .jb-main{display:flex;align-items:center;gap:14px;padding:16px 18px;cursor:pointer;min-height:68px;box-sizing:border-box;}
+      .jb-main.shared-select{cursor:default}.jb-main.compact{padding-top:13px;padding-bottom:13px;min-height:62px}.jb-icon{width:46px;height:46px;border-radius:15px;display:flex;align-items:center;justify-content:center;background:color-mix(in srgb,var(--primary-color) 14%,transparent);flex:none}.jb-icon ha-icon{--mdc-icon-size:27px}.jb-icon.none{background:color-mix(in srgb,var(--success-color,#43a047) 16%,transparent)}.jb-icon.light{background:color-mix(in srgb,#f4b400 18%,transparent)}.jb-icon.warm{background:color-mix(in srgb,#ef6c00 18%,transparent)}.jb-icon.winter{background:color-mix(in srgb,#1976d2 18%,transparent)}.jb-icon.setup{background:color-mix(in srgb,var(--primary-color) 16%,transparent)}
+      .jb-copy{min-width:0;flex:1}.jb-kicker{font-size:12px;color:var(--secondary-text-color);font-weight:600;margin-bottom:3px}.jb-headline{font-size:19px;line-height:1.2;font-weight:700;color:var(--primary-text-color)}.jb-sub{font-size:13px;line-height:1.35;color:var(--secondary-text-color);margin-top:4px}.jb-chevron{color:var(--secondary-text-color);flex:none}.jb-badge{font-size:11px;padding:5px 8px;border-radius:999px;background:color-mix(in srgb,var(--primary-color) 13%,transparent);color:var(--primary-text-color);white-space:nowrap}
+      .jb-panel{padding:0 18px 18px}.jb-panel-title{font-size:18px;font-weight:700;margin:2px 0 7px}.jb-panel-text{font-size:13px;color:var(--secondary-text-color);line-height:1.45;margin-bottom:16px}.jb-question{margin:15px 0}.jb-question>div:first-child{font-weight:600;font-size:14px;margin-bottom:8px}.jb-scale{display:grid;grid-template-columns:repeat(5,1fr);gap:7px}.jb-scale button{border:1px solid var(--divider-color);background:color-mix(in srgb,var(--card-background-color) 82%,transparent);color:var(--primary-text-color);border-radius:11px;padding:8px 0;cursor:pointer}.jb-scale button.active{background:var(--primary-color);color:var(--text-primary-color,#fff);border-color:var(--primary-color)}.jb-scale-label{display:flex;justify-content:space-between;font-size:10px;color:var(--secondary-text-color);margin-top:5px}.jb-actions{display:flex;justify-content:flex-end;margin-top:18px}.jb-actions button.primary{border:0;border-radius:11px;padding:10px 15px;background:var(--primary-color);color:var(--text-primary-color,#fff);font-weight:600;cursor:pointer}
+      .jb-metrics{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 12px}.jb-metrics span,.jb-learning span{font-size:12px;padding:5px 9px;border-radius:999px;background:color-mix(in srgb,var(--primary-text-color) 6%,transparent);color:var(--secondary-text-color)}.jb-rain,.jb-context{display:flex;gap:8px;align-items:center;padding:10px 12px;border-radius:12px;background:color-mix(in srgb,#2196f3 10%,transparent);margin-bottom:12px;font-size:13px}.jb-rain.strong{background:color-mix(in srgb,#2196f3 18%,transparent);font-weight:600}.jb-section-title{font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--secondary-text-color);font-weight:700;margin:14px 0 7px}.jb-reasons{margin:0;padding-left:20px;color:var(--primary-text-color);font-size:13px;line-height:1.45}.jb-learning{display:flex;gap:8px;margin-top:14px}.jb-divider{height:1px;background:var(--divider-color);margin:17px 0}
+      .jb-feedback{padding:11px 0}.jb-feedback+.jb-feedback{border-top:1px solid var(--divider-color)}.jb-feedback-time{font-size:11px;color:var(--secondary-text-color);margin-bottom:5px}.jb-feedback-rec{font-weight:650;display:flex;justify-content:space-between;gap:10px}.jb-feedback-rec span{font-size:12px;font-weight:400;color:var(--secondary-text-color)}.jb-unusual{display:flex;align-items:center;gap:7px;margin-top:8px;font-size:11px;color:var(--secondary-text-color);font-weight:400}.jb-unusual input{margin:0}.jb-feedback-buttons{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px;margin-top:9px}.jb-feedback-buttons button,.jb-phase-buttons button{border:1px solid var(--divider-color);background:transparent;color:var(--primary-text-color);border-radius:10px;padding:8px 5px;font-size:11px;cursor:pointer}.jb-phase{margin-top:12px;padding:12px;border-radius:12px;background:color-mix(in srgb,var(--primary-color) 8%,transparent);font-size:13px;font-weight:600}.jb-phase-buttons{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}.jb-notice{margin-top:10px;font-size:12px;color:var(--success-color,#43a047)}
+      .jb-profile-row{display:flex;justify-content:flex-end;align-items:center;gap:8px;padding:9px 16px 0;font-size:11px;color:var(--secondary-text-color)}.jb-profile-row select{border:1px solid var(--divider-color);border-radius:9px;background:var(--card-background-color);color:var(--primary-text-color);padding:5px 8px}.jb-loading,.jb-error{padding:18px}.jb-error{display:flex;gap:9px;align-items:center;color:var(--error-color)}
+      @media(max-width:520px){.jb-feedback-buttons{grid-template-columns:repeat(2,1fr)}.jb-badge{display:none}}
+    </style>`;
+  }
+}
+
+class JackenBeraterCardEditor extends HTMLElement {
+  setConfig(config) { this._config = { ...config }; this._render(); }
+  set hass(hass) { this._hass = hass; this._render(); }
+  _render() {
+    if (!this._config) return;
+    const lang = (this._hass?.language || "de").toLowerCase().startsWith("de") ? "de" : "en";
+    const t = JB_I18N[lang];
+    this.innerHTML = `<div class="editor"><ha-textfield id="title" label="${t.editorTitle}" value="${jbEscape(this._config.title || "")}"></ha-textfield><label><ha-switch id="shared" ${this._config.shared ? "checked" : ""}></ha-switch><span>${t.editorShared}</span></label></div><style>.editor{display:grid;gap:16px;padding:8px 0}.editor label{display:flex;align-items:center;gap:10px}</style>`;
+    this.querySelector("#title")?.addEventListener("change", ev => this._update({ title: ev.target.value || undefined }));
+    this.querySelector("#shared")?.addEventListener("change", ev => this._update({ shared: ev.target.checked || undefined }));
+  }
+  _update(patch) {
+    this._config = { ...this._config, ...patch };
+    Object.keys(this._config).forEach(key => this._config[key] === undefined && delete this._config[key]);
+    this.dispatchEvent(new CustomEvent("config-changed", { detail: { config: this._config }, bubbles: true, composed: true }));
+  }
+}
+
+customElements.define("jackenberater-card", JackenBeraterCard);
+customElements.define("jackenberater-card-editor", JackenBeraterCardEditor);
+window.customCards = window.customCards || [];
+window.customCards.push({
+  type: "jackenberater-card",
+  name: "JackenBerater",
+  description: "Persönlich lernende Jacken- und Regenschutzempfehlung.",
+  preview: true,
+});
