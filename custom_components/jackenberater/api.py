@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 import logging
+import math
 from typing import Any
 
 import voluptuous as vol
@@ -66,10 +67,15 @@ def _runtime(hass: HomeAssistant, entry_id: str | None) -> tuple[ConfigEntry, di
     return entry, runtime
 
 
-def _can_use_shared_profiles(connection: websocket_api.ActiveConnection, entry: ConfigEntry) -> bool:
+def _is_shared_account(connection: websocket_api.ActiveConnection, entry: ConfigEntry) -> bool:
+    """Return whether this HA login is explicitly configured as a shared device."""
     own_id = str(connection.user.id)
     allowed = entry.data.get(CONF_SHARED_USER_IDS, [])
-    return bool(connection.user.is_admin) or (isinstance(allowed, list) and own_id in allowed)
+    return isinstance(allowed, list) and own_id in allowed
+
+
+def _can_use_shared_profiles(connection: websocket_api.ActiveConnection, entry: ConfigEntry) -> bool:
+    return bool(connection.user.is_admin) or _is_shared_account(connection, entry)
 
 
 async def _profile(
@@ -80,13 +86,20 @@ async def _profile(
 ) -> tuple[str, Any]:
     own_id = str(connection.user.id)
     own_name = str(connection.user.name or "Home-Assistant-Nutzer")
-    await manager.async_ensure_profile(own_id, own_name)
+
     if requested_id and requested_id != own_id:
         if not _can_use_shared_profiles(connection, entry):
             raise ValueError("shared_profile_access_denied")
         if requested_id not in manager.profile_ids:
             raise ValueError("profile_not_found")
         return requested_id, manager.get_model(requested_id)
+
+    # A configured wall-tablet/shared login is only a control surface. It must
+    # never silently become its own thermal comfort profile.
+    if _is_shared_account(connection, entry):
+        raise ValueError("shared_profile_required")
+
+    await manager.async_ensure_profile(own_id, own_name)
     return own_id, manager.get_model(own_id)
 
 
@@ -118,32 +131,57 @@ async def _recommendation(
     active_work_context = False
     work_entity = entry.data.get(CONF_WORK_WEATHER)
     if isinstance(work_entity, str) and work_entity:
-        windows = await _cached_work_windows(hass, entry, runtime)
+        actual_windows, planning_windows = await _cached_work_window_sets(
+            hass, entry, runtime
+        )
         work_forecast = list((coordinator.data or {}).get("work_forecast", []))
-        if windows:
-            work_start = windows[0][0]
+        now = dt_util.now()
+        if planning_windows:
+            work_start = (actual_windows or planning_windows)[0][0]
             work_points = [
                 point
                 for point in work_forecast
-                if any(start <= point.dt <= end for start, end in windows)
+                if point.dt > current.dt
+                and any(start <= point.dt <= end for start, end in planning_windows)
             ]
-            # Always remove home forecast points inside probable work windows.
-            # If work has no hourly forecast, a gap is more honest than silently
-            # showing the weather from the wrong location.
-            forecast = merge_location_timeline(forecast, work_forecast, windows)
+            # Planning relevance starts 30 minutes around the work period, but the
+            # current location does not. Home forecast points are replaced only for
+            # the planning timeline; current weather switches below using the actual
+            # unbuffered work window.
+            forecast = merge_location_timeline(
+                forecast, work_forecast, planning_windows
+            )
 
-        # When a shift is active right now, use the work weather as the current
-        # context. This is explicitly a calendar/shift inference, not tracking.
-        now = dt_util.now()
-        if windows and any(start <= now <= end for start, end in windows):
+        # Only the unbuffered actual work window may replace the *current* weather.
+        # The ±30 minute planning buffer is for “take it with you”, not a location
+        # claim about where the user already is.
+        if actual_windows and any(start <= now <= end for start, end in actual_windows):
             work_current = current_weather(hass, work_entity)
-            if work_current is not None:
-                current = work_current
-                active_work_context = True
-                # A selected living-room sensor is not representative at work.
-                indoor = float(
-                    entry.data.get(CONF_FALLBACK_INDOOR_TEMP, DEFAULT_FALLBACK_INDOOR_TEMP)
-                )
+            if work_current is None:
+                # During an actual work window, silently falling back to home
+                # weather would claim conditions for the wrong location. Prefer
+                # an explicit temporary gap until the work source is usable.
+                raise ValueError("work_weather_unavailable")
+            current = work_current
+            active_work_context = True
+            # A selected living-room sensor is not representative at work.
+            indoor = float(
+                entry.data.get(CONF_FALLBACK_INDOOR_TEMP, DEFAULT_FALLBACK_INDOOR_TEMP)
+            )
+
+    # If work planning extends the recommendation beyond the ordinary 12-hour
+    # weather window, the home timeline must be evaluated to the same claimed
+    # end time. Otherwise a home cold/rain event at e.g. +13 h could be skipped
+    # while a work point at +14 h makes the card claim a 14-hour horizon.
+    if work_points:
+        latest_work = max(point.dt for point in work_points)
+        work_horizon = math.ceil(
+            max(0.0, (latest_work - current.dt).total_seconds()) / 3600.0
+        )
+        max_horizon = max(
+            max_horizon,
+            min(CALENDAR_MAX_HOURS, work_horizon),
+        )
 
     work_name = None
     work_zone = entry.data.get(CONF_WORK_ZONE)
@@ -175,20 +213,24 @@ async def _recommendation(
     return recommendation
 
 
-async def _cached_work_windows(
+async def _cached_work_window_sets(
     hass: HomeAssistant,
     entry: ConfigEntry,
     runtime: dict[str, Any],
-) -> list[tuple[datetime, datetime]]:
+) -> tuple[list[tuple[datetime, datetime]], list[tuple[datetime, datetime]]]:
     now = dt_util.now()
     cache = runtime.setdefault("context_cache", {})
     updated = cache.get("updated")
     if isinstance(updated, datetime) and now - updated < timedelta(minutes=15):
-        return list(cache.get("work_windows", []))
-    windows = await work_windows(hass, entry, now)
+        return (
+            list(cache.get("work_windows_actual", [])),
+            list(cache.get("work_windows_planning", [])),
+        )
+    actual, planning = await work_windows(hass, entry, now, return_actual=True)
     cache["updated"] = now
-    cache["work_windows"] = windows
-    return windows
+    cache["work_windows_actual"] = actual
+    cache["work_windows_planning"] = planning
+    return actual, planning
 
 
 async def _cached_calendar_horizon(
@@ -231,6 +273,7 @@ def _learning_contexts(rec: Recommendation) -> dict[str, dict[str, Any]]:
         "jacket": rec.jacket_now,
         "temperature_c": rec.current_temperature_c,
         "wind_kmh": _effective_wind(rec.current_wind_kmh, rec.current_gust_kmh),
+        "wind_penalty_c": rec.current_wind_penalty_c,
         "condition": rec.current_condition,
         "effective_c": rec.effective_now_c,
         "transition_penalty_c": rec.transition_penalty_c,
@@ -239,6 +282,7 @@ def _learning_contexts(rec: Recommendation) -> dict[str, dict[str, Any]]:
         "jacket": rec.jacket_later,
         "temperature_c": rec.later_temperature_c,
         "wind_kmh": _effective_wind(rec.later_wind_kmh, rec.later_gust_kmh),
+        "wind_penalty_c": rec.later_wind_penalty_c,
         "condition": rec.later_condition,
         "effective_c": rec.later_effective_c,
         # Indoor->outdoor transition belongs to the deliberate 'go out now'
@@ -393,16 +437,23 @@ def ws_profiles(hass, connection, msg) -> None:
         return
     manager: ProfileManager = runtime["profiles"]
     own_id = str(connection.user.id)
-    summaries = (
-        manager.summaries()
-        if _can_use_shared_profiles(connection, entry)
-        else [manager.get_profile_summary(own_id)] if own_id in manager.profile_ids else []
-    )
+    shared_account = _is_shared_account(connection, entry)
+    if _can_use_shared_profiles(connection, entry):
+        summaries = [
+            summary
+            for summary in manager.summaries()
+            if not (shared_account and summary.get("id") == own_id)
+        ]
+    else:
+        summaries = (
+            [manager.get_profile_summary(own_id)] if own_id in manager.profile_ids else []
+        )
     connection.send_result(
         msg["id"],
         {
             "current_user_id": own_id,
             "shared_access": _can_use_shared_profiles(connection, entry),
+            "shared_account": shared_account,
             "profiles": summaries,
         },
     )

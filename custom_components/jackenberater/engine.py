@@ -13,6 +13,9 @@ import math
 from typing import Callable, Iterable
 
 from .const import (
+    BASE_LIGHT_THRESHOLD_C,
+    BASE_WARM_THRESHOLD_C,
+    BASE_WINTER_THRESHOLD_C,
     CALENDAR_MAX_HOURS,
     DISPLAY_COMPACT,
     DISPLAY_FULL,
@@ -30,9 +33,6 @@ from .const import (
 from .learning import PersonalModel
 from .models import Recommendation, ThermalResult, WeatherPoint
 
-BASE_LIGHT_THRESHOLD_C = 18.0
-BASE_WARM_THRESHOLD_C = 12.0
-BASE_WINTER_THRESHOLD_C = 5.0
 
 RAIN_CONDITIONS = {
     "rainy",
@@ -57,7 +57,8 @@ def assess_point(
     gust = max(wind, point.gust_kmh or wind)
     effective_wind = wind + max(0.0, gust - wind) * 0.25
 
-    wind_penalty = _wind_penalty(temp, effective_wind)
+    base_wind_penalty = _wind_penalty(temp, effective_wind)
+    wind_penalty = base_wind_penalty
     if wind_penalty > 0:
         wind_penalty *= max(0.55, min(1.65, 1.0 + model.wind_bias_c * 0.12))
 
@@ -65,10 +66,12 @@ def assess_point(
     humidity_adjustment = _humidity_adjustment(temp, point.humidity)
     rain_penalty = _rain_penalty(point)
 
+    base_transition_penalty = 0.0
     transition_penalty = 0.0
     if apply_transition and indoor_temperature_c is not None:
         delta = indoor_temperature_c - temp
-        transition_penalty = max(0.0, min(3.0, (delta - 4.0) * 0.18))
+        base_transition_penalty = max(0.0, min(3.0, (delta - 4.0) * 0.18))
+        transition_penalty = base_transition_penalty
         if transition_penalty > 0:
             transition_penalty = max(
                 0.0,
@@ -99,7 +102,24 @@ def assess_point(
         reasons.append("sun")
     if rain_penalty > 0:
         reasons.append("wet")
-    if abs(model.general_offset_c) >= 0.8:
+    # Mark personalization whenever the learned profile changes the actual
+    # garment class compared with the same weather evaluated with neutral
+    # personal parameters. This also catches learned wind/transition sensitivity,
+    # not just the general offset and learned jacket thresholds.
+    neutral_effective = (
+        temp
+        - base_wind_penalty
+        + solar_gain
+        + humidity_adjustment
+        - rain_penalty
+        - base_transition_penalty
+        + activity_context_c
+    )
+    neutral_jacket = _jacket_for_temperature(
+        neutral_effective,
+        (BASE_LIGHT_THRESHOLD_C, BASE_WARM_THRESHOLD_C, BASE_WINTER_THRESHOLD_C),
+    )
+    if jacket != neutral_jacket:
         reasons.append("personal")
 
     return ThermalResult(
@@ -188,18 +208,34 @@ def build_recommendation(
                     later_result = result
                     break
         else:
-            # If it only gets warmer, tell the card when the lightest useful
-            # class is reached instead.
+            # If conditions become milder, report the lightest class reached —
+            # but only once that class remains sufficient for the rest of the
+            # relevant period. A temporary warm spell must not produce
+            # "switch to light" if a warmer jacket is needed again later.
             minimum_rank = min(JACKET_RANK[result.jacket] for _, result in future_results)
             if minimum_rank < JACKET_RANK[current_result.jacket]:
-                for point, result in future_results:
-                    if JACKET_RANK[result.jacket] == minimum_rank:
+                for index, (point, result) in enumerate(future_results):
+                    if JACKET_RANK[result.jacket] != minimum_rank:
+                        continue
+                    if all(
+                        JACKET_RANK[later.jacket] <= minimum_rank
+                        for _, later in future_results[index:]
+                    ):
                         jacket_later = result.jacket
                         later_at = point.dt
                         later_point = point
                         later_result = result
                         break
 
+    # Work context must never pull an already-past provider point back into the
+    # future decision or bypass the global calendar/work maximum horizon. The API
+    # filters too; this engine-level guard keeps the pure decision function safe
+    # for every caller.
+    work_end = current.dt + timedelta(hours=CALENDAR_MAX_HOURS)
+    work_points = sorted(
+        (p for p in (work_points or []) if current.dt < p.dt <= work_end),
+        key=lambda p: p.dt,
+    )
     work_jacket: str | None = None
     work_context = bool(work_points)
     work_pairs: list[tuple[WeatherPoint, ThermalResult]] = []
@@ -228,15 +264,26 @@ def build_recommendation(
                 later_point = work_target_point
                 later_result = work_target_result
         # Work/calendar context may intentionally extend beyond the ordinary
-        # 9–12 h weather window, but never beyond the data that was supplied.
+        # 9–12 h weather window, but never beyond CALENDAR_MAX_HOURS.
         latest_work = max((p.dt for p in work_points), default=None)
         if latest_work is not None:
-            work_hours = int(max(0.0, (latest_work - current.dt).total_seconds()) / 3600.0 + 0.999)
+            work_hours = math.ceil(max(0.0, (latest_work - current.dt).total_seconds()) / 3600.0)
             horizon_hours = max(horizon_hours, min(CALENDAR_MAX_HOURS, work_hours))
+
+    # Keep the Recommendation model unambiguous: later_* describes a real final
+    # jacket-class change. A work override may cancel a previously detected home
+    # change (for example Warm -> Light at home, but Warm again at work). In that
+    # case no future feedback target may survive.
+    if jacket_later == current_result.jacket:
+        later_at = None
+        later_point = None
+        later_result = None
 
     rain_status = _rain_status(current, horizon_points) if rain_advice else RAIN_NONE
     if rain_advice and work_points:
-        work_rain = _rain_status(work_points[0], work_points[1:])
+        # Work points are future-only. Do not treat the first work forecast
+        # point as if rain were already falling right now.
+        work_rain = _rain_status_forecast_only(work_points)
         rain_rank = {RAIN_NONE: 0, RAIN_TAKE: 1, RAIN_RECOMMENDED: 2}
         if rain_rank[work_rain] > rain_rank[rain_status]:
             rain_status = work_rain
@@ -246,11 +293,27 @@ def build_recommendation(
         effective_values.extend(result.effective_temperature_c for _, result in work_pairs)
 
     class_change = jacket_later != current_result.jacket
-    near_threshold = current_result.threshold_margin_c <= 1.5
+    # Automatic feedback may only be triggered by contexts that the session can
+    # actually learn from later. Arbitrary intermediate forecast points are still
+    # used for the recommendation, but must not create a feedback target that is
+    # unavailable in the stored start/later learning contexts.
+    feedback_results = [current_result]
+    if class_change and later_result is not None:
+        feedback_results.append(later_result)
+    near_threshold = min(
+        (result.threshold_margin_c for result in feedback_results),
+        default=current_result.threshold_margin_c,
+    ) <= 1.5
     unusual_weather = (
-        current_result.wind_penalty_c >= 1.5
-        or current_result.rain_penalty_c > 0
-        or rain_status != RAIN_NONE
+        any(result.wind_penalty_c >= 1.5 for result in feedback_results)
+        or any(result.rain_penalty_c > 0 for result in feedback_results)
+    )
+    decision_confidence = model.decision_confidence(current_result.jacket, jacket_later)
+    # Full hiding is only safe when forecast data continuously covers the
+    # horizon we actually claim in this recommendation. Work/calendar context
+    # can extend that beyond the normal 9-hour base window.
+    forecast_coverage_complete = _forecast_covers_horizon(
+        current.dt, forecast, horizon_hours
     )
     display = _display_mode(
         current_result,
@@ -258,11 +321,20 @@ def build_recommendation(
         rain_status,
         class_change=class_change,
         work_jacket=work_jacket,
+        allow_hidden=(
+            model.total_feedback >= 10
+            and decision_confidence >= 0.65
+            and forecast_coverage_complete
+        ),
     )
 
     reasons = list(current_result.reasons)
     if class_change:
         reasons.append("forecast_change")
+        # Preserve the cause of the decisive later point (for example wind or
+        # sunshine) instead of reducing every future change to a generic label.
+        if later_result is not None:
+            reasons.extend(later_result.reasons)
     if work_jacket and JACKET_RANK[work_jacket] > JACKET_RANK[current_result.jacket]:
         reasons.append("work_location")
     if rain_status != RAIN_NONE:
@@ -284,13 +356,16 @@ def build_recommendation(
         effective_now_c=current_result.effective_temperature_c,
         min_effective_c=round(min(effective_values), 1),
         max_effective_c=round(max(effective_values), 1),
-        confidence=round(model.confidence(), 3),
+        # This belongs to the recommendation and therefore reports confidence in
+        # this concrete jacket decision, not merely overall profile maturity.
+        confidence=round(decision_confidence, 3),
         reasons=list(dict.fromkeys(reasons)),
         current_temperature_c=round(current.temperature_c, 1),
         current_wind_kmh=round(current.wind_kmh, 1) if current.wind_kmh is not None else None,
         current_gust_kmh=round(current.gust_kmh, 1) if current.gust_kmh is not None else None,
         current_condition=current.condition,
         transition_penalty_c=current_result.transition_penalty_c,
+        current_wind_penalty_c=current_result.wind_penalty_c,
         later_temperature_c=(
             round(later_point.temperature_c, 1) if later_point is not None else None
         ),
@@ -307,6 +382,9 @@ def build_recommendation(
         later_condition=later_point.condition if later_point is not None else None,
         later_effective_c=(
             later_result.effective_temperature_c if later_result is not None else None
+        ),
+        later_wind_penalty_c=(
+            later_result.wind_penalty_c if later_result is not None else None
         ),
         work_context=work_context,
         work_jacket=work_jacket,
@@ -347,19 +425,64 @@ def _nearest_threshold_margin(
     return min(abs(effective_c - threshold) for threshold in thresholds)
 
 
+def _smoothstep(edge0: float, edge1: float, value: float) -> float:
+    """Return a smooth 0..1 transition between two edges."""
+    if edge1 <= edge0:
+        return 1.0 if value >= edge1 else 0.0
+    t = max(0.0, min(1.0, (value - edge0) / (edge1 - edge0)))
+    return t * t * (3.0 - 2.0 * t)
+
+
+def _cold_wind_penalty(temp_c: float, wind_kmh: float) -> float:
+    """Cold-range wind penalty with a smooth low-speed transition.
+
+    Environment and Climate Change Canada documents a separate low-wind
+    equation below roughly 5 km/h. Blending the low- and regular-speed forms
+    around that boundary avoids a sensor-noise step at 4.8/5 km/h.
+    """
+    if wind_kmh <= 0.0:
+        return 0.0
+
+    low_wind_chill = temp_c + ((-1.59 + 0.1345 * temp_c) / 5.0) * wind_kmh
+    low_penalty = max(0.0, temp_c - low_wind_chill)
+
+    v16 = max(0.1, wind_kmh) ** 0.16
+    regular_wind_chill = (
+        13.12
+        + 0.6215 * temp_c
+        - 11.37 * v16
+        + 0.3965 * temp_c * v16
+    )
+    regular_penalty = max(0.0, temp_c - regular_wind_chill)
+
+    speed_blend = _smoothstep(4.0, 6.0, wind_kmh)
+    return min(8.0, low_penalty * (1.0 - speed_blend) + regular_penalty * speed_blend)
+
+
 def _wind_penalty(temp_c: float, wind_kmh: float) -> float:
-    if wind_kmh < 4.8:
+    """Return a continuous comfort penalty for wind.
+
+    The official cold-range equations are used as an anchor, then smoothly
+    blended into a deliberately small comfort correction above the classic
+    wind-chill range. This keeps the heuristic stable around 5 km/h and 10 °C.
+    """
+    if wind_kmh <= 0.0 or temp_c >= 20.0:
         return 0.0
-    if temp_c <= 10.0:
-        v16 = wind_kmh ** 0.16
-        wind_chill = 13.12 + 0.6215 * temp_c - 11.37 * v16 + 0.3965 * temp_c * v16
-        return max(0.0, min(8.0, temp_c - wind_chill))
-    if temp_c >= 20.0:
-        return 0.0
-    # Above the official wind-chill range, taper to a small comfort correction
-    # instead of extending the wind-chill formula beyond its intended domain.
-    intensity = max(0.0, min(1.0, (20.0 - temp_c) / 10.0))
-    return min(2.0, max(0.0, wind_kmh - 5.0) * 0.04 * intensity)
+
+    cold_penalty = _cold_wind_penalty(temp_c, wind_kmh)
+    mild_intensity = max(0.0, min(1.0, (20.0 - temp_c) / 10.0))
+    mild_penalty = min(2.0, max(0.0, wind_kmh - 5.0) * 0.04 * mild_intensity)
+
+    if temp_c <= 8.0:
+        return cold_penalty
+    if temp_c >= 14.0:
+        return mild_penalty
+
+    temperature_blend = _smoothstep(8.0, 14.0, temp_c)
+    return (
+        cold_penalty * (1.0 - temperature_blend)
+        + mild_penalty * temperature_blend
+    )
 
 
 def _solar_gain(condition: str | None, cloud: float | None) -> float:
@@ -367,7 +490,10 @@ def _solar_gain(condition: str | None, cloud: float | None) -> float:
     if condition == "sunny":
         base = 2.0
     elif condition == "partlycloudy":
-        base = 0.9
+        # Hourly HA forecasts do not guarantee an explicit day/night flag and
+        # there is no standardized "partlycloudy-night" state. Be conservative:
+        # a few clouds alone are not proof of useful solar warming.
+        base = 0.0
     elif condition == "clear-night":
         base = -0.35
     else:
@@ -378,14 +504,24 @@ def _solar_gain(condition: str | None, cloud: float | None) -> float:
 
 
 def _humidity_adjustment(temp_c: float, humidity: float | None) -> float:
+    """Small humidity correction with smooth temperature transitions."""
     if humidity is None:
         return 0.0
     humidity = max(0.0, min(100.0, humidity))
-    if temp_c <= 10.0 and humidity > 80.0:
-        return -min(0.55, (humidity - 80.0) * 0.0275)
-    if temp_c >= 24.0 and humidity > 65.0:
-        return min(1.0, (humidity - 65.0) * 0.03)
-    return 0.0
+
+    cold_base = 0.0
+    if humidity > 80.0:
+        cold_base = -min(0.55, (humidity - 80.0) * 0.0275)
+    # Full cold-damp effect through 10 °C, then fade it out by 14 °C.
+    cold_strength = 1.0 - _smoothstep(10.0, 14.0, temp_c)
+
+    warm_base = 0.0
+    if humidity > 65.0:
+        warm_base = min(1.0, (humidity - 65.0) * 0.03)
+    # Warm-humid discomfort fades in gradually instead of jumping at 24 °C.
+    warm_strength = _smoothstep(22.0, 26.0, temp_c)
+
+    return cold_base * cold_strength + warm_base * warm_strength
 
 
 def _rain_penalty(point: WeatherPoint) -> float:
@@ -400,8 +536,14 @@ def _rain_penalty(point: WeatherPoint) -> float:
 
 
 def _rain_status(current: WeatherPoint, forecast: list[WeatherPoint]) -> str:
+    """Combine observed rain now with probabilistic/forecast rain later."""
     if (current.condition or "").lower() in RAIN_CONDITIONS:
         return RAIN_RECOMMENDED
+    return _rain_status_forecast_only(forecast)
+
+
+def _rain_status_forecast_only(forecast: list[WeatherPoint]) -> str:
+    """Evaluate future rain without pretending the first point is current rain."""
     relevant = forecast
     if not relevant:
         return RAIN_NONE
@@ -414,7 +556,15 @@ def _rain_status(current: WeatherPoint, forecast: list[WeatherPoint]) -> str:
     max_consecutive_rain = 0
     rainy_points = 0
     pouring = False
+    previous_dt: datetime | None = None
     for point, probability in zip(relevant, probabilities, strict=False):
+        if previous_dt is not None and point.dt - previous_dt > timedelta(minutes=90):
+            # Missing hours break a rain streak. Two rainy points five hours apart
+            # are not a continuous rain period just because they are adjacent in
+            # the provider list.
+            consecutive_high = 0
+            consecutive_rain = 0
+        previous_dt = point.dt
         if probability >= 60.0:
             consecutive_high += 1
             max_consecutive_high = max(max_consecutive_high, consecutive_high)
@@ -448,6 +598,38 @@ def _activity_for(
     return float(fn(when)) if fn is not None else fixed_c
 
 
+def _forecast_covers_horizon(
+    origin: datetime,
+    forecast: list[WeatherPoint],
+    horizon_hours: int,
+    *,
+    max_gap: timedelta = timedelta(minutes=90),
+) -> bool:
+    """Return whether forecast data continuously covers the normal horizon.
+
+    A far-away point alone must never make a recommendation look fully covered.
+    Hourly providers may be slightly offset from ``origin``, so up to 90 minutes
+    between points (and at both edges) is tolerated.
+    """
+    if horizon_hours <= 0:
+        return False
+    target = origin + timedelta(hours=horizon_hours)
+    points = sorted(
+        (point for point in forecast if origin < point.dt <= target + max_gap),
+        key=lambda point: point.dt,
+    )
+    if not points or points[0].dt - origin > max_gap:
+        return False
+    previous = points[0].dt
+    for point in points[1:]:
+        if point.dt - previous > max_gap:
+            return False
+        previous = point.dt
+        if previous >= target:
+            return True
+    return target - previous <= max_gap
+
+
 def _select_horizon(
     origin: datetime,
     forecast: list[WeatherPoint],
@@ -459,37 +641,64 @@ def _select_horizon(
     activity_context_fn: Callable[[datetime], float] | None = None,
 ) -> tuple[list[WeatherPoint], int]:
     if not forecast:
-        return [], 1
+        return [], 0
 
     base_end = origin + timedelta(hours=base_horizon_hours)
     max_end = origin + timedelta(hours=max_horizon_hours)
     points = [point for point in forecast if origin < point.dt <= max_end]
     if not points:
-        return [], 1
+        return [], 0
     base = [point for point in points if point.dt <= base_end]
     extension = [point for point in points if point.dt > base_end]
 
     def actual_hours(selected: list[WeatherPoint]) -> int:
         if not selected:
-            return 1
-        return max(1, min(max_horizon_hours, math.ceil((selected[-1].dt - origin).total_seconds() / 3600.0)))
+            return 0
+        return max(
+            0,
+            min(
+                max_horizon_hours,
+                math.ceil((selected[-1].dt - origin).total_seconds() / 3600.0),
+            ),
+        )
 
     if not extension or not base:
         selected = base or points
         return selected, actual_hours(selected)
 
+    base_last_point = base[-1]
     base_last = assess_point(
-        base[-1], model,
-        activity_context_c=_activity_for(base[-1].dt, activity_context_c, activity_context_fn),
+        base_last_point,
+        model,
+        activity_context_c=_activity_for(
+            base_last_point.dt, activity_context_c, activity_context_fn
+        ),
     )
-    ext_last = assess_point(
-        extension[-1], model,
-        activity_context_c=_activity_for(extension[-1].dt, activity_context_c, activity_context_fn),
+    extension_results = [
+        (
+            point,
+            assess_point(
+                point,
+                model,
+                activity_context_c=_activity_for(
+                    point.dt, activity_context_c, activity_context_fn
+                ),
+            ),
+        )
+        for point in extension
+    ]
+
+    # The extension decision must inspect every point. A short cold/wind/rain
+    # event at hour 10 must not disappear merely because hour 12 looks like
+    # hour 9 again.
+    relevant_extension = any(
+        abs(point.temperature_c - base_last_point.temperature_c) >= 2.0
+        or abs(result.effective_temperature_c - base_last.effective_temperature_c) >= 2.0
+        or result.jacket != base_last.jacket
+        for point, result in extension_results
     )
-    temp_trend = abs(extension[-1].temperature_c - base[-1].temperature_c)
-    class_change = base_last.jacket != ext_last.jacket
-    rain_change = _rain_status(base[-1], extension) != RAIN_NONE
-    selected = points if (temp_trend >= 2.0 or class_change or rain_change) else base
+    rain_change = _rain_status_forecast_only(extension) != RAIN_NONE
+    selected = points if (relevant_extension or rain_change) else base
     return selected, actual_hours(selected)
 
 
@@ -500,6 +709,7 @@ def _display_mode(
     *,
     class_change: bool,
     work_jacket: str | None,
+    allow_hidden: bool,
 ) -> str:
     jackets = [current.jacket, *(result.jacket for _, result in future)]
     stable = all(j == current.jacket for j in jackets)
@@ -513,7 +723,10 @@ def _display_mode(
         and current.threshold_margin_c >= 3.0
         and all(result.threshold_margin_c >= 2.5 for _, result in future)
     ):
-        return DISPLAY_HIDDEN
+        # A young/uncertain profile must remain reachable so the user can correct
+        # an overconfident “no jacket” assumption. Once enough personal evidence
+        # exists, the fully hidden summer state can keep the dashboard quiet.
+        return DISPLAY_HIDDEN if allow_hidden else DISPLAY_COMPACT
 
     if (
         stable

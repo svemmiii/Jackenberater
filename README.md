@@ -1,10 +1,10 @@
-# 🧥 JackenBerater v0.1.0
+# 🧥 JackenBerater v0.1.1
 
 Eine schlanke Home-Assistant-Integration, die nicht nur auf die Außentemperatur schaut, sondern eine **persönliche Jackenempfehlung** aus Wetter, Wetterverlauf, Innen→Außen-Wechsel und freiwilligem Nutzerfeedback ableitet.
 
 > **Status:** erste Testversion. Der Name „JackenBerater“ ist noch nicht als endgültiger Projektname gedacht.
 
-## Was v0.1.0 kann
+## Was v0.1.1 kann
 
 - Empfehlung in vier Wärmestufen:
   - Keine Jacke
@@ -23,8 +23,9 @@ Eine schlanke Home-Assistant-Integration, die nicht nur auf die Außentemperatur
 - freiwilliges Feedback jederzeit möglich
 - alte Feedbacks zeigen klar Datum/Uhrzeit und die damalige Empfehlung
 - kompakter Speicher: keine unbegrenzt wachsende Trainingshistorie
-- optionale Arbeits-Wetterquelle, Arbeits-/Schichtkalender und Urlaubskalender
-- optionaler rotierender Schichtzyklus, unabhängig vom Wochentag
+- optionale Arbeits-Wetterquelle mit **normaler 5-Tage-Woche als Standard**
+- optionaler Urlaubs-/Abwesenheitskalender zum Aussetzen wahrscheinlicher Arbeitszeiten
+- optionaler rotierender Schichtzyklus für Schichtarbeiter, unabhängig vom Wochentag
 - eigene Lovelace-Karte mit visueller Einrichtung und Feedback
 - Verwaltung über normale HA-Konfig-/Diagnoseentitäten: Lernen pausieren, Lernprofil zurücksetzen, letzte Bewertung zurücknehmen
 
@@ -44,6 +45,8 @@ Damit wächst das Lernprofil auch nach mehreren Jahren nicht proportional zur Za
 ## Installation
 
 ### HACS Custom Repository
+
+Die Integration bringt ihr lokales Brand-Icon direkt unter `custom_components/jackenberater/brand/icon.png` mit.
 
 1. Repository in HACS als **Integration** hinzufügen.
 2. JackenBerater installieren.
@@ -88,12 +91,22 @@ Falls Arbeit klimatisch deutlich anders ist als zuhause:
 
 - vorhandene HA-Zone „Arbeit“ auswählen
 - eine Wetter-Entity für den Arbeitsort auswählen
-- optional Arbeits-/Schichtkalender
+- Arbeitsmodell wählen
 - optional Urlaubs-/Abwesenheitskalender
 
-Der Arbeitskalender wird nur zeitlich ausgewertet und ist – wenn ausgewählt – die maßgebliche Zeitquelle: **kein Eintrag bedeutet frei**, ein zusätzlich konfigurierter Schichtzyklus springt dann nicht heimlich ein. Ein Urlaubs-/Abwesenheitskalender zieht nur die tatsächlich überlappenden Zeitabschnitte aus einem Arbeitsfenster ab.
+Für normale Nutzer gilt standardmäßig **Montag bis Freitag, 08:00–17:00 Uhr**. Start und Ende können geändert werden. Für die Planung wird automatisch ein kleiner Puffer von etwa ±30 Minuten verwendet – eine Fahrzeit muss deshalb nicht abgefragt werden. Dieser Puffer macht den Arbeitsort aber **nicht** zum aktuellen Standort: Für „jetzt“ wechselt die Wetterquelle erst innerhalb der tatsächlichen Arbeitszeit.
 
-Eine Fahrzeit wird absichtlich **nicht** abgefragt. Arbeitsfenster erhalten einen kleinen Puffer von etwa ±30 Minuten.
+Das Arbeitsmodell wird nur angewendet, wenn auch eine **Wetterquelle am Arbeitsort** gewählt ist. Ohne diese bleibt der Arbeitskontext bewusst inaktiv; die übrige Jackenberatung funktioniert normal weiter.
+
+Verfügbare Arbeitsmodelle:
+
+- **Arbeit nicht berücksichtigen**
+- **Normale 5-Tage-Woche**
+- **Rotierendes Schichtsystem**
+
+Ein optionaler Urlaubs-/Abwesenheitskalender erzeugt niemals selbst Arbeit. Er kann nur Zeiträume aussetzen, in denen der Berater sonst Arbeit vermuten würde. Wird eine komplette Schicht als abwesend markiert, verschwinden auch die zugehörigen Planungs-Puffer; bei teilweiser Abwesenheit bleibt genau dieser Zeitraum ausgespart. Kalenderinhalte wie Titel oder Beschreibung werden weiterhin nicht analysiert.
+
+Während der tatsächlichen Arbeitszeit verwendet JackenBerater die aktuelle Wetterquelle des Arbeitsorts. Ist diese vorübergehend nicht verfügbar, wird bewusst **nicht** still auf das Zuhause-Wetter zurückgefallen – die Karte meldet die fehlenden Arbeitswetterdaten stattdessen transparent.
 
 ### Rotierender Schichtzyklus – optional
 
@@ -115,7 +128,7 @@ Beim ersten bewussten Öffnen der Karte fragt der Berater vier fünfstufige Star
 1. Wie schnell frierst du?
 2. Wie schnell wird dir zu warm?
 3. Wie empfindlich bist du bei Wind?
-4. Wie oft bist du abends länger unterwegs?
+4. Wenn du abends länger draußen bist: eher ruhig/stehend oder aktiv in Bewegung?
 
 Diese Antworten sind nur Startwerte. Echtes Feedback darf das Profil sofort verändern.
 
@@ -140,6 +153,8 @@ Die Lernrate fällt nie auf null, sodass sich ein Profil auch nach Jahren langsa
 
 Eine sichtbare Dashboard-Karte gilt **nicht** als Nutzung. Erst ein bewusster Tap auf den Berater erzeugt eine Empfehlungssession.
 
+Eine neue Empfehlung wird **nicht sofort** zur Bewertung angeboten. Normalerweise wird Feedback frühestens nach etwa 30 Minuten freigegeben. Wenn die Empfehlung ausdrücklich auf einen späteren Jackenwechsel zielt, wartet der Berater bis etwa 30 Minuten nach diesem späteren Zeitpunkt. Freiwilliges Feedback kann über einen kleinen manuellen Weg trotzdem jederzeit bewusst abgegeben werden.
+
 Feedback:
 
 - 🥶 Zu kalt
@@ -153,9 +168,9 @@ Der Nutzer kann außerdem freiwillig eine Empfehlung bewerten, selbst wenn der L
 
 ## Gemeinsames Wandtablet
 
-Im Karteneditor kann **Gemeinsames Wandtablet** aktiviert werden.
+In der Integration können bestimmte Home-Assistant-Konten als **gemeinsame Tablet-/Wandtablet-Konten** freigegeben werden. Die Karte erkennt diese Konten automatisch.
 
-Auf persönlichen Geräten verwendet JackenBerater automatisch die Home-Assistant-User-ID. Auf einem gemeinsamen Tablet kann vor der Beratung ein vorhandenes Komfortprofil ausgewählt werden. **Fremde Profile dürfen nur Administratoren oder ausdrücklich in der Integration freigegebene HA-Konten verwenden.** Es wird keine Anwesenheit oder Geräteposition geraten.
+Ein solches Tablet bekommt **kein eigenes Wärmeprofil**. Stattdessen fragt die Karte vor der Beratung direkt, für welches vorhandene Komfortprofil sie rechnen soll. Auf persönlichen Geräten verwendet JackenBerater weiterhin automatisch die eigene Home-Assistant-User-ID. **Fremde Profile dürfen nur Administratoren oder ausdrücklich freigegebene HA-Konten verwenden.** Es wird keine Anwesenheit oder Geräteposition geraten.
 
 ## Karte hinzufügen
 
@@ -165,7 +180,7 @@ Danach im Dashboard eine Karte hinzufügen und **JackenBerater** auswählen.
 
 Falls Lovelace komplett über YAML verwaltet wird, die Modul-Ressource manuell eintragen:
 
-`/jackenberater/frontend/jackenberater-card.js?v=0.1.0`
+`/jackenberater/frontend/jackenberater-card.js?v=0.1.1`
 
 Karten-YAML:
 
@@ -191,7 +206,7 @@ Damit soll die Karte nicht im Hochsommer monatelang Platz verschwenden.
 
 ## Berechnungsmodell
 
-v0.1.0 verwendet bewusst **kein großes ML-Modell** und auch nicht den vollständigen UTCI-Polynomblock. Stattdessen nutzt die Engine eine transparente, kleine thermische Bewertung mit den gleichen wichtigen Kategorien: Temperatur, Wind, Feuchte, Strahlung/Sonne, Nässe, Aktivitätskontext und Bekleidung.
+v0.1.1 verwendet bewusst **kein großes ML-Modell** und auch nicht den vollständigen UTCI-Polynomblock. Stattdessen nutzt die Engine eine transparente, kleine thermische Bewertung mit den gleichen wichtigen Kategorien: Temperatur, Wind, Feuchte, Strahlung/Sonne, Nässe, Aktivitätskontext und Bekleidung.
 
 Im kalten Bereich wird die offizielle Wind-Chill-Gleichung nur innerhalb ihres sinnvollen Temperatur-/Windbereichs verwendet. Oberhalb davon wird Wind deutlich schwächer als Komfortkorrektur gewertet.
 
@@ -212,6 +227,6 @@ Bei Kalendern werden in der normalen Logik nur Start-/Endzeiten genutzt. Titel, 
 
 JackenBerater ist ein Komfortberater und keine Sicherheits- oder Gesundheitsanwendung. Bei extremen Wetterlagen, amtlichen Warnungen oder gesundheitlichen Besonderheiten haben geeignete Schutzmaßnahmen und offizielle Warnhinweise Vorrang.
 
-## Teststatus v0.1.0
+## Teststatus v0.1.1
 
-Die lokale Regressionstest-Suite umfasst aktuell **36 Python-Tests** sowie einen funktionalen JavaScript-Test für den Feedback-Session-Pfad. Zusätzlich prüft der CI-Workflow Python-Kompilierung, JavaScript-Syntax, hassfest und HACS.
+Die lokale Regressionstest-Suite umfasst aktuell **99 Python-Tests** sowie einen funktionalen JavaScript-Test für den Feedback-/Frontend-Pfad. Dazu gehören inzwischen auch Glue-Tests für Arbeitswetter-Kontext und Reconfigure-Verhalten. Zusätzlich prüft der CI-Workflow Python-Kompilierung, JavaScript-Syntax, hassfest und HACS.

@@ -47,7 +47,7 @@ def load(name: str):
     return module
 
 
-load("const")
+const = load("const")
 context = load("context")
 
 
@@ -60,8 +60,6 @@ def test_vacation_only_suppresses_overlapping_work_window():
     vacation = [(base + timedelta(days=1, hours=4), base + timedelta(days=2))]
     filtered = context._subtract_blocked_windows(work, vacation)
     assert filtered[0] == work[0]
-    # The second shift is kept only until the absence starts instead of being
-    # discarded wholesale.
     assert filtered[1] == (work[1][0], vacation[0][0])
 
 
@@ -72,18 +70,231 @@ def test_non_overlapping_vacation_keeps_work_window():
     assert context._subtract_blocked_windows(work, vacation) == work
 
 
-def test_empty_work_calendar_is_authoritative_over_shift_cycle():
+def test_default_work_model_is_monday_to_friday_with_buffer():
+    # 2026-09-01 is a Tuesday.
+    entry = types.SimpleNamespace(data={
+        const.CONF_WORK_MODE: const.WORK_MODE_WEEKDAY,
+        const.CONF_WORKDAY_START: "08:00",
+        const.CONF_WORKDAY_END: "17:00",
+    })
+    now = datetime(2026, 9, 1, 7, tzinfo=timezone.utc)
+    windows = context._weekday_windows(entry, now, now + timedelta(hours=12))
+    assert (datetime(2026, 9, 1, 7, 30, tzinfo=timezone.utc), datetime(2026, 9, 1, 17, 30, tzinfo=timezone.utc)) in windows
+
+
+def test_weekend_has_no_default_work_window():
+    entry = types.SimpleNamespace(data={
+        const.CONF_WORK_MODE: const.WORK_MODE_WEEKDAY,
+        const.CONF_WORKDAY_START: "08:00",
+        const.CONF_WORKDAY_END: "17:00",
+    })
+    # 2026-09-05 is Saturday; keep the horizon inside the weekend.
+    now = datetime(2026, 9, 5, 8, tzinfo=timezone.utc)
+    windows = context._weekday_windows(entry, now, now + timedelta(hours=12))
+    assert windows == []
+
+
+def test_shift_mode_uses_rotating_cycle_instead_of_weekday_default():
+    entry = types.SimpleNamespace(data={
+        const.CONF_WORK_MODE: const.WORK_MODE_SHIFT,
+        const.CONF_SHIFT_PATTERN: "F,X",
+        const.CONF_SHIFT_ANCHOR_DATE: "2026-09-01",
+        const.CONF_SHIFT_EARLY_START: "06:00",
+        const.CONF_SHIFT_EARLY_END: "14:00",
+    })
+    start = datetime(2026, 9, 1, 5, tzinfo=timezone.utc)
+    windows = context._cycle_windows(entry, start, start + timedelta(days=2))
+    assert any(a == datetime(2026, 9, 1, 5, 30, tzinfo=timezone.utc) for a, _ in windows)
+    assert not any(a.date().isoformat() == "2026-09-02" for a, _ in windows)
+
+
+def test_work_windows_defaults_to_weekday_when_no_mode_is_stored():
     class Services:
         async def async_call(self, *args, **kwargs):
-            entity_id = kwargs.get("target", {}).get("entity_id")
-            return {entity_id: {"events": []}}
+            return {}
+
+    hass = types.SimpleNamespace(services=Services())
+    entry = types.SimpleNamespace(data={})
+    now = datetime(2026, 9, 1, 7, tzinfo=timezone.utc)
+    windows = asyncio.run(context.work_windows(hass, entry, now, horizon_hours=12))
+    assert windows
+
+
+def test_actual_work_window_has_no_planning_buffer():
+    entry = types.SimpleNamespace(data={
+        const.CONF_WORK_MODE: const.WORK_MODE_WEEKDAY,
+        const.CONF_WORKDAY_START: "08:00",
+        const.CONF_WORKDAY_END: "17:00",
+    })
+    now = datetime(2026, 9, 1, 7, tzinfo=timezone.utc)
+    actual = context._weekday_windows(
+        entry, now, now + timedelta(hours=12), buffered=False
+    )
+    assert (
+        datetime(2026, 9, 1, 8, 0, tzinfo=timezone.utc),
+        datetime(2026, 9, 1, 17, 0, tzinfo=timezone.utc),
+    ) in actual
+
+
+def test_work_windows_can_return_actual_and_planning_sets():
+    class Services:
+        async def async_call(self, *args, **kwargs):
+            return {}
 
     hass = types.SimpleNamespace(services=Services())
     entry = types.SimpleNamespace(data={
-        context.CONF_WORK_CALENDAR: "calendar.work",
-        context.CONF_SHIFT_PATTERN: "F,F,S,S,N,N,N,X,X",
-        context.CONF_SHIFT_ANCHOR_DATE: "2026-09-01",
+        const.CONF_WORK_MODE: const.WORK_MODE_WEEKDAY,
+        const.CONF_WORKDAY_START: "08:00",
+        const.CONF_WORKDAY_END: "17:00",
+    })
+    now = datetime(2026, 9, 1, 7, tzinfo=timezone.utc)
+    actual, planning = asyncio.run(
+        context.work_windows(hass, entry, now, horizon_hours=12, return_actual=True)
+    )
+    assert actual[0][0].hour == 8
+    assert planning[0][0].hour == 7 and planning[0][0].minute == 30
+
+
+def test_evening_activity_answer_maps_to_actual_activity_not_outing_frequency():
+    evening = datetime(2026, 9, 1, 19, tzinfo=timezone.utc)
+    noon = datetime(2026, 9, 1, 12, tzinfo=timezone.utc)
+    assert context.activity_context_c(evening, 1) < 0
+    assert context.activity_context_c(evening, 5) > context.activity_context_c(evening, 1)
+    assert context.activity_context_c(noon, 1) == 0
+
+
+def test_full_shift_absence_removes_planning_buffer_too():
+    async def run():
+        entry = types.SimpleNamespace(data={
+            const.CONF_WORK_MODE: const.WORK_MODE_WEEKDAY,
+            const.CONF_WORKDAY_START: "08:00",
+            const.CONF_WORKDAY_END: "17:00",
+            const.CONF_VACATION_CALENDAR: "calendar.vacation",
+        })
+        now = datetime(2026, 9, 1, 7, tzinfo=timezone.utc)
+        original = context._calendar_windows
+
+        async def fake_calendar(*args, **kwargs):
+            return [(
+                datetime(2026, 9, 1, 8, tzinfo=timezone.utc),
+                datetime(2026, 9, 1, 17, tzinfo=timezone.utc),
+            )]
+
+        context._calendar_windows = fake_calendar
+        try:
+            actual, planning = await context.work_windows(
+                types.SimpleNamespace(), entry, now, horizon_hours=12, return_actual=True
+            )
+        finally:
+            context._calendar_windows = original
+        assert actual == []
+        assert planning == []
+
+    asyncio.run(run())
+
+
+def test_partial_absence_stays_a_gap_in_planning_window():
+    async def run():
+        entry = types.SimpleNamespace(data={
+            const.CONF_WORK_MODE: const.WORK_MODE_WEEKDAY,
+            const.CONF_WORKDAY_START: "08:00",
+            const.CONF_WORKDAY_END: "17:00",
+            const.CONF_VACATION_CALENDAR: "calendar.vacation",
+        })
+        now = datetime(2026, 9, 1, 7, tzinfo=timezone.utc)
+        original = context._calendar_windows
+
+        async def fake_calendar(*args, **kwargs):
+            return [(
+                datetime(2026, 9, 1, 12, tzinfo=timezone.utc),
+                datetime(2026, 9, 1, 13, tzinfo=timezone.utc),
+            )]
+
+        context._calendar_windows = fake_calendar
+        try:
+            actual, planning = await context.work_windows(
+                types.SimpleNamespace(), entry, now, horizon_hours=12, return_actual=True
+            )
+        finally:
+            context._calendar_windows = original
+        assert actual == [
+            (datetime(2026, 9, 1, 8, tzinfo=timezone.utc), datetime(2026, 9, 1, 12, tzinfo=timezone.utc)),
+            (datetime(2026, 9, 1, 13, tzinfo=timezone.utc), datetime(2026, 9, 1, 17, tzinfo=timezone.utc)),
+        ]
+        assert planning == [
+            (datetime(2026, 9, 1, 7, 30, tzinfo=timezone.utc), datetime(2026, 9, 1, 12, tzinfo=timezone.utc)),
+            (datetime(2026, 9, 1, 13, tzinfo=timezone.utc), datetime(2026, 9, 1, 17, 30, tzinfo=timezone.utc)),
+        ]
+
+    asyncio.run(run())
+
+
+def test_mixed_evening_activity_is_thermally_neutral():
+    evening = datetime(2026, 9, 1, 19, tzinfo=timezone.utc)
+    assert context.activity_context_c(evening, 3) == 0.0
+
+
+def test_equal_weekday_times_do_not_become_24_hour_work_window():
+    entry = types.SimpleNamespace(data={
+        const.CONF_WORK_MODE: const.WORK_MODE_WEEKDAY,
+        const.CONF_WORKDAY_START: "08:00",
+        const.CONF_WORKDAY_END: "08:00",
+    })
+    now = datetime(2026, 9, 1, 7, tzinfo=timezone.utc)
+    assert context._weekday_windows(entry, now, now + timedelta(hours=12), buffered=False) == []
+
+
+def test_equal_shift_times_do_not_become_24_hour_shift():
+    entry = types.SimpleNamespace(data={
+        const.CONF_SHIFT_PATTERN: "F",
+        const.CONF_SHIFT_ANCHOR_DATE: "2026-09-01",
+        const.CONF_SHIFT_EARLY_START: "06:00",
+        const.CONF_SHIFT_EARLY_END: "06:00",
     })
     now = datetime(2026, 9, 1, 5, tzinfo=timezone.utc)
-    windows = asyncio.run(context.work_windows(hass, entry, now, horizon_hours=16))
-    assert windows == []
+    assert context._cycle_windows(entry, now, now + timedelta(hours=12), buffered=False) == []
+
+
+def test_work_windows_are_capped_at_configured_horizon():
+    class Services:
+        async def async_call(self, *args, **kwargs):
+            return {}
+
+    hass = types.SimpleNamespace(services=Services())
+    entry = types.SimpleNamespace(data={
+        const.CONF_WORK_MODE: const.WORK_MODE_WEEKDAY,
+        const.CONF_WORKDAY_START: "08:00",
+        const.CONF_WORKDAY_END: "17:00",
+    })
+    now = datetime(2026, 9, 6, 18, tzinfo=timezone.utc)  # Sunday
+    end = now + timedelta(hours=16)  # Monday 10:00
+    actual, planning = asyncio.run(
+        context.work_windows(hass, entry, now, horizon_hours=16, return_actual=True)
+    )
+    assert actual == [(
+        datetime(2026, 9, 7, 8, tzinfo=timezone.utc),
+        end,
+    )]
+    assert planning[-1][1] == end
+
+
+def test_post_work_planning_buffer_survives_fresh_recalculation_after_shift_end():
+    class Services:
+        async def async_call(self, *args, **kwargs):
+            return {}
+
+    hass = types.SimpleNamespace(services=Services())
+    entry = types.SimpleNamespace(data={
+        const.CONF_WORK_MODE: const.WORK_MODE_WEEKDAY,
+        const.CONF_WORKDAY_START: "08:00",
+        const.CONF_WORKDAY_END: "17:00",
+    })
+    now = datetime(2026, 9, 1, 17, 10, tzinfo=timezone.utc)
+    actual, planning = asyncio.run(
+        context.work_windows(hass, entry, now, horizon_hours=12, return_actual=True)
+    )
+    assert not any(start <= now <= end for start, end in actual)
+    assert any(
+        start <= now <= end and end == datetime(2026, 9, 1, 17, 30, tzinfo=timezone.utc)
+        for start, end in planning
+    )

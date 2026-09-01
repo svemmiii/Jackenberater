@@ -41,16 +41,23 @@ from .const import (
     CONF_SHARED_USER_IDS,
     CONF_VACATION_CALENDAR,
     CONF_WEATHER,
-    CONF_WORK_CALENDAR,
+    CONF_WORK_MODE,
     CONF_WORK_WEATHER,
     CONF_WORK_ZONE,
+    CONF_WORKDAY_END,
+    CONF_WORKDAY_START,
     DEFAULT_FALLBACK_INDOOR_TEMP,
+    DEFAULT_WORKDAY_END,
+    DEFAULT_WORKDAY_START,
     DOMAIN,
     SECTION_BASIC,
     SECTION_CONTEXT,
     SECTION_SHIFT,
     SECTION_SHARED,
     SECTION_WORK,
+    WORK_MODE_NONE,
+    WORK_MODE_SHIFT,
+    WORK_MODE_WEEKDAY,
 )
 
 
@@ -61,7 +68,25 @@ def _entity(domain: str, *, device_class: str | None = None) -> EntitySelector:
     return EntitySelector(EntitySelectorConfig(**config))
 
 
-def _schema(shared_options: list[SelectOptionDict] | None = None) -> vol.Schema:
+def _work_mode_options(language: str | None) -> list[SelectOptionDict]:
+    german = str(language or "de").lower().startswith("de")
+    if german:
+        return [
+            {"value": WORK_MODE_NONE, "label": "Arbeit nicht berücksichtigen"},
+            {"value": WORK_MODE_WEEKDAY, "label": "Normale 5-Tage-Woche"},
+            {"value": WORK_MODE_SHIFT, "label": "Rotierendes Schichtsystem"},
+        ]
+    return [
+        {"value": WORK_MODE_NONE, "label": "Do not consider work"},
+        {"value": WORK_MODE_WEEKDAY, "label": "Normal 5-day work week"},
+        {"value": WORK_MODE_SHIFT, "label": "Rotating shift system"},
+    ]
+
+
+def _schema(
+    shared_options: list[SelectOptionDict] | None = None,
+    language: str | None = None,
+) -> vol.Schema:
     return vol.Schema(
         {
             vol.Required(SECTION_BASIC): section(
@@ -101,7 +126,15 @@ def _schema(shared_options: list[SelectOptionDict] | None = None) -> vol.Schema:
                     {
                         vol.Optional(CONF_WORK_ZONE): _entity("zone"),
                         vol.Optional(CONF_WORK_WEATHER): _entity("weather"),
-                        vol.Optional(CONF_WORK_CALENDAR): _entity("calendar"),
+                        vol.Optional(CONF_WORK_MODE, default=WORK_MODE_WEEKDAY): SelectSelector(
+                            SelectSelectorConfig(
+                                options=_work_mode_options(language),
+                                multiple=False,
+                                mode=SelectSelectorMode.DROPDOWN,
+                            )
+                        ),
+                        vol.Optional(CONF_WORKDAY_START, default=DEFAULT_WORKDAY_START): selector({"time": {}}),
+                        vol.Optional(CONF_WORKDAY_END, default=DEFAULT_WORKDAY_END): selector({"time": {}}),
                         vol.Optional(CONF_VACATION_CALENDAR): _entity("calendar"),
                     }
                 ),
@@ -169,15 +202,13 @@ def _section_defaults(data: dict[str, Any]) -> dict[str, Any]:
         context[CONF_CONTEXT_CALENDAR] = data[CONF_CONTEXT_CALENDAR]
 
     work = {
-        key: data[key]
-        for key in (
-            CONF_WORK_ZONE,
-            CONF_WORK_WEATHER,
-            CONF_WORK_CALENDAR,
-            CONF_VACATION_CALENDAR,
-        )
-        if data.get(key)
+        CONF_WORK_MODE: data.get(CONF_WORK_MODE, WORK_MODE_WEEKDAY),
+        CONF_WORKDAY_START: data.get(CONF_WORKDAY_START, DEFAULT_WORKDAY_START),
+        CONF_WORKDAY_END: data.get(CONF_WORKDAY_END, DEFAULT_WORKDAY_END),
     }
+    for key in (CONF_WORK_ZONE, CONF_WORK_WEATHER, CONF_VACATION_CALENDAR):
+        if data.get(key):
+            work[key] = data[key]
     shared = {}
     if data.get(CONF_SHARED_USER_IDS):
         shared[CONF_SHARED_USER_IDS] = list(data[CONF_SHARED_USER_IDS])
@@ -208,33 +239,57 @@ def _section_defaults(data: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _time_key(value: Any) -> tuple[int, int] | None:
+    """Normalize Home Assistant time-selector values for validation."""
+    if value in (None, ""):
+        return None
+    try:
+        parts = str(value).split(":")
+        return int(parts[0]), int(parts[1])
+    except (TypeError, ValueError, IndexError):
+        return None
+
+
+def _same_time(start: Any, end: Any) -> bool:
+    a = _time_key(start)
+    b = _time_key(end)
+    return a is not None and b is not None and a == b
+
+
 def _validate(data: dict[str, Any]) -> dict[str, str]:
     errors: dict[str, str] = {}
+    mode = str(data.get(CONF_WORK_MODE, WORK_MODE_WEEKDAY))
     pattern = data.get(CONF_SHIFT_PATTERN)
     anchor = data.get(CONF_SHIFT_ANCHOR_DATE)
-    if pattern:
-        tokens = [x.strip().upper() for x in str(pattern).split(",") if x.strip()]
+
+    if mode == WORK_MODE_SHIFT:
+        tokens = [x.strip().upper() for x in str(pattern or "").split(",") if x.strip()]
         if not tokens or any(x not in {"F", "S", "N", "X"} for x in tokens):
             errors["base"] = "invalid_shift_pattern"
         elif not anchor:
             errors["base"] = "shift_anchor_required"
+        elif any(
+            _same_time(data.get(start_key), data.get(end_key))
+            for start_key, end_key in (
+                (CONF_SHIFT_EARLY_START, CONF_SHIFT_EARLY_END),
+                (CONF_SHIFT_LATE_START, CONF_SHIFT_LATE_END),
+                (CONF_SHIFT_NIGHT_START, CONF_SHIFT_NIGHT_END),
+            )
+        ):
+            errors["base"] = "invalid_shift_time"
+    elif mode == WORK_MODE_WEEKDAY and _same_time(
+        data.get(CONF_WORKDAY_START, DEFAULT_WORKDAY_START),
+        data.get(CONF_WORKDAY_END, DEFAULT_WORKDAY_END),
+    ):
+        errors["base"] = "invalid_work_time"
 
     work_weather = data.get(CONF_WORK_WEATHER)
     work_context_present = any(
         data.get(key)
-        for key in (
-            CONF_WORK_ZONE,
-            CONF_WORK_CALENDAR,
-            CONF_VACATION_CALENDAR,
-            CONF_SHIFT_PATTERN,
-        )
+        for key in (CONF_WORK_ZONE, CONF_VACATION_CALENDAR, CONF_SHIFT_PATTERN)
     )
-    if work_context_present and not work_weather:
+    if work_context_present and mode != WORK_MODE_NONE and not work_weather:
         errors.setdefault("base", "work_weather_required")
-    elif work_weather and not (data.get(CONF_WORK_CALENDAR) or data.get(CONF_SHIFT_PATTERN)):
-        # Without any time source the additional weather entity can never become
-        # contextually relevant in v0.1.0. Reject silent no-op configuration.
-        errors.setdefault("base", "work_time_required")
     return errors
 
 
@@ -251,7 +306,7 @@ class JackenBeraterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Configure the single local JackenBerater instance."""
 
     VERSION = 1
-    MINOR_VERSION = 0
+    MINOR_VERSION = 1
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None):
         await self.async_set_unique_id("main")
@@ -264,10 +319,10 @@ class JackenBeraterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 return self.async_create_entry(title="JackenBerater", data=data)
             return self.async_show_form(
                 step_id="user",
-                data_schema=self.add_suggested_values_to_schema(_schema(shared_options), user_input),
+                data_schema=self.add_suggested_values_to_schema(_schema(shared_options, self.hass.config.language), user_input),
                 errors=errors,
             )
-        return self.async_show_form(step_id="user", data_schema=_schema(shared_options))
+        return self.async_show_form(step_id="user", data_schema=_schema(shared_options, self.hass.config.language))
 
     async def async_step_reconfigure(self, user_input: dict[str, Any] | None = None):
         entry = self._get_reconfigure_entry()
@@ -276,17 +331,18 @@ class JackenBeraterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             data = _flatten(user_input)
             errors = _validate(data)
             if not errors:
-                self.hass.config_entries.async_update_entry(entry, data=data)
-                await self.hass.config_entries.async_reload(entry.entry_id)
-                return self.async_abort(reason="reconfigure_successful")
+                # The update listener registered by the integration performs the
+                # reload. Home Assistant 2026.6+ explicitly recommends the
+                # non-reloading helper in this setup to avoid double reloads.
+                return self.async_update_and_abort(entry, data=data)
             return self.async_show_form(
                 step_id="reconfigure",
-                data_schema=self.add_suggested_values_to_schema(_schema(shared_options), user_input),
+                data_schema=self.add_suggested_values_to_schema(_schema(shared_options, self.hass.config.language), user_input),
                 errors=errors,
             )
         return self.async_show_form(
             step_id="reconfigure",
             data_schema=self.add_suggested_values_to_schema(
-                _schema(shared_options), _section_defaults(dict(entry.data))
+                _schema(shared_options, self.hass.config.language), _section_defaults(dict(entry.data))
             ),
         )

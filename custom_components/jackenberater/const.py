@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import timedelta
 
 DOMAIN = "jackenberater"
-INTEGRATION_VERSION = "0.1.0"
+INTEGRATION_VERSION = "0.1.1"
 PLATFORMS = ["sensor", "switch", "button"]
 
 CONF_WEATHER = "weather_entity"
@@ -14,7 +14,10 @@ CONF_RAIN_ADVICE = "rain_advice"
 CONF_CONTEXT_CALENDAR = "context_calendar_entity"
 CONF_WORK_ZONE = "work_zone"
 CONF_WORK_WEATHER = "work_weather_entity"
-CONF_WORK_CALENDAR = "work_calendar_entity"
+CONF_WORK_CALENDAR = "work_calendar_entity"  # legacy v0.1.0 key; no longer shown in UI
+CONF_WORK_MODE = "work_mode"
+CONF_WORKDAY_START = "workday_start"
+CONF_WORKDAY_END = "workday_end"
 CONF_VACATION_CALENDAR = "vacation_calendar_entity"
 CONF_SHIFT_PATTERN = "shift_pattern"
 CONF_SHIFT_ANCHOR_DATE = "shift_anchor_date"
@@ -33,12 +36,23 @@ SECTION_SHIFT = "shift"
 SECTION_SHARED = "shared"
 
 DEFAULT_FALLBACK_INDOOR_TEMP = 21.5
+BASE_LIGHT_THRESHOLD_C = 18.0
+BASE_WARM_THRESHOLD_C = 12.0
+BASE_WINTER_THRESHOLD_C = 5.0
+DEFAULT_WORKDAY_START = "08:00"
+DEFAULT_WORKDAY_END = "17:00"
+
+WORK_MODE_NONE = "none"
+WORK_MODE_WEEKDAY = "weekday"
+WORK_MODE_SHIFT = "shift"
+WORK_MODES = (WORK_MODE_NONE, WORK_MODE_WEEKDAY, WORK_MODE_SHIFT)
 DEFAULT_FORECAST_HOURS = 9
 MAX_FORECAST_HOURS = 12
 CALENDAR_MAX_HOURS = 16
 WORK_BUFFER = timedelta(minutes=30)
 FORECAST_REFRESH = timedelta(minutes=15)
 SESSION_EXPIRY = timedelta(hours=36)
+FEEDBACK_MIN_DELAY = timedelta(minutes=30)
 MAX_RECENT_SESSIONS = 20
 MAX_OPEN_FEEDBACK = 3
 STORAGE_VERSION = 1

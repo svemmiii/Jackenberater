@@ -34,23 +34,27 @@
           },
           "work": {
             "name": "Work context (optional)",
-            "description": "Can include a significantly different work location. Calendar contents are not interpreted; only time windows are used.",
+            "description": "Optional work location. Work context becomes active only when a weather source for work is selected. Then Monday-Friday 08:00–17:00 is assumed by default; shift workers can use the rotating cycle below instead.",
             "data": {
               "work_zone": "Work zone",
               "work_weather_entity": "Weather at work",
-              "work_calendar_entity": "Work/shift calendar",
+              "work_mode": "Work model",
+              "workday_start": "Normal work start",
+              "workday_end": "Normal work end",
               "vacation_calendar_entity": "Vacation/absence calendar"
             },
             "data_description": {
-              "work_zone": "Existing Home Assistant zone used as context/display. Weather itself comes from the separate weather entity below.",
-              "work_weather_entity": "Weather entity for the work location. Requires a work/shift calendar or rotating shift cycle.",
-              "work_calendar_entity": "Optional. Only start/end times of timed events are used as probable work windows.",
-              "vacation_calendar_entity": "Optional. Only overlapping absence windows suppress probable work windows."
+              "work_zone": "Existing Home Assistant zone for context and display. Weather itself comes from the separate weather entity.",
+              "work_weather_entity": "Optional weather source for a work location with significantly different conditions. The selected work model is only applied when this weather source is configured.",
+              "work_mode": "Normal 5-day week uses Monday-Friday. Rotating shift system uses the cycle configured below. “Do not consider work” disables automatic work assumptions.",
+              "workday_start": "Default 08:00. The 30-minute buffer before this time is only for planning; current work weather starts at the actual work time.",
+              "workday_end": "Default 17:00. The 30-minute buffer after this time is only for planning; current work weather ends at the actual work time.",
+              "vacation_calendar_entity": "Optional. Calendar contents are not interpreted; overlapping periods only suppress otherwise probable work."
             }
           },
           "shift": {
-            "name": "Rotating shift cycle (optional)",
-            "description": "Fallback for cycles that are independent of weekdays. Example: F,F,S,S,N,N,N,X,X. F = early, S = late, N = night, X = off.",
+            "name": "Rotating shift system (only if needed)",
+            "description": "Use only when “Rotating shift system” is selected as work model. Example: F,F,S,S,N,N,N,X,X. F = early, S = late, N = night, X = off.",
             "data": {
               "shift_pattern": "Shift sequence",
               "shift_anchor_date": "Anchor date",
@@ -60,16 +64,20 @@
               "shift_late_end": "Late shift end",
               "shift_night_start": "Night shift start",
               "shift_night_end": "Night shift end"
+            },
+            "data_description": {
+              "shift_pattern": "Comma-separated sequence using F, S, N and X. The cycle repeats independently of the weekday.",
+              "shift_anchor_date": "Date on which the first item in the shift sequence applies."
             }
           },
           "shared": {
             "name": "Shared wall tablet",
-            "description": "Only selected Home Assistant accounts may view or rate other jacket profiles.",
+            "description": "Allowed HA accounts are automatically recognized by the card as shared control devices and do not get their own thermal profile.",
             "data": {
               "shared_user_ids": "Allowed tablet/shared accounts"
             },
             "data_description": {
-              "shared_user_ids": "Normal users stay restricted to their own profile. Administrators may also switch profiles."
+              "shared_user_ids": "These accounts select an existing user profile in the card first. Normal users remain restricted to their own profile."
             }
           }
         }
@@ -91,7 +99,8 @@
               "indoor_temperature": "Optional representative comfort room, for example the living room. Deliberately unusually warm rooms are less suitable.",
               "fallback_indoor_temperature": "Used when no indoor sensor is selected or when it is temporarily unavailable.",
               "rain_advice": "Assesses precipitation risk separately from warmth. Weather forecasts are never retrained from user feedback."
-            }
+            },
+            "description": "Weather and optionally a representative living-room temperature for the indoor-to-outdoor transition."
           },
           "context": {
             "name": "Time context (optional)",
@@ -108,18 +117,23 @@
             "data": {
               "work_zone": "Work zone",
               "work_weather_entity": "Weather at work",
-              "work_calendar_entity": "Work/shift calendar",
+              "work_mode": "Work model",
+              "workday_start": "Normal work start",
+              "workday_end": "Normal work end",
               "vacation_calendar_entity": "Vacation/absence calendar"
             },
             "data_description": {
-              "work_zone": "Existing Home Assistant zone used as context/display. Weather itself comes from the separate weather entity below.",
-              "work_weather_entity": "Weather entity for the work location. Requires a work/shift calendar or rotating shift cycle.",
-              "work_calendar_entity": "Optional. Only start/end times of timed events are used as probable work windows.",
-              "vacation_calendar_entity": "Optional. Only overlapping absence windows suppress probable work windows."
-            }
+              "work_zone": "Existing Home Assistant zone for context and display. Weather itself comes from the separate weather entity.",
+              "work_weather_entity": "Optional weather source for a work location with significantly different conditions.",
+              "work_mode": "Normal 5-day week uses Monday-Friday. Rotating shift system uses the cycle configured below. “Do not consider work” disables automatic work assumptions.",
+              "workday_start": "Default 08:00. The 30-minute buffer before this time is only for planning; current work weather starts at the actual work time.",
+              "workday_end": "Default 17:00. The 30-minute buffer after this time is only for planning; current work weather ends at the actual work time.",
+              "vacation_calendar_entity": "Optional. Calendar contents are not interpreted; overlapping periods only suppress otherwise probable work."
+            },
+            "description": "Optional work location. By default Monday-Friday 08:00–17:00 is assumed; shift workers can use the rotating cycle below instead."
           },
           "shift": {
-            "name": "Rotating shift cycle (optional)",
+            "name": "Rotating shift system (only if needed)",
             "data": {
               "shift_pattern": "Shift sequence",
               "shift_anchor_date": "Anchor date",
@@ -129,26 +143,32 @@
               "shift_late_end": "Late shift end",
               "shift_night_start": "Night shift start",
               "shift_night_end": "Night shift end"
+            },
+            "description": "Use only when “Rotating shift system” is selected as work model. Example: F,F,S,S,N,N,N,X,X. F = early, S = late, N = night, X = off.",
+            "data_description": {
+              "shift_pattern": "Comma-separated sequence using F, S, N and X. The cycle repeats independently of the weekday.",
+              "shift_anchor_date": "Date on which the first item in the shift sequence applies."
             }
           },
           "shared": {
             "name": "Shared wall tablet",
-            "description": "Only selected Home Assistant accounts may view or rate other jacket profiles.",
+            "description": "Allowed HA accounts are automatically recognized by the card as shared control devices and do not get their own thermal profile.",
             "data": {
               "shared_user_ids": "Allowed tablet/shared accounts"
             },
             "data_description": {
-              "shared_user_ids": "Normal users stay restricted to their own profile. Administrators may also switch profiles."
+              "shared_user_ids": "These accounts select an existing user profile in the card first. Normal users remain restricted to their own profile."
             }
           }
         }
       }
     },
     "error": {
-      "invalid_shift_pattern": "The shift sequence may only contain F, S, N and X separated by commas.",
-      "shift_anchor_required": "A shift sequence requires an anchor date.",
-      "work_weather_required": "Work context requires a weather source for the work location.",
-      "work_time_required": "Weather at work requires either a work/shift calendar or a rotating shift cycle."
+      "invalid_shift_pattern": "The rotating shift system requires a sequence containing only F, S, N and X separated by commas.",
+      "shift_anchor_required": "The rotating shift system requires an anchor date.",
+      "work_weather_required": "An enabled work context requires a weather source for the work location.",
+      "invalid_work_time": "Work start and end must be different times.",
+      "invalid_shift_time": "Each shift must have different start and end times."
     },
     "abort": {
       "already_configured": "Jacket Advisor is already configured.",

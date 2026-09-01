@@ -34,23 +34,27 @@
           },
           "work": {
             "name": "Arbeitskontext (optional)",
-            "description": "Kann einen deutlich anderen Arbeitsort in die Empfehlung einbeziehen. Kalenderinhalte werden nicht ausgewertet; für Arbeits- und Urlaubskalender werden nur Zeiträume verwendet.",
+            "description": "Optionaler Arbeitsort. Der Arbeitskontext wird nur aktiv, wenn eine Wetterquelle am Arbeitsort gewählt ist. Dann wird standardmäßig Montag bis Freitag 08:00–17:00 Uhr angenommen; Schichtarbeiter können stattdessen unten einen rotierenden Zyklus verwenden.",
             "data": {
               "work_zone": "Arbeitszone",
               "work_weather_entity": "Wetter am Arbeitsort",
-              "work_calendar_entity": "Arbeits-/Schichtkalender",
+              "work_mode": "Arbeitsmodell",
+              "workday_start": "Normaler Arbeitsbeginn",
+              "workday_end": "Normales Arbeitsende",
               "vacation_calendar_entity": "Urlaubs-/Abwesenheitskalender"
             },
             "data_description": {
-              "work_zone": "Vorhandene Home-Assistant-Zone für die Zuordnung. In v0.1.0 dient sie als Kontext/Anzeige; das Wetter kommt aus der separaten Wetterquelle darunter.",
-              "work_weather_entity": "Wetter-Entität am Arbeitsort. Nützlich, wenn dort z. B. Höhe oder Wind deutlich anders sind.",
-              "work_calendar_entity": "Optional. Nur Start und Ende zeitlich begrenzter Termine werden als wahrscheinliche Arbeitsfenster verwendet.",
-              "vacation_calendar_entity": "Optional. Ein vorhandener Termin in diesem Kalender setzt die normale Arbeitsannahme für den betrachteten Zeitraum aus."
+              "work_zone": "Vorhandene Home-Assistant-Zone für Zuordnung und Anzeige. Die Wetterdaten kommen aus der separaten Wetterquelle.",
+              "work_weather_entity": "Optionale Wetterquelle für einen Arbeitsort mit deutlich anderen Bedingungen. Erst mit dieser Wetterquelle wird das gewählte Arbeitsmodell tatsächlich verwendet.",
+              "work_mode": "Normale 5-Tage-Woche nutzt Montag bis Freitag. Rotierendes Schichtsystem verwendet den unten hinterlegten Zyklus. „Nicht berücksichtigen“ deaktiviert die automatische Arbeitsannahme.",
+              "workday_start": "Standard 08:00 Uhr. Der 30-Minuten-Puffer davor dient nur der Planung; als aktueller Arbeitsort gilt die tatsächliche Arbeitszeit.",
+              "workday_end": "Standard 17:00 Uhr. Der 30-Minuten-Puffer danach dient nur der Planung; als aktueller Arbeitsort gilt die tatsächliche Arbeitszeit.",
+              "vacation_calendar_entity": "Optional. Kalenderinhalte werden nicht interpretiert; überlappende Zeiträume unterdrücken nur die sonst angenommene Arbeit."
             }
           },
           "shift": {
-            "name": "Rotierender Schichtzyklus (optional)",
-            "description": "Fallback für feste Zyklen, die nicht an Montag–Sonntag gebunden sind. Beispiel: F,F,S,S,N,N,N,X,X. F = Früh, S = Spät, N = Nacht, X = frei.",
+            "name": "Rotierendes Schichtsystem (nur bei Bedarf)",
+            "description": "Nur verwenden, wenn beim Arbeitsmodell „Rotierendes Schichtsystem“ gewählt wurde. Beispiel: F,F,S,S,N,N,N,X,X. F = Früh, S = Spät, N = Nacht, X = Frei.",
             "data": {
               "shift_pattern": "Schichtfolge",
               "shift_anchor_date": "Ankerdatum",
@@ -68,12 +72,12 @@
           },
           "shared": {
             "name": "Gemeinsames Wandtablet",
-            "description": "Nur ausgewählte Home-Assistant-Konten dürfen andere Jackenprofile ansehen oder bewerten.",
+            "description": "Freigegebene HA-Konten werden von der Karte automatisch als gemeinsames Bediengerät erkannt und bekommen kein eigenes Wärmeprofil.",
             "data": {
               "shared_user_ids": "Freigegebene Tablet-/Gemeinschaftskonten"
             },
             "data_description": {
-              "shared_user_ids": "Normale Benutzer bleiben strikt auf ihr eigenes Profil beschränkt. Administratoren dürfen Profile ebenfalls wechseln."
+              "shared_user_ids": "Diese Konten wählen in der Karte zuerst das gewünschte vorhandene Nutzerprofil aus. Normale Benutzer bleiben auf ihr eigenes Profil beschränkt."
             }
           }
         }
@@ -84,12 +88,18 @@
         "sections": {
           "basic": {
             "name": "Grundlage",
-            "description": "Wetter und optional ein repräsentativer Wohnraumsensor.",
+            "description": "Wetter und optional ein repräsentativer Wohnraumsensor für den Übergang von drinnen nach draußen.",
             "data": {
               "weather_entity": "Wetterquelle",
               "indoor_temperature": "Wohnraumtemperatur",
               "fallback_indoor_temperature": "Fallback-Innentemperatur",
               "rain_advice": "Regenschutz berücksichtigen"
+            },
+            "data_description": {
+              "weather_entity": "Die Wetter-Entität für den aktuellen Ort. Stündliche Forecasts verbessern die Empfehlung für später.",
+              "indoor_temperature": "Optional: ein typischer gemütlicher Wohnraum, z. B. Wohnzimmer. Bad oder bewusst besonders warme Räume sind weniger geeignet.",
+              "fallback_indoor_temperature": "Wird verwendet, wenn kein Innenraumsensor gewählt wurde oder dieser gerade nicht verfügbar ist.",
+              "rain_advice": "Bewertet Niederschlagsrisiko separat von der benötigten Wärme. Regenprognosen werden nicht aus Nutzerfeedback angelernt."
             }
           },
           "context": {
@@ -107,12 +117,23 @@
             "data": {
               "work_zone": "Arbeitszone",
               "work_weather_entity": "Wetter am Arbeitsort",
-              "work_calendar_entity": "Arbeits-/Schichtkalender",
+              "work_mode": "Arbeitsmodell",
+              "workday_start": "Normaler Arbeitsbeginn",
+              "workday_end": "Normales Arbeitsende",
               "vacation_calendar_entity": "Urlaubs-/Abwesenheitskalender"
+            },
+            "description": "Optionaler Arbeitsort. Standardmäßig wird Montag bis Freitag 08:00–17:00 Uhr angenommen; Schichtarbeiter können stattdessen unten einen rotierenden Zyklus verwenden.",
+            "data_description": {
+              "work_zone": "Vorhandene Home-Assistant-Zone für Zuordnung und Anzeige. Die Wetterdaten kommen aus der separaten Wetterquelle.",
+              "work_weather_entity": "Optionale Wetterquelle für einen Arbeitsort mit deutlich anderen Bedingungen.",
+              "work_mode": "Normale 5-Tage-Woche nutzt Montag bis Freitag. Rotierendes Schichtsystem verwendet den unten hinterlegten Zyklus. „Nicht berücksichtigen“ deaktiviert die automatische Arbeitsannahme.",
+              "workday_start": "Standard 08:00 Uhr. Der 30-Minuten-Puffer davor dient nur der Planung; als aktueller Arbeitsort gilt die tatsächliche Arbeitszeit.",
+              "workday_end": "Standard 17:00 Uhr. Der 30-Minuten-Puffer danach dient nur der Planung; als aktueller Arbeitsort gilt die tatsächliche Arbeitszeit.",
+              "vacation_calendar_entity": "Optional. Kalenderinhalte werden nicht interpretiert; überlappende Zeiträume unterdrücken nur die sonst angenommene Arbeit."
             }
           },
           "shift": {
-            "name": "Rotierender Schichtzyklus (optional)",
+            "name": "Rotierendes Schichtsystem (nur bei Bedarf)",
             "data": {
               "shift_pattern": "Schichtfolge",
               "shift_anchor_date": "Ankerdatum",
@@ -122,26 +143,32 @@
               "shift_late_end": "Spätschicht Ende",
               "shift_night_start": "Nachtschicht Start",
               "shift_night_end": "Nachtschicht Ende"
+            },
+            "description": "Nur verwenden, wenn beim Arbeitsmodell „Rotierendes Schichtsystem“ gewählt wurde. Beispiel: F,F,S,S,N,N,N,X,X. F = Früh, S = Spät, N = Nacht, X = Frei.",
+            "data_description": {
+              "shift_pattern": "Kommagetrennte Folge aus F, S, N und X. Der Zyklus wiederholt sich unabhängig vom Wochentag.",
+              "shift_anchor_date": "Datum, an dem der erste Eintrag der Schichtfolge gilt."
             }
           },
           "shared": {
             "name": "Gemeinsames Wandtablet",
-            "description": "Nur ausgewählte Home-Assistant-Konten dürfen andere Jackenprofile ansehen oder bewerten.",
+            "description": "Freigegebene HA-Konten werden von der Karte automatisch als gemeinsames Bediengerät erkannt und bekommen kein eigenes Wärmeprofil.",
             "data": {
               "shared_user_ids": "Freigegebene Tablet-/Gemeinschaftskonten"
             },
             "data_description": {
-              "shared_user_ids": "Normale Benutzer bleiben strikt auf ihr eigenes Profil beschränkt. Administratoren dürfen Profile ebenfalls wechseln."
+              "shared_user_ids": "Diese Konten wählen in der Karte zuerst das gewünschte vorhandene Nutzerprofil aus. Normale Benutzer bleiben auf ihr eigenes Profil beschränkt."
             }
           }
         }
       }
     },
     "error": {
-      "invalid_shift_pattern": "Die Schichtfolge darf nur F, S, N und X enthalten, jeweils durch Kommas getrennt.",
-      "shift_anchor_required": "Für eine Schichtfolge wird ein Ankerdatum benötigt.",
-      "work_weather_required": "Für den Arbeitskontext wird eine Wetterquelle am Arbeitsort benötigt.",
-      "work_time_required": "Wetter am Arbeitsort benötigt entweder einen Arbeits-/Schichtkalender oder einen rotierenden Schichtzyklus."
+      "invalid_shift_pattern": "Für das rotierende Schichtsystem wird eine Folge aus F, S, N und X benötigt, jeweils durch Kommas getrennt.",
+      "shift_anchor_required": "Für das rotierende Schichtsystem wird ein Ankerdatum benötigt.",
+      "work_weather_required": "Für einen aktivierten Arbeitskontext wird eine Wetterquelle am Arbeitsort benötigt.",
+      "invalid_work_time": "Arbeitsbeginn und Arbeitsende dürfen nicht identisch sein.",
+      "invalid_shift_time": "Bei jeder Schicht müssen Start- und Endzeit unterschiedlich sein."
     },
     "abort": {
       "already_configured": "JackenBerater ist bereits eingerichtet.",

@@ -10,7 +10,20 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
 from .api import async_register_api
-from .const import DOMAIN, INTEGRATION_VERSION, PLATFORMS
+from .const import (
+    CONF_SHIFT_PATTERN,
+    CONF_WORK_CALENDAR,
+    CONF_WORK_MODE,
+    CONF_WORKDAY_END,
+    CONF_WORKDAY_START,
+    DEFAULT_WORKDAY_END,
+    DEFAULT_WORKDAY_START,
+    DOMAIN,
+    INTEGRATION_VERSION,
+    PLATFORMS,
+    WORK_MODE_SHIFT,
+    WORK_MODE_WEEKDAY,
+)
 from .profiles import ProfileManager
 from .weather import JackenWeatherCoordinator
 
@@ -66,6 +79,25 @@ async def _async_register_frontend(hass: HomeAssistant) -> None:
         )
 
     domain_data["frontend_registered"] = True
+
+
+async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Migrate the unreleased v0.1.0 work-context shape to v0.1.1."""
+    if entry.version == 1 and entry.minor_version < 1:
+        data = dict(entry.data)
+        data.setdefault(
+            CONF_WORK_MODE,
+            WORK_MODE_SHIFT if data.get(CONF_SHIFT_PATTERN) else WORK_MODE_WEEKDAY,
+        )
+        data.setdefault(CONF_WORKDAY_START, DEFAULT_WORKDAY_START)
+        data.setdefault(CONF_WORKDAY_END, DEFAULT_WORKDAY_END)
+        # v0.1.1 no longer requires a calendar containing explicit work events.
+        # Keep vacation/absence as an optional suppressor instead.
+        data.pop(CONF_WORK_CALENDAR, None)
+        hass.config_entries.async_update_entry(
+            entry, data=data, version=1, minor_version=1
+        )
+    return True
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

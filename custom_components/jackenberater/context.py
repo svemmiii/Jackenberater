@@ -25,8 +25,15 @@ from .const import (
     CONF_SHIFT_NIGHT_START,
     CONF_SHIFT_PATTERN,
     CONF_VACATION_CALENDAR,
-    CONF_WORK_CALENDAR,
+    CONF_WORK_MODE,
+    CONF_WORKDAY_END,
+    CONF_WORKDAY_START,
+    DEFAULT_WORKDAY_END,
+    DEFAULT_WORKDAY_START,
     WORK_BUFFER,
+    WORK_MODE_NONE,
+    WORK_MODE_SHIFT,
+    WORK_MODE_WEEKDAY,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -56,77 +63,71 @@ async def work_windows(
     entry: ConfigEntry,
     now: datetime,
     horizon_hours: int = CALENDAR_MAX_HOURS,
-) -> list[tuple[datetime, datetime]]:
-    """Return probable work windows. Calendar wins over a rotating cycle."""
+    *,
+    return_actual: bool = False,
+) -> list[tuple[datetime, datetime]] | tuple[
+    list[tuple[datetime, datetime]], list[tuple[datetime, datetime]]
+]:
+    """Return probable work windows without tracking the user.
+
+    The actual window represents the configured work hours. The planning window
+    adds the ±30 minute buffer used to consider destination weather before/after
+    work without pretending the user is already physically at that location.
+    """
     end = now + timedelta(hours=horizon_hours)
+    # Search one planning buffer into the past as well. Otherwise a fresh context
+    # calculation at 17:10 would forget a 17:00 work end, while a cached result
+    # from 16:59 would still retain the intended planning relevance until 17:30.
+    search_start = now - WORK_BUFFER
     vacation_windows: list[tuple[datetime, datetime]] = []
     vacation_calendar = entry.data.get(CONF_VACATION_CALENDAR)
     if isinstance(vacation_calendar, str) and vacation_calendar:
         vacation_windows = await _calendar_windows(
-            hass, vacation_calendar, now, end, timed_only=False
+            hass, vacation_calendar, search_start, end, timed_only=False
         )
 
-    work_calendar = entry.data.get(CONF_WORK_CALENDAR)
-    if isinstance(work_calendar, str) and work_calendar:
-        # An explicitly selected work calendar is authoritative: no event means
-        # no probable work window. Do not resurrect a cycle on calendar days off.
-        windows = await _calendar_windows(hass, work_calendar, now, end, timed_only=True)
-        buffered = _merge_windows([(a - WORK_BUFFER, b + WORK_BUFFER) for a, b in windows])
-        return _subtract_blocked_windows(buffered, vacation_windows)
+    mode = str(entry.data.get(CONF_WORK_MODE) or "").strip().lower()
+    if not mode:
+        mode = WORK_MODE_SHIFT if entry.data.get(CONF_SHIFT_PATTERN) else WORK_MODE_WEEKDAY
 
-    return _subtract_blocked_windows(_cycle_windows(entry, now, end), vacation_windows)
+    if mode == WORK_MODE_NONE:
+        return ([], []) if return_actual else []
+    if mode == WORK_MODE_SHIFT:
+        raw_actual = _cycle_windows(entry, search_start, end, buffered=False)
+    else:
+        raw_actual = _weekday_windows(entry, search_start, end, buffered=False)
+
+    # Absence/holiday is applied to the real work period first. Planning windows
+    # are then derived from whatever work is actually left. This prevents a full
+    # day absence from leaving artificial 30-minute work buffers behind.
+    surviving = _subtract_blocked_windows(raw_actual, vacation_windows)
+    surviving = _clip_window_ends(surviving, end)
+    planning = _buffer_windows(surviving)
+    # Actual work must only describe a real current/future work period; the
+    # just-ended shift remains available only through the planning buffer.
+    actual = _current_or_future_windows(surviving, now, end)
+    # A partial absence must also remain a gap in the expanded planning range.
+    planning = _subtract_blocked_windows(planning, vacation_windows)
+    planning = _clip_window_ends(planning, end)
+    return (actual, planning) if return_actual else planning
 
 
 def activity_context_c(now: datetime, evening_answer: int) -> float:
-    """Return a deliberately weak event-season activity correction.
+    """Return a weak correction for the user's typical evening activity.
 
-    Negative means slightly less body heat than the default everyday activity.
-    It can influence a close call, but is capped so it cannot overturn an
-    otherwise clear recommendation by itself.
+    The setup question now measures the thing this value actually represents:
+    quiet/standing versus active movement while spending longer outside. This is
+    deliberately small and applies only in the evening, so it can refine close
+    calls without overpowering weather or personal feedback.
     """
     local = dt_util.as_local(now)
     hour = local.hour + local.minute / 60.0
     if not (16.0 <= hour <= 23.5):
         return 0.0
-    if not _event_season(local.date()):
-        return 0.0
     answer = max(1, min(5, int(evening_answer or 3)))
-    # Someone who is normally almost never out in the evening gets the stronger
-    # "probably standing/slow social activity" hint during classic event times.
-    correction = {1: -0.55, 2: -0.42, 3: -0.30, 4: -0.18, 5: -0.10}[answer]
-    return correction
-
-
-def _event_season(day: date) -> bool:
-    # Broad Advent/Christmas-market season, New Year's Eve, and the main German
-    # street-carnival days. This is a weak context hint, never a factual claim.
-    if (day.month == 11 and day.day >= 20) or day.month == 12:
-        return True
-    if day.month == 1 and day.day == 1:
-        return True
-    easter = _easter_sunday(day.year)
-    carnival_start = easter - timedelta(days=52)  # Weiberfastnacht
-    carnival_end = easter - timedelta(days=48)    # Rosenmontag
-    return carnival_start <= day <= carnival_end
-
-
-def _easter_sunday(year: int) -> date:
-    # Gregorian Anonymous algorithm / Meeus-Jones-Butcher.
-    a = year % 19
-    b = year // 100
-    c = year % 100
-    d = b // 4
-    e = b % 4
-    f = (b + 8) // 25
-    g = (b - f + 1) // 3
-    h = (19 * a + b - d - g + 15) % 30
-    i = c // 4
-    k = c % 4
-    l = (32 + 2 * e + 2 * i - h - k) % 7
-    m = (a + 11 * h + 22 * l) // 451
-    month = (h + l - 7 * m + 114) // 31
-    day = ((h + l - 7 * m + 114) % 31) + 1
-    return date(year, month, day)
+    # Keep the middle answer truly neutral. The correction remains deliberately
+    # small so activity can refine close calls without dominating the weather.
+    return {1: -0.50, 2: -0.25, 3: 0.0, 4: 0.10, 5: 0.20}[answer]
 
 
 async def _calendar_windows(
@@ -205,10 +206,46 @@ def _parse_calendar_time(value: Any, tzinfo) -> datetime | None:
     return dt_util.as_local(parsed)
 
 
+def _weekday_windows(
+    entry: ConfigEntry,
+    start: datetime,
+    end: datetime,
+    *,
+    buffered: bool = True,
+) -> list[tuple[datetime, datetime]]:
+    """Return Monday-Friday work windows, optionally with planning buffer."""
+    start_time = _parse_time(
+        str(entry.data.get(CONF_WORKDAY_START, DEFAULT_WORKDAY_START))
+    )
+    end_time = _parse_time(
+        str(entry.data.get(CONF_WORKDAY_END, DEFAULT_WORKDAY_END))
+    )
+    if start_time is None or end_time is None or start_time == end_time:
+        return []
+
+    windows: list[tuple[datetime, datetime]] = []
+    day = start.date() - timedelta(days=1)
+    last_day = end.date() + timedelta(days=1)
+    while day <= last_day:
+        if day.weekday() < 5:
+            a = datetime.combine(day, start_time, tzinfo=start.tzinfo)
+            b = datetime.combine(day, end_time, tzinfo=start.tzinfo)
+            if b <= a:
+                b += timedelta(days=1)
+            if b >= start and a <= end:
+                windows.append(
+                    (a - WORK_BUFFER, b + WORK_BUFFER) if buffered else (a, b)
+                )
+        day += timedelta(days=1)
+    return _merge_windows(windows)
+
+
 def _cycle_windows(
     entry: ConfigEntry,
     start: datetime,
     end: datetime,
+    *,
+    buffered: bool = True,
 ) -> list[tuple[datetime, datetime]]:
     pattern_raw = entry.data.get(CONF_SHIFT_PATTERN)
     anchor_raw = entry.data.get(CONF_SHIFT_ANCHOR_DATE)
@@ -230,7 +267,11 @@ def _cycle_windows(
         if token != "X":
             bounds = _shift_bounds(entry, token, day, start.tzinfo)
             if bounds and bounds[1] >= start and bounds[0] <= end:
-                windows.append((bounds[0] - WORK_BUFFER, bounds[1] + WORK_BUFFER))
+                windows.append(
+                    (bounds[0] - WORK_BUFFER, bounds[1] + WORK_BUFFER)
+                    if buffered
+                    else bounds
+                )
         day += timedelta(days=1)
     return _merge_windows(windows)
 
@@ -249,7 +290,7 @@ def _shift_bounds(
     start_key, end_key, default_start, default_end = keys[token]
     start_time = _parse_time(str(entry.data.get(start_key, default_start)))
     end_time = _parse_time(str(entry.data.get(end_key, default_end)))
-    if start_time is None or end_time is None:
+    if start_time is None or end_time is None or start_time == end_time:
         return None
     a = datetime.combine(day, start_time, tzinfo=tzinfo)
     b = datetime.combine(day, end_time, tzinfo=tzinfo)
@@ -264,6 +305,42 @@ def _parse_time(value: str) -> time | None:
         return time(hour=int(parts[0]), minute=int(parts[1]))
     except (ValueError, IndexError):
         return None
+
+
+def _current_or_future_windows(
+    windows: list[tuple[datetime, datetime]],
+    now: datetime,
+    end: datetime,
+) -> list[tuple[datetime, datetime]]:
+    """Keep current/future real work periods while preserving their true start."""
+    kept: list[tuple[datetime, datetime]] = []
+    for window_start, window_end in windows:
+        clipped_end = min(window_end, end)
+        if clipped_end >= now and window_start <= end and clipped_end > window_start:
+            kept.append((window_start, clipped_end))
+    return kept
+
+
+def _clip_window_ends(
+    windows: list[tuple[datetime, datetime]],
+    end: datetime,
+) -> list[tuple[datetime, datetime]]:
+    """Clip work/planning windows to the configured maximum future horizon."""
+    clipped: list[tuple[datetime, datetime]] = []
+    for start, stop in windows:
+        clipped_stop = min(stop, end)
+        if clipped_stop > start:
+            clipped.append((start, clipped_stop))
+    return clipped
+
+
+def _buffer_windows(
+    windows: list[tuple[datetime, datetime]],
+) -> list[tuple[datetime, datetime]]:
+    """Expand surviving work periods for planning without changing actual work."""
+    return _merge_windows(
+        [(start - WORK_BUFFER, end + WORK_BUFFER) for start, end in windows]
+    )
 
 
 def _subtract_blocked_windows(

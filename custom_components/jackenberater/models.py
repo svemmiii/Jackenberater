@@ -56,11 +56,13 @@ class Recommendation:
     current_gust_kmh: float | None
     current_condition: str | None
     transition_penalty_c: float
+    current_wind_penalty_c: float = 0.0
     later_temperature_c: float | None = None
     later_wind_kmh: float | None = None
     later_gust_kmh: float | None = None
     later_condition: str | None = None
     later_effective_c: float | None = None
+    later_wind_penalty_c: float | None = None
     work_context: bool = False
     work_jacket: str | None = None
     work_start: datetime | None = None

@@ -6,9 +6,9 @@ const JB_I18N = {
     cold: "Wie schnell frierst du?",
     warm: "Wie schnell wird dir zu warm?",
     wind: "Wie empfindlich bist du bei Wind?",
-    evening: "Wie oft bist du abends länger unterwegs?",
+    evening: "Wenn du abends länger draußen bist: Wie aktiv bist du dabei?",
     scale: ["Sehr wenig", "Eher wenig", "Neutral", "Eher stark", "Sehr stark"],
-    frequency: ["Fast nie", "Eher selten", "Gemischt", "Eher häufig", "Fast immer"],
+    frequency: ["Meist ruhig/stehend", "Eher ruhig", "Gemischt", "Eher aktiv", "Meist aktiv in Bewegung"],
     save: "Profil starten",
     none: "Keine Jacke nötig",
     light: "Leichte Jacke",
@@ -30,7 +30,8 @@ const JB_I18N = {
     perfect: "Perfekt",
     tooWarm: "Zu warm",
     notUsed: "Nicht genutzt",
-    manualFeedback: "Aktuelle Empfehlung bewerten",
+    manualFeedback: "Freiwilliges Feedback",
+    manualFeedbackAction: "Feedback manuell abgeben",
     oldRecommendation: "frühere Empfehlung",
     currentRecommendation: "aktuelle Empfehlung",
     profile: "Profil",
@@ -57,6 +58,9 @@ const JB_I18N = {
     submitted: "Danke – Bewertung übernommen.",
     effective: "thermisch etwa",
     work: "Arbeit",
+    gusts: "Böen",
+    nowOnly: "nur jetzt",
+    workWeatherUnavailable: "Arbeitswetter ist aktuell nicht verfügbar. Lieber keine Schätzung als Wetter vom falschen Ort.",
     editorTitle: "Titel",
     editorShared: "Gemeinsames Wandtablet",
     selectProfile: "Profil auswählen",
@@ -70,9 +74,9 @@ const JB_I18N = {
     cold: "How quickly do you feel cold?",
     warm: "How quickly do you feel too warm?",
     wind: "How sensitive are you to wind?",
-    evening: "How often are you out for longer in the evening?",
+    evening: "When you spend longer outside in the evening, how active are you?",
     scale: ["Very little", "Rather little", "Neutral", "Rather strong", "Very strong"],
-    frequency: ["Almost never", "Rather rarely", "Mixed", "Rather often", "Almost always"],
+    frequency: ["Mostly standing/quiet", "Rather quiet", "Mixed", "Rather active", "Mostly active movement"],
     save: "Start profile",
     none: "No jacket needed",
     light: "Light jacket",
@@ -94,7 +98,8 @@ const JB_I18N = {
     perfect: "Perfect",
     tooWarm: "Too warm",
     notUsed: "Not used",
-    manualFeedback: "Rate current recommendation",
+    manualFeedback: "Voluntary feedback",
+    manualFeedbackAction: "Give feedback manually",
     oldRecommendation: "previous recommendation",
     currentRecommendation: "current recommendation",
     profile: "Profile",
@@ -121,6 +126,9 @@ const JB_I18N = {
     submitted: "Thanks – rating saved.",
     effective: "thermally about",
     work: "Work",
+    gusts: "Gusts",
+    nowOnly: "now only",
+    workWeatherUnavailable: "Work-location weather is currently unavailable. No estimate is shown rather than using weather from the wrong location.",
     editorTitle: "Title",
     editorShared: "Shared wall tablet",
     selectProfile: "Select profile",
@@ -145,7 +153,10 @@ class JackenBeraterCard extends HTMLElement {
     this._session = null;
     this._loading = false;
     this._setup = { cold: 3, warm: 3, wind: 3, evening: 3 };
-    this._selectedProfile = config.shared ? null : (config.profile_id || null);
+    this._selectedProfile = config.profile_id || null;
+    this._autoShared = false;
+    this._profileMetaLoaded = false;
+    this._manualFeedbackVisible = false;
     this._phasePending = null;
     this._notice = "";
     this._lastRefreshAt = 0;
@@ -195,8 +206,7 @@ class JackenBeraterCard extends HTMLElement {
     const hidden = this._preview?.recommendation?.display_mode === "hidden";
     const setup = this._preview?.profile?.setup_complete;
     const pending = this._preview?.feedback || [];
-    const latest = this._preview?.latest_session;
-    if (hidden && setup && pending.length === 0 && !(latest && !latest.feedback)) return 0;
+    if (hidden && setup && !this._open && pending.length === 0) return 0;
     return this._open ? 6 : 2;
   }
 
@@ -217,6 +227,17 @@ class JackenBeraterCard extends HTMLElement {
     return JB_I18N[this._lang()][key] ?? JB_I18N.de[key] ?? key;
   }
 
+  _errorText(err) {
+    const raw = err?.message || String(err);
+    if (raw.includes("work_weather_unavailable")) return this._t("workWeatherUnavailable");
+    if (raw.includes("weather_unavailable")) return this._t("noData");
+    return raw;
+  }
+
+  _sharedMode() {
+    return Boolean(this._config?.shared || this._autoShared);
+  }
+
   async _send(type, extra = {}) {
     if (!this._hass) return null;
     return this._hass.connection.sendMessagePromise({
@@ -231,10 +252,12 @@ class JackenBeraterCard extends HTMLElement {
     if (!this._hass || this._loading) return;
     this._loading = true;
     try {
-      if (this._config?.shared) {
+      if (!this._profileMetaLoaded || this._sharedMode()) {
         const profiles = await this._send("jackenberater/profiles");
         this._profiles = profiles?.profiles || [];
-        if (!this._selectedProfile) {
+        this._autoShared = Boolean(profiles?.shared_account);
+        this._profileMetaLoaded = true;
+        if (this._sharedMode() && !this._selectedProfile) {
           this._preview = null;
           this._error = "";
           this._lastRefreshAt = Date.now();
@@ -245,15 +268,16 @@ class JackenBeraterCard extends HTMLElement {
       this._error = "";
       this._lastRefreshAt = Date.now();
     } catch (err) {
-      this._error = err?.message || String(err);
+      this._error = this._errorText(err);
     } finally {
       this._loading = false;
       this._render();
     }
   }
 
+
   async _openAdvice() {
-    if (this._config?.shared && !this._selectedProfile) {
+    if (this._sharedMode() && !this._selectedProfile) {
       this._render();
       return;
     }
@@ -267,10 +291,11 @@ class JackenBeraterCard extends HTMLElement {
       this._open = false;
       this._phasePending = null;
       this._notice = "";
-      if (this._config?.shared) {
+      if (this._sharedMode()) {
         this._selectedProfile = null;
         this._preview = null;
         this._session = null;
+        this._manualFeedbackVisible = false;
         await this._refresh();
         return;
       }
@@ -279,6 +304,7 @@ class JackenBeraterCard extends HTMLElement {
     }
 
     this._notice = "";
+    this._manualFeedbackVisible = false;
     this._open = true;
     try {
       const response = await this._send("jackenberater/open_session");
@@ -287,7 +313,7 @@ class JackenBeraterCard extends HTMLElement {
       if (response?.feedback) this._preview.feedback = response.feedback;
       this._error = "";
     } catch (err) {
-      this._error = err?.message || String(err);
+      this._error = this._errorText(err);
     }
     this._render();
   }
@@ -297,14 +323,15 @@ class JackenBeraterCard extends HTMLElement {
       await this._send("jackenberater/profile_setup", this._setup);
       this._error = "";
       this._open = false;
-      if (this._config?.shared) {
+      if (this._sharedMode()) {
         this._selectedProfile = null;
         this._preview = null;
         this._session = null;
+        this._manualFeedbackVisible = false;
       }
       await this._refresh();
     } catch (err) {
-      this._error = err?.message || String(err);
+      this._error = this._errorText(err);
       this._render();
     }
   }
@@ -338,19 +365,34 @@ class JackenBeraterCard extends HTMLElement {
       if (this._session?.id === session.id) {
         this._session = null;
       }
+      this._manualFeedbackVisible = false;
       await this._refresh();
     } catch (err) {
-      this._error = err?.message || String(err);
+      this._error = this._errorText(err);
       this._render();
     }
   }
 
-  async _manualFeedback(rating) {
-    if (!this._session) {
+  async _prepareManualFeedback() {
+    // Manual feedback means “rate what I am seeing now”. Always refresh the
+    // recommendation session first so a detail panel left open for hours cannot
+    // train on stale weather/context from when it was originally opened.
+    try {
       const response = await this._send("jackenberater/open_session");
       this._session = response?.session || null;
+      if (response?.recommendation && this._preview) {
+        this._preview.recommendation = response.recommendation;
+      }
+      if (response?.feedback && this._preview) {
+        this._preview.feedback = response.feedback;
+      }
+      this._manualFeedbackVisible = Boolean(this._session);
+      this._error = "";
+    } catch (err) {
+      this._manualFeedbackVisible = false;
+      this._error = this._errorText(err);
     }
-    if (this._session) await this._feedback(this._session, rating, true);
+    this._render();
   }
 
   _jacketLabel(value) {
@@ -397,12 +439,12 @@ class JackenBeraterCard extends HTMLElement {
     const warmer = ["none", "light", "warm", "winter"].indexOf(rec.jacket_later) > ["none", "light", "warm", "winter"].indexOf(rec.jacket_now);
     if (this._lang() === "de") {
       return warmer
-        ? `Ab etwa ${when} ${this._jacketLabel(rec.jacket_later).toLowerCase()} ${this._t("takeLater")}.`
-        : `Ab etwa ${when} dürfte ${this._jacketLabel(rec.jacket_now).toLowerCase()} nicht mehr nötig sein.`;
+        ? `Ab etwa ${when} wird ${this._jacketLabel(rec.jacket_later).toLowerCase()} sinnvoll – wenn du bis dahin unterwegs bist, jetzt mitnehmen.`
+        : `Ab etwa ${when} reicht voraussichtlich ${this._jacketLabel(rec.jacket_later).toLowerCase()}.`;
     }
     return warmer
-      ? `From about ${when}, ${this._jacketLabel(rec.jacket_later).toLowerCase()} — ${this._t("takeLater")}.`
-      : `From about ${when}, ${this._jacketLabel(rec.jacket_now).toLowerCase()} will probably no longer be needed.`;
+      ? `From about ${when}, ${this._jacketLabel(rec.jacket_later).toLowerCase()} becomes useful — if you'll still be out then, take it with you now.`
+      : `From about ${when}, ${this._jacketLabel(rec.jacket_later).toLowerCase()} should be sufficient.`;
   }
 
   _reasonText(reason) {
@@ -422,7 +464,7 @@ class JackenBeraterCard extends HTMLElement {
 
   _render() {
     if (!this._config) return;
-    if (this._config.shared && !this._selectedProfile && this._profiles) {
+    if (this._sharedMode() && !this._selectedProfile && this._profiles) {
       const title = this._config.title || this._t("title");
       this.innerHTML = `<ha-card class="jb-card">${this._profilePicker({})}<div class="jb-main shared-select"><div class="jb-icon setup"><ha-icon icon="mdi:account-multiple-outline"></ha-icon></div><div class="jb-copy"><div class="jb-kicker">${jbEscape(title)}</div><div class="jb-headline">${this._t("selectProfile")}</div><div class="jb-sub">${this._t("selectProfileText")}</div></div></div></ha-card>${this._styles()}`;
       this._bind();
@@ -440,16 +482,14 @@ class JackenBeraterCard extends HTMLElement {
     const profile = this._preview?.profile || {};
     const rec = this._preview?.recommendation || {};
     const pending = this._preview?.feedback || [];
-    const latest = this._preview?.latest_session;
-    const hasRecentManualFeedback = Boolean(latest && !latest.feedback);
-    if (rec.display_mode === "hidden" && profile.setup_complete && !this._open && pending.length === 0 && !hasRecentManualFeedback) {
+    if (rec.display_mode === "hidden" && profile.setup_complete && !this._open && pending.length === 0) {
       this.innerHTML = `<div style="display:none"></div>`;
       return;
     }
 
-    const compact = (rec.display_mode === "compact" || (rec.display_mode === "hidden" && hasRecentManualFeedback)) && profile.setup_complete && !this._open;
+    const compact = rec.display_mode === "compact" && profile.setup_complete && !this._open;
     const title = this._config.title || this._t("title");
-    const profilePicker = this._config.shared ? this._profilePicker(profile) : "";
+    const profilePicker = this._sharedMode() ? this._profilePicker(profile) : "";
     const feedbackBadge = pending.length
       ? `<span class="jb-badge">${pending.length} ${pending.length === 1 ? this._t("feedbackOpen") : this._t("feedbackPlural")}</span>`
       : "";
@@ -506,17 +546,20 @@ class JackenBeraterCard extends HTMLElement {
     const pendingHtml = pending.length ? `<div class="jb-divider"></div><div class="jb-section-title">${pending.length} ${pending.length === 1 ? this._t("feedbackOpen") : this._t("feedbackPlural")}</div>${pending.map(session => this._feedbackCard(session, true)).join("")}` : "";
     const pendingIds = new Set(pending.map(session => session.id));
     const latest = this._preview?.latest_session;
-    const previousManual = latest && !latest.feedback && !pendingIds.has(latest.id) && latest.id !== this._session?.id
-      ? this._feedbackCard(latest, true, true)
-      : "";
-    const currentSession = this._session && !this._session.feedback ? this._feedbackCard(this._session, false, true) : "";
-    const manualHtml = previousManual || currentSession
-      ? `<div class="jb-divider"></div><div class="jb-section-title">${this._t("manualFeedback")}</div>${previousManual}${currentSession}`
+    const manualCandidate = [this._session, latest].find(session =>
+      session && !session.feedback && !pendingIds.has(session.id)
+    );
+    const manualHtml = manualCandidate
+      ? `<div class="jb-divider"></div><div class="jb-section-title">${this._t("manualFeedback")}</div>${
+          this._manualFeedbackVisible
+            ? this._feedbackCard(manualCandidate, false, true)
+            : `<button class="jb-manual-button" data-action="manual-feedback">${this._t("manualFeedbackAction")}</button>`
+        }</div>`
       : "";
     const phase = this._phasePending ? this._phasePanel() : "";
     return `<div class="jb-panel">
       ${rain}
-      <div class="jb-metrics"><span>${rec.current_temperature_c ?? "–"} °C</span><span>${rec.current_wind_kmh != null ? `${rec.current_wind_kmh} km/h` : "–"}</span><span>${rec.horizon_hours} h</span></div>
+      <div class="jb-metrics"><span>${rec.current_temperature_c ?? "–"} °C</span><span>${rec.current_wind_kmh != null ? `${rec.current_wind_kmh} km/h${rec.current_gust_kmh != null && rec.current_gust_kmh > rec.current_wind_kmh ? ` · ${this._t("gusts")} ${rec.current_gust_kmh} km/h` : ""}` : (rec.current_gust_kmh != null ? `${this._t("gusts")} ${rec.current_gust_kmh} km/h` : "–")}</span><span>${rec.horizon_hours > 0 ? `${rec.horizon_hours} h` : this._t("nowOnly")}</span></div>
       ${rec.work_context && rec.work_jacket ? `<div class="jb-context"><ha-icon icon="mdi:briefcase-outline"></ha-icon>${jbEscape(rec.work_name || this._t("work"))}: ${this._jacketLabel(rec.work_jacket)}</div>` : ""}
       ${reasons.length ? `<div class="jb-section-title">${this._t("why")}</div><ul class="jb-reasons">${reasons.map(x => `<li>${jbEscape(x)}</li>`).join("")}</ul>` : ""}
       <div class="jb-learning"><span>${this._t("confidence")}: ${Math.round((profile.confidence || 0) * 100)} %</span><span>${this._t("feedbackCount")}: ${profile.total_feedback || 0}</span></div>
@@ -551,6 +594,9 @@ class JackenBeraterCard extends HTMLElement {
 
   _bind() {
     this.querySelector("[data-action='open']")?.addEventListener("click", () => this._openAdvice());
+    this.querySelector("[data-action='manual-feedback']")?.addEventListener("click", async () => {
+      await this._prepareManualFeedback();
+    });
     this.querySelector("#jb-save-setup")?.addEventListener("click", () => this._saveSetup());
     this.querySelectorAll("[data-scale]").forEach(el => el.addEventListener("click", () => this._setScale(el.dataset.scale, el.dataset.value)));
     this.querySelector("#jb-profile")?.addEventListener("change", async ev => {
@@ -559,6 +605,7 @@ class JackenBeraterCard extends HTMLElement {
       this._open = false;
       this._session = null;
       this._phasePending = null;
+      this._manualFeedbackVisible = false;
       this._notice = "";
       this._error = "";
       await this._refresh();
@@ -591,7 +638,7 @@ class JackenBeraterCard extends HTMLElement {
       .jb-copy{min-width:0;flex:1}.jb-kicker{font-size:12px;color:var(--secondary-text-color);font-weight:600;margin-bottom:3px}.jb-headline{font-size:19px;line-height:1.2;font-weight:700;color:var(--primary-text-color)}.jb-sub{font-size:13px;line-height:1.35;color:var(--secondary-text-color);margin-top:4px}.jb-chevron{color:var(--secondary-text-color);flex:none}.jb-badge{font-size:11px;padding:5px 8px;border-radius:999px;background:color-mix(in srgb,var(--primary-color) 13%,transparent);color:var(--primary-text-color);white-space:nowrap}
       .jb-panel{padding:0 18px 18px}.jb-panel-title{font-size:18px;font-weight:700;margin:2px 0 7px}.jb-panel-text{font-size:13px;color:var(--secondary-text-color);line-height:1.45;margin-bottom:16px}.jb-question{margin:15px 0}.jb-question>div:first-child{font-weight:600;font-size:14px;margin-bottom:8px}.jb-scale{display:grid;grid-template-columns:repeat(5,1fr);gap:7px}.jb-scale button{border:1px solid var(--divider-color);background:color-mix(in srgb,var(--card-background-color) 82%,transparent);color:var(--primary-text-color);border-radius:11px;padding:8px 0;cursor:pointer}.jb-scale button.active{background:var(--primary-color);color:var(--text-primary-color,#fff);border-color:var(--primary-color)}.jb-scale-label{display:flex;justify-content:space-between;font-size:10px;color:var(--secondary-text-color);margin-top:5px}.jb-actions{display:flex;justify-content:flex-end;margin-top:18px}.jb-actions button.primary{border:0;border-radius:11px;padding:10px 15px;background:var(--primary-color);color:var(--text-primary-color,#fff);font-weight:600;cursor:pointer}
       .jb-metrics{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 12px}.jb-metrics span,.jb-learning span{font-size:12px;padding:5px 9px;border-radius:999px;background:color-mix(in srgb,var(--primary-text-color) 6%,transparent);color:var(--secondary-text-color)}.jb-rain,.jb-context{display:flex;gap:8px;align-items:center;padding:10px 12px;border-radius:12px;background:color-mix(in srgb,#2196f3 10%,transparent);margin-bottom:12px;font-size:13px}.jb-rain.strong{background:color-mix(in srgb,#2196f3 18%,transparent);font-weight:600}.jb-section-title{font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--secondary-text-color);font-weight:700;margin:14px 0 7px}.jb-reasons{margin:0;padding-left:20px;color:var(--primary-text-color);font-size:13px;line-height:1.45}.jb-learning{display:flex;gap:8px;margin-top:14px}.jb-divider{height:1px;background:var(--divider-color);margin:17px 0}
-      .jb-feedback{padding:11px 0}.jb-feedback+.jb-feedback{border-top:1px solid var(--divider-color)}.jb-feedback-time{font-size:11px;color:var(--secondary-text-color);margin-bottom:5px}.jb-feedback-rec{font-weight:650;display:flex;justify-content:space-between;gap:10px}.jb-feedback-rec span{font-size:12px;font-weight:400;color:var(--secondary-text-color)}.jb-unusual{display:flex;align-items:center;gap:7px;margin-top:8px;font-size:11px;color:var(--secondary-text-color);font-weight:400}.jb-unusual input{margin:0}.jb-feedback-buttons{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px;margin-top:9px}.jb-feedback-buttons button,.jb-phase-buttons button{border:1px solid var(--divider-color);background:transparent;color:var(--primary-text-color);border-radius:10px;padding:8px 5px;font-size:11px;cursor:pointer}.jb-phase{margin-top:12px;padding:12px;border-radius:12px;background:color-mix(in srgb,var(--primary-color) 8%,transparent);font-size:13px;font-weight:600}.jb-phase-buttons{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}.jb-notice{margin-top:10px;font-size:12px;color:var(--success-color,#43a047)}
+      .jb-feedback{padding:11px 0}.jb-feedback+.jb-feedback{border-top:1px solid var(--divider-color)}.jb-feedback-time{font-size:11px;color:var(--secondary-text-color);margin-bottom:5px}.jb-feedback-rec{font-weight:650;display:flex;justify-content:space-between;gap:10px}.jb-feedback-rec span{font-size:12px;font-weight:400;color:var(--secondary-text-color)}.jb-unusual{display:flex;align-items:center;gap:7px;margin-top:8px;font-size:11px;color:var(--secondary-text-color);font-weight:400}.jb-unusual input{margin:0}.jb-feedback-buttons{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px;margin-top:9px}.jb-feedback-buttons button,.jb-phase-buttons button{border:1px solid var(--divider-color);background:transparent;color:var(--primary-text-color);border-radius:10px;padding:8px 5px;font-size:11px;cursor:pointer}.jb-manual-button{border:1px solid var(--divider-color);background:transparent;color:var(--secondary-text-color);border-radius:10px;padding:8px 10px;font-size:11px;cursor:pointer}.jb-phase{margin-top:12px;padding:12px;border-radius:12px;background:color-mix(in srgb,var(--primary-color) 8%,transparent);font-size:13px;font-weight:600}.jb-phase-buttons{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}.jb-notice{margin-top:10px;font-size:12px;color:var(--success-color,#43a047)}
       .jb-profile-row{display:flex;justify-content:flex-end;align-items:center;gap:8px;padding:9px 16px 0;font-size:11px;color:var(--secondary-text-color)}.jb-profile-row select{border:1px solid var(--divider-color);border-radius:9px;background:var(--card-background-color);color:var(--primary-text-color);padding:5px 8px}.jb-loading,.jb-error{padding:18px}.jb-error{display:flex;gap:9px;align-items:center;color:var(--error-color)}
       @media(max-width:520px){.jb-feedback-buttons{grid-template-columns:repeat(2,1fr)}.jb-badge{display:none}}
     </style>`;
@@ -605,9 +652,8 @@ class JackenBeraterCardEditor extends HTMLElement {
     if (!this._config) return;
     const lang = (this._hass?.language || "de").toLowerCase().startsWith("de") ? "de" : "en";
     const t = JB_I18N[lang];
-    this.innerHTML = `<div class="editor"><ha-textfield id="title" label="${t.editorTitle}" value="${jbEscape(this._config.title || "")}"></ha-textfield><label><ha-switch id="shared" ${this._config.shared ? "checked" : ""}></ha-switch><span>${t.editorShared}</span></label></div><style>.editor{display:grid;gap:16px;padding:8px 0}.editor label{display:flex;align-items:center;gap:10px}</style>`;
+    this.innerHTML = `<div class="editor"><ha-textfield id="title" label="${t.editorTitle}" value="${jbEscape(this._config.title || "")}"></ha-textfield></div><style>.editor{display:grid;gap:16px;padding:8px 0}</style>`;
     this.querySelector("#title")?.addEventListener("change", ev => this._update({ title: ev.target.value || undefined }));
-    this.querySelector("#shared")?.addEventListener("change", ev => this._update({ shared: ev.target.checked || undefined }));
   }
   _update(patch) {
     this._config = { ...this._config, ...patch };

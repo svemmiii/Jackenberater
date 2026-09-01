@@ -44,7 +44,7 @@ def point(hours: int, temp: float, **kwargs):
     )
 
 
-def test_stable_hot_weather_hides_card():
+def test_young_profile_keeps_clear_hot_advice_reachable():
     model = PersonalModel.from_answers(3, 3, 3, 3)
     rec = engine.build_recommendation(
         point(0, 28, condition="sunny"),
@@ -53,6 +53,21 @@ def test_stable_hot_weather_hides_card():
         indoor_temperature_c=22,
     )
     assert rec.jacket_now == const.JACKET_NONE
+    assert rec.display_mode == const.DISPLAY_COMPACT
+
+
+def test_mature_confident_profile_can_hide_clear_hot_advice():
+    model = PersonalModel.from_answers(3, 3, 3, 3)
+    for _ in range(30):
+        learning.apply_feedback(
+            model, rating=const.FEEDBACK_PERFECT, jacket=const.JACKET_NONE
+        )
+    rec = engine.build_recommendation(
+        point(0, 28, condition="sunny"),
+        [point(i, 27 + i * 0.05, condition="sunny") for i in range(1, 10)],
+        model,
+        indoor_temperature_c=22,
+    )
     assert rec.display_mode == const.DISPLAY_HIDDEN
 
 
@@ -157,10 +172,10 @@ def test_model_storage_is_fixed_shape_after_many_feedbacks():
     assert len(json.dumps(stored)) < 2500
 
 
-def test_current_only_recommendation_has_short_feedback_horizon():
+def test_current_only_recommendation_has_no_fake_forecast_horizon():
     model = PersonalModel.from_answers(3, 3, 3, 3)
     rec = engine.build_recommendation(point(0, 16), [], model, indoor_temperature_c=22)
-    assert rec.horizon_hours == 1
+    assert rec.horizon_hours == 0
 
 
 def test_work_location_rain_can_raise_rain_advice():
@@ -181,8 +196,11 @@ def test_work_location_rain_can_raise_rain_advice():
     assert rec.rain_status == const.RAIN_RECOMMENDED
 
 
-def test_perfect_feedback_confirms_relevant_jacket_boundaries():
+def test_perfect_feedback_confirms_nearest_relevant_jacket_boundary():
     model = PersonalModel.from_answers(3, 3, 3, 3)
+    # 17.5 °C is much closer to the none/light boundary (~18 °C) than to
+    # light/warm (~12 °C), so perfect feedback should not make both borders
+    # equally certain.
     for _ in range(12):
         learning.apply_feedback(
             model,
@@ -190,11 +208,12 @@ def test_perfect_feedback_confirms_relevant_jacket_boundaries():
             jacket=const.JACKET_LIGHT,
             wind_kmh=5,
             transition_penalty_c=0,
+            effective_c=17.5,
         )
     assert model.light_stat.samples == 12
-    assert model.warm_stat.samples == 12
+    assert model.warm_stat.samples == 0
     assert model.light_stat.confidence > 0
-    assert model.warm_stat.confidence > 0
+    assert model.warm_stat.confidence == 0
 
 
 def test_unusual_day_counts_less_toward_learning_confidence():
@@ -291,6 +310,8 @@ def test_work_window_removes_home_points_even_without_work_forecast():
 def test_feedback_policy_periodic_sampling_does_not_freeze():
     model = PersonalModel.from_answers(3, 3, 3, 3)
     model.total_feedback = 10
+    model.general_stat.samples = 10
+    model.general_stat.weight_sum = 10.0
     model.feedback_opportunities = 11
     assert not learning.should_request_feedback(
         model, near_threshold=False, class_change=False, unusual_weather=False, decision_confidence=0.9, opportunity_count=11
@@ -336,6 +357,390 @@ def test_corrupt_running_stat_storage_falls_back_safely():
     assert model.total_feedback == 0
 
 
+def test_past_work_points_cannot_change_future_recommendation():
+    model = PersonalModel.from_answers(3, 3, 3, 3)
+    current = point(0, 22)
+    future = [point(1, 22), point(2, 22)]
+    past_work = WeatherPoint(
+        dt=current.dt - timedelta(hours=2),
+        temperature_c=-3,
+        condition="rainy",
+        precipitation_probability=100,
+        precipitation_mm=4,
+    )
+    rec = engine.build_recommendation(
+        current, future, model, indoor_temperature_c=22, work_points=[past_work]
+    )
+    assert rec.jacket_later == const.JACKET_NONE
+    assert rec.rain_status == const.RAIN_NONE
+    assert rec.later_at is None
+
+
+def test_wind_learning_requires_applied_wind_penalty_not_raw_speed():
+    model = PersonalModel.from_answers(3, 3, 3, 3)
+    model.total_feedback = 11
+    model.general_stat.samples = 11
+    model.general_stat.weight_sum = 11.0
+    learning.apply_feedback(
+        model,
+        rating=const.FEEDBACK_TOO_COLD,
+        jacket=const.JACKET_NONE,
+        wind_kmh=35,
+        wind_penalty_c=0.0,
+    )
+    assert model.wind_stat.samples == 0
+    before = model.wind_bias_c
+    learning.apply_feedback(
+        model,
+        rating=const.FEEDBACK_TOO_COLD,
+        jacket=const.JACKET_LIGHT,
+        wind_kmh=15,
+        wind_penalty_c=1.0,
+    )
+    assert model.wind_stat.samples == 1
+    assert model.wind_bias_c > before
+
+
+def test_voluntary_feedback_has_normal_learning_weight():
+    normal = PersonalModel.from_answers(3, 3, 3, 3)
+    voluntary = PersonalModel.from_answers(3, 3, 3, 3)
+    learning.apply_feedback(
+        normal, rating=const.FEEDBACK_TOO_COLD, jacket=const.JACKET_NONE, voluntary=False
+    )
+    learning.apply_feedback(
+        voluntary, rating=const.FEEDBACK_TOO_COLD, jacket=const.JACKET_NONE, voluntary=True
+    )
+    assert normal.general_stat.weight_sum == voluntary.general_stat.weight_sum == 1.0
+    assert normal.general_offset_c == voluntary.general_offset_c
+
+
+def test_recommendation_confidence_is_specific_to_shown_jacket_change():
+    model = PersonalModel.from_answers(3, 3, 3, 3)
+    # Mature overall/no-jacket knowledge, but no winter-boundary experience.
+    for _ in range(30):
+        learning.apply_feedback(
+            model, rating=const.FEEDBACK_PERFECT, jacket=const.JACKET_NONE
+        )
+    rec = engine.build_recommendation(
+        point(0, 23), [point(1, 2)], model, indoor_temperature_c=22
+    )
+    assert rec.jacket_now == const.JACKET_NONE
+    assert rec.jacket_later == const.JACKET_WINTER
+    assert rec.confidence == 0.0
+
+
 def test_manifest_version_matches_runtime_version():
     manifest = json.loads((ROOT / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["version"] == const.INTEGRATION_VERSION
+
+
+def test_single_future_work_rain_is_take_not_current_rain():
+    model = PersonalModel.from_answers(3, 3, 3, 3)
+    home = [point(i, 20, precipitation_probability=0) for i in range(1, 10)]
+    work = [
+        point(3, 18, condition="rainy", precipitation_probability=80, precipitation_mm=0.4),
+    ]
+    rec = engine.build_recommendation(
+        point(0, 20),
+        home,
+        model,
+        indoor_temperature_c=22,
+        work_points=work,
+        work_start=work[0].dt,
+    )
+    assert rec.rain_status == const.RAIN_TAKE
+
+
+def test_future_work_rain_matches_same_future_home_rain_strength():
+    model = PersonalModel.from_answers(3, 3, 3, 3)
+    rainy = point(3, 18, condition="rainy", precipitation_probability=80, precipitation_mm=0.4)
+    home_rec = engine.build_recommendation(
+        point(0, 20),
+        [rainy],
+        model,
+        indoor_temperature_c=22,
+    )
+    work_rec = engine.build_recommendation(
+        point(0, 20),
+        [point(1, 20, precipitation_probability=0)],
+        model,
+        indoor_temperature_c=22,
+        work_points=[rainy],
+        work_start=rainy.dt,
+    )
+    assert work_rec.rain_status == home_rec.rain_status == const.RAIN_TAKE
+
+
+def test_horizon_extends_for_short_cold_spike_between_hour_9_and_12():
+    model = PersonalModel.from_answers(3, 3, 3, 3)
+    future = [point(i, 20) for i in range(1, 10)] + [
+        point(10, 2),
+        point(11, 20),
+        point(12, 20),
+    ]
+    rec = engine.build_recommendation(
+        point(0, 20), future, model, indoor_temperature_c=22
+    )
+    assert rec.horizon_hours == 12
+    assert rec.jacket_later == const.JACKET_WINTER
+    assert rec.later_at == point(10, 2).dt
+
+
+def test_horizon_extends_for_short_wind_spike_between_hour_9_and_12():
+    model = PersonalModel.from_answers(3, 3, 3, 3)
+    future = [point(i, 13, wind_kmh=5) for i in range(1, 10)] + [
+        point(10, 13, wind_kmh=60),
+        point(11, 13, wind_kmh=5),
+        point(12, 13, wind_kmh=5),
+    ]
+    rec = engine.build_recommendation(
+        point(0, 13, wind_kmh=5), future, model, indoor_temperature_c=13
+    )
+    assert rec.horizon_hours == 12
+    assert "wind" in rec.reasons
+
+
+def test_wind_penalty_is_continuous_around_five_kmh():
+    below = engine._wind_penalty(0.0, 4.79)
+    above = engine._wind_penalty(0.0, 4.81)
+    assert abs(above - below) < 0.10
+
+
+def test_wind_penalty_is_continuous_around_ten_celsius():
+    below = engine._wind_penalty(9.99, 30.0)
+    above = engine._wind_penalty(10.01, 30.0)
+    assert abs(above - below) < 0.10
+
+
+def test_humidity_adjustment_is_continuous_at_transition_temperatures():
+    cold_below = engine._humidity_adjustment(9.99, 100.0)
+    cold_above = engine._humidity_adjustment(10.01, 100.0)
+    warm_below = engine._humidity_adjustment(23.99, 100.0)
+    warm_above = engine._humidity_adjustment(24.01, 100.0)
+    assert abs(cold_above - cold_below) < 0.05
+    assert abs(warm_above - warm_below) < 0.05
+
+
+def test_later_decision_preserves_its_reason():
+    model = PersonalModel.from_answers(3, 3, 3, 3)
+    rec = engine.build_recommendation(
+        point(0, 13, wind_kmh=5),
+        [point(2, 13, wind_kmh=60)],
+        model,
+        indoor_temperature_c=13,
+    )
+    assert rec.jacket_later != rec.jacket_now
+    assert "forecast_change" in rec.reasons
+    assert "wind" in rec.reasons
+
+
+def test_personal_reason_is_set_when_learned_threshold_changes_class():
+    model = PersonalModel.from_answers(3, 3, 3, 3)
+    model.light_threshold_delta_c = 4.0
+    result = engine.assess_point(point(0, 20), model)
+    assert result.jacket == const.JACKET_LIGHT
+    assert "personal" in result.reasons
+
+
+def test_same_class_future_threshold_does_not_create_unlearnable_feedback_target():
+    model = PersonalModel.from_answers(3, 3, 3, 3)
+    rec = engine.build_recommendation(
+        point(0, 25),
+        [point(2, 18.1)],
+        model,
+        indoor_temperature_c=25,
+    )
+    assert rec.jacket_later == rec.jacket_now
+    assert rec.later_at is None
+    assert "near_threshold" not in rec.reasons
+
+
+def test_current_only_recommendation_reports_zero_forecast_hours():
+    model = PersonalModel.from_answers(3, 3, 3, 3)
+    rec = engine.build_recommendation(point(0, 16), [], model, indoor_temperature_c=22)
+    assert rec.horizon_hours == 0
+
+
+def test_work_points_beyond_calendar_max_horizon_are_ignored():
+    model = PersonalModel.from_answers(3, 3, 3, 3)
+    home = [point(i, 20) for i in range(1, 10)]
+    rec = engine.build_recommendation(
+        point(0, 20),
+        home,
+        model,
+        indoor_temperature_c=22,
+        work_points=[point(20, 0, condition="rainy", precipitation_probability=100, precipitation_mm=5)],
+    )
+    assert rec.jacket_later == const.JACKET_NONE
+    assert rec.later_at is None
+    assert rec.rain_status == const.RAIN_NONE
+    assert rec.work_context is False
+    assert rec.horizon_hours <= const.CALENDAR_MAX_HOURS
+
+
+def test_work_override_clears_later_target_when_final_class_matches_now():
+    model = PersonalModel.from_answers(3, 3, 3, 3)
+    home = [point(i, 14) for i in range(1, 10)]
+    rec = engine.build_recommendation(
+        point(0, 8),
+        home,
+        model,
+        indoor_temperature_c=8,
+        work_points=[point(14, 11.9)],
+    )
+    assert rec.jacket_now == const.JACKET_WARM
+    assert rec.jacket_later == const.JACKET_WARM
+    assert rec.later_at is None
+    assert rec.later_temperature_c is None
+    assert "near_threshold" not in rec.reasons
+
+
+def test_sparse_far_forecast_cannot_hide_card():
+    model = PersonalModel.from_answers(3, 3, 3, 3)
+    for _ in range(30):
+        learning.apply_feedback(
+            model, rating=const.FEEDBACK_PERFECT, jacket=const.JACKET_NONE
+        )
+    rec = engine.build_recommendation(
+        point(0, 28, condition="sunny"),
+        [point(9, 28, condition="sunny")],
+        model,
+        indoor_temperature_c=22,
+    )
+    assert rec.horizon_hours == 9
+    assert rec.display_mode == const.DISPLAY_COMPACT
+
+
+def test_rain_streak_breaks_across_large_forecast_gap():
+    status = engine._rain_status_forecast_only([
+        point(1, 18, condition="rainy"),
+        point(6, 18, condition="rainy"),
+    ])
+    assert status == const.RAIN_TAKE
+
+
+def test_personal_reason_includes_learned_wind_sensitivity_when_it_changes_class():
+    neutral = PersonalModel.from_answers(3, 3, 3, 3)
+    personal = PersonalModel.from_answers(3, 3, 3, 3)
+    personal.wind_bias_c = 4.0
+    candidate = None
+    for temp in [x / 10 for x in range(40, 181)]:
+        for wind in range(10, 61, 5):
+            base = engine.assess_point(point(0, temp, wind_kmh=wind), neutral)
+            learned = engine.assess_point(point(0, temp, wind_kmh=wind), personal)
+            if base.jacket != learned.jacket:
+                candidate = learned
+                break
+        if candidate is not None:
+            break
+    assert candidate is not None
+    assert "personal" in candidate.reasons
+
+
+def test_lighter_later_waits_until_lightest_class_stays_sufficient():
+    model = PersonalModel.from_answers(3, 3, 3, 3)
+    current = point(0, 8)
+    future = [point(1, 14), point(2, 8), point(3, 14)]
+    rec = engine.build_recommendation(current, future, model, indoor_temperature_c=8)
+    assert rec.jacket_now == const.JACKET_WARM
+    assert rec.jacket_later == const.JACKET_LIGHT
+    assert rec.later_at == future[2].dt
+
+
+def test_future_rain_only_does_not_become_thermal_active_learning_trigger():
+    model = PersonalModel.from_answers(3, 3, 3, 3)
+    for _ in range(30):
+        learning.apply_feedback(
+            model,
+            rating=const.FEEDBACK_PERFECT,
+            jacket=const.JACKET_NONE,
+            effective_c=25.0,
+        )
+    future = [point(i, 25) for i in range(1, 8)] + [
+        point(8, 25, condition="rainy", precipitation_probability=80, precipitation_mm=1.0)
+    ]
+    rec = engine.build_recommendation(point(0, 25), future, model, indoor_temperature_c=22)
+    assert rec.rain_status != const.RAIN_NONE
+    assert "rain" in rec.reasons
+    assert "uncertain_conditions" not in rec.reasons
+
+
+def test_perfect_warm_rating_does_not_inflate_far_winter_boundary():
+    model = PersonalModel.from_answers(3, 3, 3, 3)
+    for _ in range(30):
+        learning.apply_feedback(
+            model,
+            rating=const.FEEDBACK_PERFECT,
+            jacket=const.JACKET_WARM,
+            effective_c=11.0,
+        )
+    assert model.warm_stat.samples == 30
+    assert model.winter_stat.samples == 0
+
+
+def test_unusual_days_keep_model_in_fast_learning_until_weighted_experience_is_mature():
+    model = PersonalModel.from_answers(3, 3, 3, 3)
+    for _ in range(10):
+        learning.apply_feedback(
+            model,
+            rating=const.FEEDBACK_TOO_COLD,
+            jacket=const.JACKET_NONE,
+            effective_c=19.0,
+            unusual_day=True,
+        )
+    assert model.total_feedback == 10
+    assert abs(model.general_stat.weight_sum - 3.0) < 1e-9
+    assert learning.should_request_feedback(
+        model,
+        near_threshold=False,
+        class_change=False,
+        unusual_weather=False,
+        decision_confidence=0.9,
+        opportunity_count=11,
+    )
+
+
+def test_partlycloudy_without_daylight_signal_has_no_solar_bonus():
+    model = PersonalModel.from_answers(3, 3, 3, 3)
+    result = engine.assess_point(
+        point(0, 17.5, condition="partlycloudy", cloud_coverage=30),
+        model,
+    )
+    assert result.solar_gain_c == 0.0
+
+
+def test_corrupt_scalar_storage_is_sanitized_instead_of_crashing_engine():
+    model = PersonalModel.from_dict({
+        "setup_complete": True,
+        "general_offset_c": "oops",
+        "wind_bias_c": float("inf"),
+        "transition_bias_c": None,
+        "light_threshold_delta_c": "999",
+        "total_feedback": "broken",
+    })
+    assert model.general_offset_c == 0.0
+    assert model.wind_bias_c == 0.0
+    assert model.transition_bias_c == 0.0
+    assert model.light_threshold_delta_c == 4.0
+    assert model.total_feedback == 0
+    rec = engine.build_recommendation(point(0, 18), [], model, indoor_temperature_c=22)
+    assert rec.jacket_now in const.JACKET_LEVELS
+
+
+def test_hidden_requires_coverage_to_the_actual_work_extended_horizon():
+    model = PersonalModel.from_answers(3, 3, 3, 3)
+    for _ in range(30):
+        learning.apply_feedback(
+            model, rating=const.FEEDBACK_PERFECT, jacket=const.JACKET_NONE
+        )
+    rec = engine.build_recommendation(
+        point(0, 28, condition="sunny"),
+        [point(i, 28, condition="sunny") for i in range(1, 10)],
+        model,
+        indoor_temperature_c=22,
+        base_horizon_hours=9,
+        max_horizon_hours=14,
+        work_points=[point(14, 28, condition="sunny")],
+    )
+    assert rec.horizon_hours == 14
+    assert rec.display_mode == const.DISPLAY_COMPACT

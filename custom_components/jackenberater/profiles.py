@@ -14,6 +14,9 @@ from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
 from .const import (
+    FEEDBACK_MIN_DELAY,
+    FEEDBACK_NOT_USED,
+    FEEDBACK_PERFECT,
     FEEDBACK_VALUES,
     MAX_OPEN_FEEDBACK,
     MAX_RECENT_SESSIONS,
@@ -108,6 +111,10 @@ class ProfileManager:
                 SIGNAL_PROFILE_CREATED.format(entry_id=self.entry.entry_id),
                 profile_id,
             )
+        elif changed:
+            # Existing entities listen for profile updates so a later Home
+            # Assistant user rename can refresh their translated display name.
+            self._updated(profile_id)
         return self.get_model(profile_id)
 
     async def async_setup_profile(
@@ -163,11 +170,11 @@ class ProfileManager:
             created = _parse_dt(session.get("created_at"))
             if created is None or (now - created).total_seconds() > 600:
                 break
-            old_rec = session.get("recommendation", {})
             if (
-                old_rec.get("jacket_now") == recommendation.jacket_now
-                and old_rec.get("jacket_later") == recommendation.jacket_later
-                and session.get("feedback") is None
+                session.get("feedback") is None
+                and _session_context_matches(
+                    session, recommendation, weather_context, learning_contexts
+                )
             ):
                 return deepcopy(session)
 
@@ -176,7 +183,7 @@ class ProfileManager:
         class_change = recommendation.jacket_now != recommendation.jacket_later
         unusual_weather = any(
             key in recommendation.reasons
-            for key in ("wind", "wet", "rain", "work_location", "uncertain_conditions")
+            for key in ("wind", "wet", "work_location", "uncertain_conditions")
         )
         if model.learning_enabled:
             model.feedback_opportunities += 1
@@ -192,8 +199,12 @@ class ProfileManager:
         )
         raw["model"] = model.to_dict()
 
-        horizon = max(1, int(recommendation.horizon_hours))
-        ready_at = now + timedelta(hours=horizon)
+        ready_at = now + FEEDBACK_MIN_DELAY
+        if (
+            recommendation.later_at is not None
+            and recommendation.jacket_later != recommendation.jacket_now
+        ):
+            ready_at = max(ready_at, recommendation.later_at + FEEDBACK_MIN_DELAY)
         expires_at = now + SESSION_EXPIRY
         session = {
             "id": uuid.uuid4().hex[:12],
@@ -252,12 +263,30 @@ class ProfileManager:
             raise ValueError("feedback expired")
 
         model = self.get_model(profile_id)
-        # Only the newest feedback needs an undo snapshot. Keeping one compact
-        # snapshot instead of one per historical session keeps storage smaller.
-        for old_session in self._sessions(profile_id):
-            old_session["learning_before"] = None
-        session["learning_before"] = model.to_dict()
+        # Only feedback that can actually change the learning model becomes the
+        # new undo point. "Not used" (or feedback while learning is paused) must
+        # not consume the previous meaningful undo snapshot.
+        will_learn = (
+            model.learning_enabled
+            and rating != FEEDBACK_NOT_USED
+            and recommendation_used is not False
+        )
+        if will_learn:
+            for old_session in self._sessions(profile_id):
+                old_session["learning_before"] = None
+            session["learning_before"] = model.to_dict()
+        else:
+            session["learning_before"] = None
         recommendation = session.get("recommendation", {})
+        # “Perfect” on a recommendation that deliberately changed jacket class is
+        # confirmation of the whole recommendation. Do not ask an extra question;
+        # use the existing PHASE_ALL path so both relevant boundaries are learned.
+        if (
+            rating == FEEDBACK_PERFECT
+            and phase is None
+            and recommendation.get("jacket_now") != recommendation.get("jacket_later")
+        ):
+            phase = PHASE_ALL
         contexts = session.get("learning_contexts", {})
         start_context = contexts.get("start") if isinstance(contexts, dict) else None
         later_context = contexts.get("later") if isinstance(contexts, dict) else None
@@ -289,7 +318,9 @@ class ProfileManager:
                 rating=rating,
                 jacket=str(target.get("jacket") or recommendation.get("jacket_now") or "none"),
                 wind_kmh=_safe_float(target.get("wind_kmh")),
+                wind_penalty_c=_safe_float(target.get("wind_penalty_c")),
                 transition_penalty_c=_safe_float(target.get("transition_penalty_c")) or 0.0,
+                effective_c=_safe_float(target.get("effective_c")),
                 phase=target_phase,
                 recommendation_used=recommendation_used,
                 unusual_day=bool(unusual_day),
@@ -437,6 +468,65 @@ def _bounded_sessions(sessions: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ]
     keep_indexes = protected_indexes | set(ordinary_indexes[-remaining_slots:])
     return [session for index, session in enumerate(eligible) if index in keep_indexes]
+
+
+def _optional_close(a: Any, b: Any, tolerance: float) -> bool:
+    left = _safe_float(a)
+    right = _safe_float(b)
+    if left is None or right is None:
+        return left is None and right is None
+    return abs(left - right) <= tolerance
+
+
+def _session_context_matches(
+    session: dict[str, Any],
+    recommendation: Recommendation,
+    weather_context: dict[str, Any],
+    learning_contexts: dict[str, dict[str, Any]],
+) -> bool:
+    """Return whether reusing a recent session would train the same conditions."""
+    old_rec = session.get("recommendation")
+    old_learning = session.get("learning_contexts")
+    if not isinstance(old_rec, dict) or not isinstance(old_learning, dict):
+        return False
+
+    new_rec = recommendation.as_dict()
+    exact_keys = (
+        "jacket_now",
+        "jacket_later",
+        "later_at",
+        "rain_status",
+        "source",
+        "work_jacket",
+        "work_context",
+    )
+    if any(old_rec.get(key) != new_rec.get(key) for key in exact_keys):
+        return False
+    if not _optional_close(old_rec.get("effective_now_c"), new_rec.get("effective_now_c"), 0.5):
+        return False
+
+    old_start = old_learning.get("start")
+    old_later = old_learning.get("later")
+    new_start = learning_contexts.get("start")
+    new_later = learning_contexts.get("later")
+    if not all(isinstance(item, dict) for item in (old_start, old_later, new_start, new_later)):
+        return False
+
+    for old_ctx, new_ctx in ((old_start, new_start), (old_later, new_later)):
+        if old_ctx.get("jacket") != new_ctx.get("jacket"):
+            return False
+        if not _optional_close(old_ctx.get("effective_c"), new_ctx.get("effective_c"), 0.5):
+            return False
+        if not _optional_close(old_ctx.get("wind_penalty_c"), new_ctx.get("wind_penalty_c"), 0.25):
+            return False
+        if not _optional_close(old_ctx.get("transition_penalty_c"), new_ctx.get("transition_penalty_c"), 0.25):
+            return False
+
+    old_weather = session.get("weather")
+    if isinstance(old_weather, dict):
+        if old_weather.get("condition") != weather_context.get("condition"):
+            return False
+    return True
 
 
 def _parse_dt(value: Any) -> datetime | None:
