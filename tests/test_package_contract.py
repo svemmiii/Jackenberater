@@ -39,6 +39,9 @@ def test_local_brand_icon_is_present_and_hacs_does_not_ignore_brands():
 
 def test_private_profiles_are_not_exposed_as_global_ha_entities():
     for module in ("button.py", "switch.py", "sensor.py", "entity.py"):
-        assert not (INTEGRATION / module).exists()
+        source = (INTEGRATION / module).read_text(encoding="utf-8")
+        assert "Compatibility placeholder" in source
+        assert "ProfileManager" not in source
+        assert "Entity" not in source.replace("entities", "")
     init_source = (INTEGRATION / "__init__.py").read_text(encoding="utf-8")
     assert "async_forward_entry_setups" not in init_source
