@@ -1,5 +1,57 @@
 # Changelog
 
+## v0.1.2
+
+### Audit-Korrekturen vor der Erstveröffentlichung
+
+- Shared-/Wandtablet-Konten sind reine Anzeige- und Auswahlkonten. Sie dürfen fremde Profile für Empfehlungen auswählen, aber weder Sessions/Feedback erzeugen noch Setup, Wartung, Undo, Reset oder Export ausführen; Administratoren behalten diese Rechte.
+- Shared-Vorschauen enthalten keine offenen Feedbacks, letzte Session oder detaillierte Lernstatistik des ausgewählten Profils.
+- Arbeits- und Kalender-Caches akzeptieren nur ein Alter zwischen null und 15 Minuten; zukünftige Zeitstempel nach Uhrkorrekturen erzwingen eine Aktualisierung.
+- Ruff-F/E9 läuft in CI, unbenutzte Importe wurden entfernt, Hassfest ist auf einen Commit und die HACS-Action auf Release 22.5.0 gepinnt.
+- Profilverändernde Wartungsaktionen und Lerndiagnosen werden nicht mehr als global zugängliche Home-Assistant-Entitäten veröffentlicht; die alten Entity-Module und Übersetzungseinträge wurden vollständig aus dem Paket entfernt. Pausieren, Reset und Undo laufen direkt in der Karte über den authentifizierten WebSocket-Pfad und sind nur für das eigene Profil oder Administratoren erlaubt.
+- „Später leichter“ prüft nach einem kurzzeitig extrem milden Ausreißer auch stabil ausreichende, etwas wärmere Jackenstufen. Ein kurzer „keine Jacke“-Punkt verschluckt damit keine später dauerhaft ausreichende leichte Jacke mehr.
+- Fehlende Arbeits-Forecastdaten vor einer geplanten Schicht werden in der Karte ausdrücklich als unvollständige Arbeitsempfehlung ausgewiesen; Zuhause-Wetter wird weiterhin nicht als Ersatz für den Arbeitsort verwendet.
+- `snowy` und `hail` lösen neben dem thermischen Nässeeffekt nun auch die separate Niederschlagsschutz-Empfehlung aus.
+- Kalender- und Arbeitshorizonte werden auch über Sommer-/Winterzeitwechsel in echten verstrichenen Stunden begrenzt.
+- Nicht endliche oder unplausible Providerwerte werden verworfen: Temperatur, Wind, Feuchte, Bewölkung, Niederschlagswahrscheinlichkeit und Niederschlagsmenge besitzen großzügige fachliche Grenzen.
+- Pakettests lesen UTF-8-Dateien unter Windows ausdrücklich mit `encoding="utf-8"`.
+- Regressionsteststand auf 115 Python-Fälle erweitert; der Frontend-Zeittest berücksichtigt die lokale Browser-Zeitzone.
+
+### Persönlicher Verlauf statt minutengenauer Jackenwechsel
+
+- Neue **Trend-/Kurzzeitlogik**: Ein sehr kurzer Übergang entscheidet nicht mehr automatisch allein über die Hauptjacke.
+- Unter ungefähr 15 Minuten wird eine einzelne Zwischenstufe als möglicher Übergang behandelt; darüber entscheidet keine starre Zeitregel, sondern die kumulierte Abweichung zur **persönlich gelernten Jackengrenze**, die Dauer und der weitere thermische Verlauf.
+- Kurze Übergänge werden nur geglättet, wenn der restliche relevante Zeitraum die Richtung bestätigt; `Warm → Leicht → Warm` bleibt damit weiterhin geschützt.
+- Die praktische Empfehlung kann einen kurzen aktuellen Restzustand bewusst übergehen, ohne die rohe thermische Sofortbewertung zu verlieren (`instant_jacket`).
+- Ein eigener, eng begrenzter `transient_tolerance`-Wert lernt aus genau solchen Situationen. Feedback auf eine geglättete Übergangsentscheidung verschiebt nicht pauschal die normalen Jackengrenzen.
+- Spätere Kälte wird transparent formuliert, z. B. **„Leichte Jacke reicht aktuell. Wenn du länger unterwegs bist, wird ab etwa 18:00 eine warme Jacke sinnvoll.“**
+- Arbeitskontext kann einen späteren Zeitraum als wahrscheinlich relevant kennzeichnen; unbekannte Aufenthaltsdauer wird nicht als Wissen ausgegeben.
+
+### Saisonale Feinanpassung
+
+- Vier kleine, fest begrenzte saisonale Korrekturwerte ergänzen das persönliche Langzeitprofil.
+- Saisonales Lernen beginnt erst nach etwas allgemeiner Erfahrung und lernt deutlich langsamer als das Hauptprofil.
+- Keine saisonale Feedbackhistorie: Es bleiben nur kompakte Running-Stats und Bias-Werte gespeichert.
+
+### Wandtablet & Transparenz
+
+- Shared-/Wandtablet-Konten merken das ausgewählte Nutzerprofil **lokal im Browser**. Die Auswahl überlebt Dashboardwechsel, Browser-/HA-/Tablet-Neustarts und bleibt bestehen, bis sie bewusst gewechselt wird.
+- Die lokale Auswahl ist zusätzlich an Integration und angemeldetes Shared-Konto gebunden und wird nicht serverweit synchronisiert.
+- Neues **ⓘ-Infofeld** mit Forecast-Horizont, Aufenthaltsannahme, thermischem Trend, Forecast-Abdeckung, persönlicher Confidence sowie Hinweisen auf aktive Kurzzeit-/Saisonanpassung.
+
+### Lernprofil sichern
+
+- Kompaktes persönliches Lernprofil kann als versionierte JSON-Datei exportiert werden.
+- Import/Restore stellt die Lernparameter wieder her und verwirft bewusst alte Sessions.
+- Backup enthält keine Wetterhistorie und keine wachsende Sessionhistorie.
+- Eigene Profile dürfen selbst wiederhergestellt werden; das Überschreiben fremder Profile bleibt Administratoren vorbehalten.
+
+### Tests
+
+- Regressionstests für kurze Erwärmung/Abkühlung, starke Kurzzeitabweichungen, spätere statt sofortige Jackenwechsel, isoliertes Kurzzeitlernen, saisonales Lernen, Profil-Export/Import und lokale Wandtablet-Persistenz.
+- Teststand v0.1.2: **108 Python-Tests** plus funktionaler Frontend-Vertragstest.
+
+
 Alle veröffentlichten Änderungen werden in dieser Datei gesammelt.
 
 ## v0.1.1

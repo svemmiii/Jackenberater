@@ -1,10 +1,10 @@
-# 🧥 JackenBerater v0.1.1
+# 🧥 JackenBerater v0.1.2
 
 Eine schlanke Home-Assistant-Integration, die nicht nur auf die Außentemperatur schaut, sondern eine **persönliche Jackenempfehlung** aus Wetter, Wetterverlauf, Innen→Außen-Wechsel und freiwilligem Nutzerfeedback ableitet.
 
 > **Status:** erste Testversion. Der Name „JackenBerater“ ist noch nicht als endgültiger Projektname gedacht.
 
-## Was v0.1.1 kann
+## Was v0.1.2 kann
 
 - Empfehlung in vier Wärmestufen:
   - Keine Jacke
@@ -27,7 +27,13 @@ Eine schlanke Home-Assistant-Integration, die nicht nur auf die Außentemperatur
 - optionaler Urlaubs-/Abwesenheitskalender zum Aussetzen wahrscheinlicher Arbeitszeiten
 - optionaler rotierender Schichtzyklus für Schichtarbeiter, unabhängig vom Wochentag
 - eigene Lovelace-Karte mit visueller Einrichtung und Feedback
-- Verwaltung über normale HA-Konfig-/Diagnoseentitäten: Lernen pausieren, Lernprofil zurücksetzen, letzte Bewertung zurücknehmen
+- **persönliche Trend-/Kurzzeitlogik:** sehr kurze Übergänge dürfen geglättet werden, wenn die weitere thermische Entwicklung klar in die andere Richtung läuft und die persönliche Belastung klein genug ist
+- transparente Langzeit-Hinweise wie **„Leichte Jacke reicht aktuell. Wenn du länger unterwegs bist, wird ab etwa 18:00 eine warme Jacke sinnvoll.“**
+- kleine saisonale Feinanpassung des persönlichen Profils, ohne wachsende Historie
+- ⓘ-Infofeld mit betrachtetem Zeitraum, Aufenthaltsannahme, thermischem Trend, Forecast-Abdeckung und persönlicher Confidence
+- kompaktes Lernprofil kann als JSON gesichert und wiederhergestellt werden
+- auf Shared-/Wandtablets bleibt das ausgewählte Personenprofil lokal auf diesem Browser gespeichert, bis es bewusst gewechselt wird
+- Geschützte Verwaltung direkt in der Karte: Lernen pausieren, Lernprofil zurücksetzen, letzte Bewertung zurücknehmen
 
 ## Ressourcenverbrauch
 
@@ -149,6 +155,14 @@ Dadurch kann eine selten erlebte Wintergrenze noch deutlich lernen, obwohl das a
 
 Die Lernrate fällt nie auf null, sodass sich ein Profil auch nach Jahren langsam an echte Veränderungen anpassen kann.
 
+### Kurzzeit-/Trendlernen
+
+JackenBerater behandelt einen sehr kurzen Temperatur- oder Komfortübergang nicht automatisch wie eine eigene vollständige Jackensituation. Als Anti-Flattern gilt ein Mindestbereich von ungefähr **15 Minuten**; darüber entscheidet aber keine starre Zeitgrenze. Stattdessen bewertet die Engine die kumulierte Abweichung zur **persönlich gelernten Jackengrenze**, die Dauer und den weiteren thermischen Trend.
+
+Beispiel: Ist jetzt kurz eine warme Jacke optimal, wenige Minuten später reicht dauerhaft eine leichte Jacke und der restliche Zeitraum wird weiter milder, kann die praktische Empfehlung direkt auf „leichte Jacke“ geglättet werden. Ist die kurze Kältephase dagegen deutlich stärker oder hält zu lange an, bleibt die wärmere Jacke die Empfehlung. Diese Kurzzeit-Toleranz lernt separat aus passendem Feedback und verschiebt nicht einfach das normale Langzeit-Wärmeprofil.
+
+Zusätzlich besitzt jedes Profil vier kleine saisonale Korrekturwerte. Sie lernen bewusst sehr langsam und ergänzen das langfristige Profil, ohne alte Bewertungen als Historie dauerhaft zu speichern.
+
 ## Feedback
 
 Eine sichtbare Dashboard-Karte gilt **nicht** als Nutzung. Erst ein bewusster Tap auf den Berater erzeugt eine Empfehlungssession.
@@ -170,7 +184,9 @@ Der Nutzer kann außerdem freiwillig eine Empfehlung bewerten, selbst wenn der L
 
 In der Integration können bestimmte Home-Assistant-Konten als **gemeinsame Tablet-/Wandtablet-Konten** freigegeben werden. Die Karte erkennt diese Konten automatisch.
 
-Ein solches Tablet bekommt **kein eigenes Wärmeprofil**. Stattdessen fragt die Karte vor der Beratung direkt, für welches vorhandene Komfortprofil sie rechnen soll. Auf persönlichen Geräten verwendet JackenBerater weiterhin automatisch die eigene Home-Assistant-User-ID. **Fremde Profile dürfen nur Administratoren oder ausdrücklich freigegebene HA-Konten verwenden.** Es wird keine Anwesenheit oder Geräteposition geraten.
+Ein solches Tablet bekommt **kein eigenes Wärmeprofil**. Stattdessen fragt die Karte vor der Beratung direkt, für welches vorhandene Komfortprofil sie rechnen soll. Die Auswahl wird lokal im Browser des jeweiligen Wandtablets gespeichert und bleibt auch nach Dashboardwechsel, Browser-Refresh, Home-Assistant-Neustart oder Tablet-Neustart erhalten, bis sie über die Profilauswahl bewusst gewechselt wird. Sie wird **nicht serverweit** für das HA-Konto gesetzt.
+
+Auf persönlichen Geräten verwendet JackenBerater weiterhin automatisch die eigene Home-Assistant-User-ID. Freigegebene Shared-Konten dürfen fremde Profile ausschließlich für die Anzeige einer Empfehlung auswählen. Sie können weder Feedback/Sessions noch Setup, Wartung, Reset, Undo, Import oder Export des Profils ausführen. Schreibzugriffe auf fremde Profile bleiben Administratoren vorbehalten. Es wird keine Anwesenheit oder Geräteposition geraten.
 
 ## Karte hinzufügen
 
@@ -180,7 +196,7 @@ Danach im Dashboard eine Karte hinzufügen und **JackenBerater** auswählen.
 
 Falls Lovelace komplett über YAML verwaltet wird, die Modul-Ressource manuell eintragen:
 
-`/jackenberater/frontend/jackenberater-card.js?v=0.1.1`
+`/jackenberater/frontend/jackenberater-card.js?v=0.1.2`
 
 Karten-YAML:
 
@@ -196,6 +212,20 @@ title: Jacke heute
 shared: true
 ```
 
+## ⓘ Info & Lernprofil-Backup
+
+Ein kleines eingekreistes **ⓘ** öffnet eine verständliche Erklärung der aktuellen Empfehlung. Dort stehen nur die für die Entscheidung relevanten Annahmen, z. B.:
+
+- betrachteter Zeitraum
+- Aufenthaltsdauer bzw. ob sie unbekannt ist
+- thermischer Trend (wärmer / kälter / stabil / wechselhaft)
+- ob Arbeits- oder Kalenderkontext verwendet wurde
+- Forecast-Abdeckung
+- persönliche Entscheidungs-Confidence
+- Hinweis auf saisonale oder Kurzzeit-Feinanpassung, falls aktiv
+
+Im selben Bereich kann das **kompakte Lernprofil als JSON exportiert** werden. Enthalten sind nur die persönlichen Lernparameter und Statistikwerte, keine Wetter- oder Sessionhistorie. Ein eigenes Profil kann später wieder importiert werden; Administratoren können bei Bedarf auch ein ausgewähltes Profil wiederherstellen.
+
 ## Kartenverhalten
 
 - **eindeutig warm + stabil:** Karte kann nach eingerichtetem Profil vollständig verschwinden
@@ -206,7 +236,7 @@ Damit soll die Karte nicht im Hochsommer monatelang Platz verschwenden.
 
 ## Berechnungsmodell
 
-v0.1.1 verwendet bewusst **kein großes ML-Modell** und auch nicht den vollständigen UTCI-Polynomblock. Stattdessen nutzt die Engine eine transparente, kleine thermische Bewertung mit den gleichen wichtigen Kategorien: Temperatur, Wind, Feuchte, Strahlung/Sonne, Nässe, Aktivitätskontext und Bekleidung.
+v0.1.2 verwendet bewusst **kein großes ML-Modell** und auch nicht den vollständigen UTCI-Polynomblock. Stattdessen nutzt die Engine eine transparente, kleine thermische Bewertung mit den gleichen wichtigen Kategorien: Temperatur, Wind, Feuchte, Strahlung/Sonne, Nässe, Aktivitätskontext und Bekleidung.
 
 Im kalten Bereich wird die offizielle Wind-Chill-Gleichung nur innerhalb ihres sinnvollen Temperatur-/Windbereichs verwendet. Oberhalb davon wird Wind deutlich schwächer als Komfortkorrektur gewertet.
 
@@ -227,6 +257,6 @@ Bei Kalendern werden in der normalen Logik nur Start-/Endzeiten genutzt. Titel, 
 
 JackenBerater ist ein Komfortberater und keine Sicherheits- oder Gesundheitsanwendung. Bei extremen Wetterlagen, amtlichen Warnungen oder gesundheitlichen Besonderheiten haben geeignete Schutzmaßnahmen und offizielle Warnhinweise Vorrang.
 
-## Teststatus v0.1.1
+## Teststatus v0.1.2
 
-Die lokale Regressionstest-Suite umfasst aktuell **99 Python-Tests** sowie einen funktionalen JavaScript-Test für den Feedback-/Frontend-Pfad. Dazu gehören inzwischen auch Glue-Tests für Arbeitswetter-Kontext und Reconfigure-Verhalten. Zusätzlich prüft der CI-Workflow Python-Kompilierung, JavaScript-Syntax, hassfest und HACS.
+Die lokale Regressionstest-Suite umfasst aktuell **120 Python-Tests** sowie einen funktionalen JavaScript-Test für den Feedback-/Frontend-Pfad. Dazu gehören inzwischen auch Glue-Tests für Arbeitswetter-Kontext, die Rollen normal/shared/admin, Providerwert-Validierung, Cache-Uhrkorrekturen, Zeitumstellung und Reconfigure-Verhalten. Zusätzlich prüft der CI-Workflow Python-Kompilierung, Ruff-F/E9, JavaScript-Syntax, hassfest und HACS.

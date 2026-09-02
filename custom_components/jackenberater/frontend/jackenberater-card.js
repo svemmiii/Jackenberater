@@ -66,6 +66,39 @@ const JB_I18N = {
     selectProfile: "Profil auswählen",
     selectProfileText: "Wähle zuerst aus, für wen diese Beratung gedacht ist.",
     unusualDay: "Heute war ungewöhnlich – schwächer gewichten",
+    info: "Info",
+    infoTitle: "Info zur aktuellen Empfehlung",
+    infoHorizon: "Betrachtet",
+    infoStay: "Aufenthaltsdauer",
+    infoTrend: "Thermischer Trend",
+    infoForecast: "Forecast-Abdeckung",
+    infoPersonal: "Persönliches Profil",
+    stayUnknown: "unbekannt",
+    stayCalendar: "Kalenderzeitraum berücksichtigt",
+    stayWork: "Arbeitsmodell berücksichtigt",
+    trendWarming: "deutlich wärmer",
+    trendCooling: "deutlich kälter",
+    trendStable: "weitgehend stabil",
+    trendVariable: "wechselhaft",
+    trendUnknown: "noch nicht zuverlässig bestimmbar",
+    forecastComplete: "ausreichend abgedeckt",
+    forecastPartial: "nur teilweise abgedeckt",
+    seasonalInfo: "Saisonale Feinanpassung aus deinem Feedback wird berücksichtigt.",
+    transientReason: "Ein kurzer Übergang wurde zugunsten der Jacke geglättet, die zum weiteren persönlichen Verlauf besser passt.",
+    transientInfo: "Kurzer Übergang persönlich geglättet",
+    backupTitle: "Lernprofil sichern",
+    exportProfile: "Profil exportieren",
+    importProfile: "Profil importieren",
+    profileExported: "Lernprofil exportiert.",
+    profileImported: "Lernprofil wiederhergestellt.",
+    profileImportError: "Profil-Backup konnte nicht importiert werden.",
+    workWeatherIncomplete: "Arbeitswetter derzeit nicht verfügbar – Empfehlung für die Arbeit unvollständig.",
+    maintenanceTitle: "Lernprofil verwalten",
+    learningPause: "Lernen pausieren",
+    learningResume: "Lernen fortsetzen",
+    undoFeedback: "Letzte Bewertung zurücknehmen",
+    resetLearning: "Lernprofil zurücksetzen",
+    maintenanceDone: "Lernprofil aktualisiert.",
   },
   en: {
     title: "Jacket Advisor",
@@ -134,6 +167,39 @@ const JB_I18N = {
     selectProfile: "Select profile",
     selectProfileText: "First choose who this recommendation is for.",
     unusualDay: "Today was unusual — give this rating less weight",
+    info: "Info",
+    infoTitle: "About this recommendation",
+    infoHorizon: "Considered",
+    infoStay: "Time away",
+    infoTrend: "Thermal trend",
+    infoForecast: "Forecast coverage",
+    infoPersonal: "Personal profile",
+    stayUnknown: "unknown",
+    stayCalendar: "calendar time window considered",
+    stayWork: "work model considered",
+    trendWarming: "clearly getting warmer",
+    trendCooling: "clearly getting colder",
+    trendStable: "mostly stable",
+    trendVariable: "changeable",
+    trendUnknown: "not reliable yet",
+    forecastComplete: "sufficiently covered",
+    forecastPartial: "partially covered only",
+    seasonalInfo: "A small seasonal adjustment learned from your feedback is included.",
+    transientReason: "A short transition was smoothed in favour of the jacket that better fits the continuing personal comfort trend.",
+    transientInfo: "Short transition smoothed personally",
+    backupTitle: "Back up learning profile",
+    exportProfile: "Export profile",
+    importProfile: "Import profile",
+    profileExported: "Learning profile exported.",
+    profileImported: "Learning profile restored.",
+    profileImportError: "The profile backup could not be imported.",
+    workWeatherIncomplete: "Work weather is currently unavailable — the advice for work is incomplete.",
+    maintenanceTitle: "Manage learning profile",
+    learningPause: "Pause learning",
+    learningResume: "Resume learning",
+    undoFeedback: "Undo last rating",
+    resetLearning: "Reset learning profile",
+    maintenanceDone: "Learning profile updated.",
   },
 };
 
@@ -154,8 +220,13 @@ class JackenBeraterCard extends HTMLElement {
     this._loading = false;
     this._setup = { cold: 3, warm: 3, wind: 3, evening: 3 };
     this._selectedProfile = config.profile_id || null;
+    this._profileFixed = Boolean(config.profile_id);
     this._autoShared = false;
     this._profileMetaLoaded = false;
+    this._entryId = config.entry_id || null;
+    this._currentUserId = null;
+    this._isAdmin = false;
+    this._infoOpen = false;
     this._manualFeedbackVisible = false;
     this._phasePending = null;
     this._notice = "";
@@ -206,8 +277,8 @@ class JackenBeraterCard extends HTMLElement {
     const hidden = this._preview?.recommendation?.display_mode === "hidden";
     const setup = this._preview?.profile?.setup_complete;
     const pending = this._preview?.feedback || [];
-    if (hidden && setup && !this._open && pending.length === 0) return 0;
-    return this._open ? 6 : 2;
+    if (hidden && setup && !this._open && !this._infoOpen && pending.length === 0) return 0;
+    return (this._open || this._infoOpen) ? 6 : 2;
   }
 
   static getConfigElement() {
@@ -238,6 +309,40 @@ class JackenBeraterCard extends HTMLElement {
     return Boolean(this._config?.shared || this._autoShared);
   }
 
+  _profileStorageKey() {
+    const entry = this._entryId || this._config?.entry_id || "default";
+    const account = this._currentUserId || "shared";
+    return `jackenberater:selected-profile:${entry}:${account}`;
+  }
+
+  _restoreSharedProfile(profiles) {
+    if (this._profileFixed || this._selectedProfile) return;
+    try {
+      const stored = window.localStorage?.getItem(this._profileStorageKey());
+      if (stored && (profiles || []).some(profile => profile.id === stored)) {
+        this._selectedProfile = stored;
+      } else if (stored) {
+        window.localStorage?.removeItem(this._profileStorageKey());
+      }
+    } catch (_err) {
+      // Storage may be unavailable in a hardened/private browser. The card then
+      // simply falls back to explicit selection without breaking advice.
+    }
+  }
+
+  _persistSharedProfile() {
+    if (!this._sharedMode() || this._profileFixed) return;
+    try {
+      if (this._selectedProfile) {
+        window.localStorage?.setItem(this._profileStorageKey(), this._selectedProfile);
+      } else {
+        window.localStorage?.removeItem(this._profileStorageKey());
+      }
+    } catch (_err) {
+      // Best effort only; never make advice depend on browser storage.
+    }
+  }
+
   async _send(type, extra = {}) {
     if (!this._hass) return null;
     return this._hass.connection.sendMessagePromise({
@@ -255,8 +360,12 @@ class JackenBeraterCard extends HTMLElement {
       if (!this._profileMetaLoaded || this._sharedMode()) {
         const profiles = await this._send("jackenberater/profiles");
         this._profiles = profiles?.profiles || [];
+        this._entryId = profiles?.entry_id || this._entryId;
+        this._currentUserId = profiles?.current_user_id || this._currentUserId;
+        this._isAdmin = Boolean(profiles?.is_admin);
         this._autoShared = Boolean(profiles?.shared_account);
         this._profileMetaLoaded = true;
+        if (this._sharedMode()) this._restoreSharedProfile(this._profiles);
         if (this._sharedMode() && !this._selectedProfile) {
           this._preview = null;
           this._error = "";
@@ -281,6 +390,16 @@ class JackenBeraterCard extends HTMLElement {
       this._render();
       return;
     }
+    // Shared wall tablets are read-only recommendation surfaces. Opening the
+    // details must not create a session or expose profile setup controls.
+    if (this._autoShared && !this._isAdmin) {
+      this._open = !this._open;
+      this._phasePending = null;
+      this._notice = "";
+      this._manualFeedbackVisible = false;
+      this._render();
+      return;
+    }
     if (this._preview?.profile && !this._preview.profile.setup_complete) {
       this._notice = "";
       this._open = true;
@@ -291,14 +410,6 @@ class JackenBeraterCard extends HTMLElement {
       this._open = false;
       this._phasePending = null;
       this._notice = "";
-      if (this._sharedMode()) {
-        this._selectedProfile = null;
-        this._preview = null;
-        this._session = null;
-        this._manualFeedbackVisible = false;
-        await this._refresh();
-        return;
-      }
       this._render();
       return;
     }
@@ -323,12 +434,6 @@ class JackenBeraterCard extends HTMLElement {
       await this._send("jackenberater/profile_setup", this._setup);
       this._error = "";
       this._open = false;
-      if (this._sharedMode()) {
-        this._selectedProfile = null;
-        this._preview = null;
-        this._session = null;
-        this._manualFeedbackVisible = false;
-      }
       await this._refresh();
     } catch (err) {
       this._error = this._errorText(err);
@@ -433,18 +538,64 @@ class JackenBeraterCard extends HTMLElement {
     return new Intl.DateTimeFormat(this._lang() === "de" ? "de-DE" : "en-GB", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }).format(dt);
   }
 
+  _jacketArticle(value) {
+    if (this._lang() === "de") {
+      return {
+        none: "keine Jacke",
+        light: "eine leichte Jacke",
+        warm: "eine warme Jacke",
+        winter: "eine Winterjacke",
+      }[value] || this._jacketLabel(value).toLowerCase();
+    }
+    return {
+      none: "no jacket",
+      light: "a light jacket",
+      warm: "a warm jacket",
+      winter: "a winter jacket",
+    }[value] || this._jacketLabel(value).toLowerCase();
+  }
+
+  _currentFitSentence(value) {
+    if (this._lang() === "de") {
+      return {
+        none: "Aktuell ist keine Jacke nötig.",
+        light: "Eine leichte Jacke reicht aktuell.",
+        warm: "Eine warme Jacke passt aktuell.",
+        winter: "Eine Winterjacke passt aktuell.",
+      }[value] || `${this._jacketLabel(value)} passt aktuell.`;
+    }
+    return {
+      none: "No jacket is needed right now.",
+      light: "A light jacket is enough right now.",
+      warm: "A warm jacket fits the current conditions.",
+      winter: "A winter jacket fits the current conditions.",
+    }[value] || `${this._jacketLabel(value)} fits right now.`;
+  }
+
   _laterText(rec) {
     if (!rec?.later_at || rec.jacket_later === rec.jacket_now) return "";
     const when = new Intl.DateTimeFormat(this._lang() === "de" ? "de-DE" : "en-GB", { hour: "2-digit", minute: "2-digit" }).format(new Date(rec.later_at));
     const warmer = ["none", "light", "warm", "winter"].indexOf(rec.jacket_later) > ["none", "light", "warm", "winter"].indexOf(rec.jacket_now);
     if (this._lang() === "de") {
-      return warmer
-        ? `Ab etwa ${when} wird ${this._jacketLabel(rec.jacket_later).toLowerCase()} sinnvoll – wenn du bis dahin unterwegs bist, jetzt mitnehmen.`
-        : `Ab etwa ${when} reicht voraussichtlich ${this._jacketLabel(rec.jacket_later).toLowerCase()}.`;
+      if (warmer) {
+        const prefix = this._currentFitSentence(rec.jacket_now);
+        return rec.later_context === "work"
+          ? `${prefix} Für deine Arbeitszeit wird ab etwa ${when} ${this._jacketArticle(rec.jacket_later)} sinnvoll.`
+          : `${prefix} Wenn du länger unterwegs bist, wird ab etwa ${when} ${this._jacketArticle(rec.jacket_later)} sinnvoll.`;
+      }
+      return rec.jacket_later === "none"
+        ? `Ab etwa ${when} brauchst du voraussichtlich keine Jacke mehr.`
+        : `Ab etwa ${when} reicht voraussichtlich ${this._jacketArticle(rec.jacket_later)}.`;
     }
-    return warmer
-      ? `From about ${when}, ${this._jacketLabel(rec.jacket_later).toLowerCase()} becomes useful — if you'll still be out then, take it with you now.`
-      : `From about ${when}, ${this._jacketLabel(rec.jacket_later).toLowerCase()} should be sufficient.`;
+    if (warmer) {
+      const prefix = this._currentFitSentence(rec.jacket_now);
+      return rec.later_context === "work"
+        ? `${prefix} During your work period, ${this._jacketArticle(rec.jacket_later)} becomes useful from about ${when}.`
+        : `${prefix} If you stay out longer, ${this._jacketArticle(rec.jacket_later)} becomes useful from about ${when}.`;
+    }
+    return rec.jacket_later === "none"
+      ? `From about ${when}, you probably won't need a jacket anymore.`
+      : `From about ${when}, ${this._jacketArticle(rec.jacket_later)} should be sufficient.`;
   }
 
   _reasonText(reason) {
@@ -459,7 +610,126 @@ class JackenBeraterCard extends HTMLElement {
       rain: this._t("rainReason"),
       near_threshold: this._t("thresholdReason"),
       calendar_context: this._t("calendarReason"),
+      transient_trend: this._t("transientReason"),
     }[reason] || "";
+  }
+
+  _trendText(value) {
+    return {
+      warming: this._t("trendWarming"),
+      cooling: this._t("trendCooling"),
+      stable: this._t("trendStable"),
+      variable: this._t("trendVariable"),
+      unknown: this._t("trendUnknown"),
+    }[value] || this._t("trendUnknown");
+  }
+
+  _formatTime(iso) {
+    if (!iso) return "";
+    const dt = new Date(iso);
+    if (Number.isNaN(dt.getTime())) return "";
+    return new Intl.DateTimeFormat(this._lang() === "de" ? "de-DE" : "en-GB", { hour: "2-digit", minute: "2-digit" }).format(dt);
+  }
+
+  _canImportProfile(profile) {
+    return Boolean(this._isAdmin || (profile?.id && profile.id === this._currentUserId && !this._autoShared));
+  }
+
+  _canManageProfile(profile) {
+    return Boolean(this._isAdmin || (profile?.id && profile.id === this._currentUserId && !this._autoShared));
+  }
+
+  _infoPanel(rec, profile) {
+    const horizon = rec.horizon_hours > 0 ? `${rec.horizon_hours} h` : this._t("nowOnly");
+    let stay = this._t("stayUnknown");
+    if (rec.stay_context === "work") {
+      const until = this._formatTime(rec.work_end);
+      stay = until ? `${this._t("stayWork")} · bis ${until}` : this._t("stayWork");
+    } else if (rec.stay_context === "calendar") {
+      stay = this._t("stayCalendar");
+    }
+    const seasonal = Math.abs(Number(rec.seasonal_adjustment_c || 0)) >= 0.05
+      ? `<div class="jb-info-note"><ha-icon icon="mdi:calendar-sync-outline"></ha-icon>${jbEscape(this._t("seasonalInfo"))}</div>`
+      : "";
+    const transient = rec.transient_override
+      ? `<div class="jb-info-note"><ha-icon icon="mdi:swap-horizontal"></ha-icon>${jbEscape(this._t("transientInfo"))}${rec.transient_until ? ` · ${this._formatTime(rec.transient_until)}` : ""}</div>`
+      : "";
+    const canImport = this._canImportProfile(profile);
+    const canManage = this._canManageProfile(profile);
+    const workWarning = rec.work_weather_available === false
+      ? `<div class="jb-info-note jb-warning"><ha-icon icon="mdi:weather-cloudy-alert"></ha-icon>${jbEscape(this._t("workWeatherIncomplete"))}</div>`
+      : "";
+    return `<div class="jb-info-panel">
+      <div class="jb-info-title"><ha-icon icon="mdi:information-outline"></ha-icon>${this._t("infoTitle")}</div>
+      <div class="jb-info-grid">
+        <div><span>${this._t("infoHorizon")}</span><strong>${jbEscape(horizon)}</strong></div>
+        <div><span>${this._t("infoStay")}</span><strong>${jbEscape(stay)}</strong></div>
+        <div><span>${this._t("infoTrend")}</span><strong>${jbEscape(this._trendText(rec.trend))}</strong></div>
+        <div><span>${this._t("infoForecast")}</span><strong>${jbEscape(rec.forecast_coverage_complete ? this._t("forecastComplete") : this._t("forecastPartial"))}</strong></div>
+        <div><span>${this._t("infoPersonal")}</span><strong>${Math.round((rec.confidence || profile.confidence || 0) * 100)} %</strong></div>
+      </div>
+      ${workWarning}${transient}${seasonal}
+      ${canManage ? `<div class="jb-info-backup"><div class="jb-section-title">${this._t("backupTitle")}</div><div class="jb-info-actions">
+        <button data-action="profile-export"><ha-icon icon="mdi:tray-arrow-down"></ha-icon>${this._t("exportProfile")}</button>
+        ${canImport ? `<button data-action="profile-import"><ha-icon icon="mdi:tray-arrow-up"></ha-icon>${this._t("importProfile")}</button><input type="file" accept="application/json,.json" data-profile-import hidden>` : ""}
+      </div></div>` : ""}
+      ${canManage ? `<div class="jb-info-backup"><div class="jb-section-title">${this._t("maintenanceTitle")}</div><div class="jb-info-actions">
+        <button data-maintenance="${profile.learning_enabled === false ? "learning_on" : "learning_off"}">${this._t(profile.learning_enabled === false ? "learningResume" : "learningPause")}</button>
+        <button data-maintenance="undo">${this._t("undoFeedback")}</button>
+        <button data-maintenance="reset">${this._t("resetLearning")}</button>
+      </div></div>` : ""}
+    </div>`;
+  }
+
+  async _maintainProfile(action) {
+    try {
+      if (action === "reset" && !window.confirm(this._t("resetLearning"))) return;
+      await this._send("jackenberater/profile_maintenance", { action });
+      this._notice = this._t("maintenanceDone");
+      this._error = "";
+      await this._refresh();
+    } catch (err) {
+      this._error = this._errorText(err);
+      this._render();
+    }
+  }
+
+  async _exportProfile() {
+    try {
+      const payload = await this._send("jackenberater/profile_export");
+      const json = JSON.stringify(payload, null, 2);
+      const blob = new Blob([json], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      const profileName = (this._preview?.profile?.name || "profile").replace(/[^a-z0-9_-]+/gi, "_");
+      link.href = url;
+      link.download = `JackenBerater_${profileName}.json`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      this._notice = this._t("profileExported");
+      this._error = "";
+    } catch (err) {
+      this._error = this._errorText(err);
+    }
+    this._render();
+  }
+
+  async _importProfileFile(file) {
+    if (!file) return;
+    try {
+      const payload = JSON.parse(await file.text());
+      await this._send("jackenberater/profile_import", { payload });
+      this._session = null;
+      this._manualFeedbackVisible = false;
+      this._notice = this._t("profileImported");
+      this._error = "";
+      await this._refresh();
+    } catch (err) {
+      this._error = `${this._t("profileImportError")} ${this._errorText(err)}`;
+      this._render();
+    }
   }
 
   _render() {
@@ -482,7 +752,7 @@ class JackenBeraterCard extends HTMLElement {
     const profile = this._preview?.profile || {};
     const rec = this._preview?.recommendation || {};
     const pending = this._preview?.feedback || [];
-    if (rec.display_mode === "hidden" && profile.setup_complete && !this._open && pending.length === 0) {
+    if (rec.display_mode === "hidden" && profile.setup_complete && !this._open && !this._infoOpen && pending.length === 0) {
       this.innerHTML = `<div style="display:none"></div>`;
       return;
     }
@@ -492,6 +762,9 @@ class JackenBeraterCard extends HTMLElement {
     const profilePicker = this._sharedMode() ? this._profilePicker(profile) : "";
     const feedbackBadge = pending.length
       ? `<span class="jb-badge">${pending.length} ${pending.length === 1 ? this._t("feedbackOpen") : this._t("feedbackPlural")}</span>`
+      : "";
+    const infoButton = profile.setup_complete
+      ? `<button class="jb-info-button" data-action="info" title="${jbEscape(this._t("info"))}"><ha-icon icon="mdi:information-outline"></ha-icon></button>`
       : "";
 
     let content = "";
@@ -507,8 +780,8 @@ class JackenBeraterCard extends HTMLElement {
         <div class="jb-main compact" data-action="open">
           <div class="jb-icon ${rec.jacket_now}"><ha-icon icon="${this._jacketIcon(rec.jacket_now)}"></ha-icon></div>
           <div class="jb-copy"><div class="jb-kicker">${jbEscape(title)}</div><div class="jb-headline">${jbEscape(this._jacketLabel(rec.jacket_now))}</div><div class="jb-sub">${Math.round(rec.current_temperature_c * 10) / 10} °C · ${this._t("effective")} ${Math.round(rec.effective_now_c * 10) / 10} °C</div></div>
-          ${feedbackBadge}<ha-icon class="jb-chevron" icon="mdi:chevron-right"></ha-icon>
-        </div>`;
+          ${feedbackBadge}${infoButton}<ha-icon class="jb-chevron" icon="mdi:chevron-right"></ha-icon>
+        </div>${this._infoOpen ? this._infoPanel(rec, profile) : ""}`;
     } else {
       content = `
         <div class="jb-main" data-action="open">
@@ -516,8 +789,9 @@ class JackenBeraterCard extends HTMLElement {
           <div class="jb-copy"><div class="jb-kicker">${jbEscape(title)}</div><div class="jb-headline">${jbEscape(this._jacketLabel(rec.jacket_now))}</div>
             <div class="jb-sub">${jbEscape(this._laterText(rec) || `${rec.current_temperature_c ?? "–"} °C · ${this._t("effective")} ${rec.effective_now_c ?? "–"} °C`)}</div>
           </div>
-          ${feedbackBadge}<ha-icon class="jb-chevron" icon="mdi:${this._open ? "chevron-up" : "chevron-right"}"></ha-icon>
+          ${feedbackBadge}${infoButton}<ha-icon class="jb-chevron" icon="mdi:${this._open ? "chevron-up" : "chevron-right"}"></ha-icon>
         </div>
+        ${this._infoOpen ? this._infoPanel(rec, profile) : ""}
         ${this._open ? this._details(rec, profile, pending) : ""}`;
     }
 
@@ -553,7 +827,7 @@ class JackenBeraterCard extends HTMLElement {
       ? `<div class="jb-divider"></div><div class="jb-section-title">${this._t("manualFeedback")}</div>${
           this._manualFeedbackVisible
             ? this._feedbackCard(manualCandidate, false, true)
-            : `<button class="jb-manual-button" data-action="manual-feedback">${this._t("manualFeedbackAction")}</button>`
+            : (!this._autoShared || this._isAdmin ? `<button class="jb-manual-button" data-action="manual-feedback">${this._t("manualFeedbackAction")}</button>` : "")
         }</div>`
       : "";
     const phase = this._phasePending ? this._phasePanel() : "";
@@ -562,7 +836,7 @@ class JackenBeraterCard extends HTMLElement {
       <div class="jb-metrics"><span>${rec.current_temperature_c ?? "–"} °C</span><span>${rec.current_wind_kmh != null ? `${rec.current_wind_kmh} km/h${rec.current_gust_kmh != null && rec.current_gust_kmh > rec.current_wind_kmh ? ` · ${this._t("gusts")} ${rec.current_gust_kmh} km/h` : ""}` : (rec.current_gust_kmh != null ? `${this._t("gusts")} ${rec.current_gust_kmh} km/h` : "–")}</span><span>${rec.horizon_hours > 0 ? `${rec.horizon_hours} h` : this._t("nowOnly")}</span></div>
       ${rec.work_context && rec.work_jacket ? `<div class="jb-context"><ha-icon icon="mdi:briefcase-outline"></ha-icon>${jbEscape(rec.work_name || this._t("work"))}: ${this._jacketLabel(rec.work_jacket)}</div>` : ""}
       ${reasons.length ? `<div class="jb-section-title">${this._t("why")}</div><ul class="jb-reasons">${reasons.map(x => `<li>${jbEscape(x)}</li>`).join("")}</ul>` : ""}
-      <div class="jb-learning"><span>${this._t("confidence")}: ${Math.round((profile.confidence || 0) * 100)} %</span><span>${this._t("feedbackCount")}: ${profile.total_feedback || 0}</span></div>
+      ${!this._autoShared || this._isAdmin ? `<div class="jb-learning"><span>${this._t("confidence")}: ${Math.round((profile.confidence || 0) * 100)} %</span><span>${this._t("feedbackCount")}: ${profile.total_feedback || 0}</span></div>` : ""}
       ${pendingHtml}
       ${manualHtml}
       ${phase}
@@ -594,6 +868,28 @@ class JackenBeraterCard extends HTMLElement {
 
   _bind() {
     this.querySelector("[data-action='open']")?.addEventListener("click", () => this._openAdvice());
+    this.querySelector("[data-action='info']")?.addEventListener("click", ev => {
+      ev.stopPropagation();
+      this._infoOpen = !this._infoOpen;
+      this._render();
+    });
+    this.querySelector("[data-action='profile-export']")?.addEventListener("click", ev => {
+      ev.stopPropagation();
+      this._exportProfile();
+    });
+    this.querySelector("[data-action='profile-import']")?.addEventListener("click", ev => {
+      ev.stopPropagation();
+      this.querySelector("[data-profile-import]")?.click();
+    });
+    this.querySelector("[data-profile-import]")?.addEventListener("change", ev => {
+      const file = ev.target.files?.[0];
+      if (file) this._importProfileFile(file);
+      ev.target.value = "";
+    });
+    this.querySelectorAll("[data-maintenance]").forEach(el => el.addEventListener("click", ev => {
+      ev.stopPropagation();
+      this._maintainProfile(el.dataset.maintenance);
+    }));
     this.querySelector("[data-action='manual-feedback']")?.addEventListener("click", async () => {
       await this._prepareManualFeedback();
     });
@@ -601,8 +897,10 @@ class JackenBeraterCard extends HTMLElement {
     this.querySelectorAll("[data-scale]").forEach(el => el.addEventListener("click", () => this._setScale(el.dataset.scale, el.dataset.value)));
     this.querySelector("#jb-profile")?.addEventListener("change", async ev => {
       this._selectedProfile = ev.target.value || null;
+      this._persistSharedProfile();
       this._setup = { cold: 3, warm: 3, wind: 3, evening: 3 };
       this._open = false;
+      this._infoOpen = false;
       this._session = null;
       this._phasePending = null;
       this._manualFeedbackVisible = false;
@@ -635,12 +933,12 @@ class JackenBeraterCard extends HTMLElement {
       .jb-card{overflow:hidden;border-radius:var(--ha-card-border-radius,16px);background:var(--ha-card-background,var(--card-background-color));}
       .jb-main{display:flex;align-items:center;gap:14px;padding:16px 18px;cursor:pointer;min-height:68px;box-sizing:border-box;}
       .jb-main.shared-select{cursor:default}.jb-main.compact{padding-top:13px;padding-bottom:13px;min-height:62px}.jb-icon{width:46px;height:46px;border-radius:15px;display:flex;align-items:center;justify-content:center;background:color-mix(in srgb,var(--primary-color) 14%,transparent);flex:none}.jb-icon ha-icon{--mdc-icon-size:27px}.jb-icon.none{background:color-mix(in srgb,var(--success-color,#43a047) 16%,transparent)}.jb-icon.light{background:color-mix(in srgb,#f4b400 18%,transparent)}.jb-icon.warm{background:color-mix(in srgb,#ef6c00 18%,transparent)}.jb-icon.winter{background:color-mix(in srgb,#1976d2 18%,transparent)}.jb-icon.setup{background:color-mix(in srgb,var(--primary-color) 16%,transparent)}
-      .jb-copy{min-width:0;flex:1}.jb-kicker{font-size:12px;color:var(--secondary-text-color);font-weight:600;margin-bottom:3px}.jb-headline{font-size:19px;line-height:1.2;font-weight:700;color:var(--primary-text-color)}.jb-sub{font-size:13px;line-height:1.35;color:var(--secondary-text-color);margin-top:4px}.jb-chevron{color:var(--secondary-text-color);flex:none}.jb-badge{font-size:11px;padding:5px 8px;border-radius:999px;background:color-mix(in srgb,var(--primary-color) 13%,transparent);color:var(--primary-text-color);white-space:nowrap}
+      .jb-copy{min-width:0;flex:1}.jb-kicker{font-size:12px;color:var(--secondary-text-color);font-weight:600;margin-bottom:3px}.jb-headline{font-size:19px;line-height:1.2;font-weight:700;color:var(--primary-text-color)}.jb-sub{font-size:13px;line-height:1.35;color:var(--secondary-text-color);margin-top:4px}.jb-chevron{color:var(--secondary-text-color);flex:none}.jb-badge{font-size:11px;padding:5px 8px;border-radius:999px;background:color-mix(in srgb,var(--primary-color) 13%,transparent);color:var(--primary-text-color);white-space:nowrap}.jb-info-button{width:32px;height:32px;border:0;border-radius:50%;display:flex;align-items:center;justify-content:center;background:transparent;color:var(--secondary-text-color);cursor:pointer;flex:none}.jb-info-button:hover{background:color-mix(in srgb,var(--primary-text-color) 7%,transparent);color:var(--primary-text-color)}.jb-info-button ha-icon{--mdc-icon-size:21px}
       .jb-panel{padding:0 18px 18px}.jb-panel-title{font-size:18px;font-weight:700;margin:2px 0 7px}.jb-panel-text{font-size:13px;color:var(--secondary-text-color);line-height:1.45;margin-bottom:16px}.jb-question{margin:15px 0}.jb-question>div:first-child{font-weight:600;font-size:14px;margin-bottom:8px}.jb-scale{display:grid;grid-template-columns:repeat(5,1fr);gap:7px}.jb-scale button{border:1px solid var(--divider-color);background:color-mix(in srgb,var(--card-background-color) 82%,transparent);color:var(--primary-text-color);border-radius:11px;padding:8px 0;cursor:pointer}.jb-scale button.active{background:var(--primary-color);color:var(--text-primary-color,#fff);border-color:var(--primary-color)}.jb-scale-label{display:flex;justify-content:space-between;font-size:10px;color:var(--secondary-text-color);margin-top:5px}.jb-actions{display:flex;justify-content:flex-end;margin-top:18px}.jb-actions button.primary{border:0;border-radius:11px;padding:10px 15px;background:var(--primary-color);color:var(--text-primary-color,#fff);font-weight:600;cursor:pointer}
       .jb-metrics{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 12px}.jb-metrics span,.jb-learning span{font-size:12px;padding:5px 9px;border-radius:999px;background:color-mix(in srgb,var(--primary-text-color) 6%,transparent);color:var(--secondary-text-color)}.jb-rain,.jb-context{display:flex;gap:8px;align-items:center;padding:10px 12px;border-radius:12px;background:color-mix(in srgb,#2196f3 10%,transparent);margin-bottom:12px;font-size:13px}.jb-rain.strong{background:color-mix(in srgb,#2196f3 18%,transparent);font-weight:600}.jb-section-title{font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--secondary-text-color);font-weight:700;margin:14px 0 7px}.jb-reasons{margin:0;padding-left:20px;color:var(--primary-text-color);font-size:13px;line-height:1.45}.jb-learning{display:flex;gap:8px;margin-top:14px}.jb-divider{height:1px;background:var(--divider-color);margin:17px 0}
       .jb-feedback{padding:11px 0}.jb-feedback+.jb-feedback{border-top:1px solid var(--divider-color)}.jb-feedback-time{font-size:11px;color:var(--secondary-text-color);margin-bottom:5px}.jb-feedback-rec{font-weight:650;display:flex;justify-content:space-between;gap:10px}.jb-feedback-rec span{font-size:12px;font-weight:400;color:var(--secondary-text-color)}.jb-unusual{display:flex;align-items:center;gap:7px;margin-top:8px;font-size:11px;color:var(--secondary-text-color);font-weight:400}.jb-unusual input{margin:0}.jb-feedback-buttons{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px;margin-top:9px}.jb-feedback-buttons button,.jb-phase-buttons button{border:1px solid var(--divider-color);background:transparent;color:var(--primary-text-color);border-radius:10px;padding:8px 5px;font-size:11px;cursor:pointer}.jb-manual-button{border:1px solid var(--divider-color);background:transparent;color:var(--secondary-text-color);border-radius:10px;padding:8px 10px;font-size:11px;cursor:pointer}.jb-phase{margin-top:12px;padding:12px;border-radius:12px;background:color-mix(in srgb,var(--primary-color) 8%,transparent);font-size:13px;font-weight:600}.jb-phase-buttons{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}.jb-notice{margin-top:10px;font-size:12px;color:var(--success-color,#43a047)}
-      .jb-profile-row{display:flex;justify-content:flex-end;align-items:center;gap:8px;padding:9px 16px 0;font-size:11px;color:var(--secondary-text-color)}.jb-profile-row select{border:1px solid var(--divider-color);border-radius:9px;background:var(--card-background-color);color:var(--primary-text-color);padding:5px 8px}.jb-loading,.jb-error{padding:18px}.jb-error{display:flex;gap:9px;align-items:center;color:var(--error-color)}
-      @media(max-width:520px){.jb-feedback-buttons{grid-template-columns:repeat(2,1fr)}.jb-badge{display:none}}
+      .jb-profile-row{display:flex;justify-content:flex-end;align-items:center;gap:8px;padding:9px 16px 0;font-size:11px;color:var(--secondary-text-color)}.jb-profile-row select{border:1px solid var(--divider-color);border-radius:9px;background:var(--card-background-color);color:var(--primary-text-color);padding:5px 8px}.jb-info-panel{padding:14px 18px 18px;border-top:1px solid var(--divider-color);background:color-mix(in srgb,var(--primary-color) 3%,transparent)}.jb-info-title{display:flex;align-items:center;gap:8px;font-weight:700;font-size:15px;margin-bottom:12px}.jb-info-title ha-icon{--mdc-icon-size:21px}.jb-info-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.jb-info-grid>div{display:flex;flex-direction:column;gap:3px;padding:9px 10px;border-radius:10px;background:color-mix(in srgb,var(--primary-text-color) 5%,transparent)}.jb-info-grid span{font-size:10px;color:var(--secondary-text-color);text-transform:uppercase;letter-spacing:.03em}.jb-info-grid strong{font-size:12px;font-weight:650}.jb-info-note{display:flex;align-items:center;gap:8px;margin-top:9px;padding:9px 10px;border-radius:10px;background:color-mix(in srgb,var(--primary-color) 8%,transparent);font-size:12px;color:var(--secondary-text-color)}.jb-info-note ha-icon{--mdc-icon-size:18px}.jb-info-backup{margin-top:10px}.jb-info-actions{display:flex;gap:8px;flex-wrap:wrap}.jb-info-actions button{display:flex;align-items:center;gap:6px;border:1px solid var(--divider-color);background:transparent;color:var(--primary-text-color);border-radius:10px;padding:8px 10px;font-size:11px;cursor:pointer}.jb-info-actions button ha-icon{--mdc-icon-size:17px}.jb-loading,.jb-error{padding:18px}.jb-error{display:flex;gap:9px;align-items:center;color:var(--error-color)}
+      @media(max-width:520px){.jb-feedback-buttons{grid-template-columns:repeat(2,1fr)}.jb-badge{display:none}.jb-info-grid{grid-template-columns:1fr}}
     </style>`;
   }
 }

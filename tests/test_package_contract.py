@@ -18,8 +18,8 @@ def _key_paths(value, prefix=()):
 
 
 def test_custom_integration_translation_structure_matches_between_en_and_de():
-    en = json.loads((INTEGRATION / "translations" / "en.json").read_text())
-    de = json.loads((INTEGRATION / "translations" / "de.json").read_text())
+    en = json.loads((INTEGRATION / "translations" / "en.json").read_text(encoding="utf-8"))
+    de = json.loads((INTEGRATION / "translations" / "de.json").read_text(encoding="utf-8"))
     assert _key_paths(en) == _key_paths(de)
     assert not (INTEGRATION / "strings.json").exists()
 
@@ -33,5 +33,12 @@ def test_local_brand_icon_is_present_and_hacs_does_not_ignore_brands():
     width = int.from_bytes(data[16:20], "big")
     height = int.from_bytes(data[20:24], "big")
     assert (width, height) == (256, 256)
-    workflow = (ROOT / ".github" / "workflows" / "validate.yml").read_text()
+    workflow = (ROOT / ".github" / "workflows" / "validate.yml").read_text(encoding="utf-8")
     assert "ignore: brands" not in workflow
+
+
+def test_private_profiles_are_not_exposed_as_global_ha_entities():
+    for module in ("button.py", "switch.py", "sensor.py", "entity.py"):
+        assert not (INTEGRATION / module).exists()
+    init_source = (INTEGRATION / "__init__.py").read_text(encoding="utf-8")
+    assert "async_forward_entry_setups" not in init_source

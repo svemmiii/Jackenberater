@@ -462,3 +462,48 @@ def test_not_used_feedback_does_not_consume_previous_learning_undo_snapshot():
         assert await manager.async_undo_last_feedback("user") is True
         assert manager.get_model("user").general_offset_c == 0.0
     asyncio.run(run())
+
+
+def test_profile_export_import_roundtrip_preserves_compact_learning_and_clears_sessions():
+    async def run():
+        manager = make_manager()
+        model = manager.get_model("user")
+        model.general_offset_c = 1.25
+        model.transient_tolerance = 0.82
+        model.winter_bias_c = 0.35
+        manager._profiles["user"]["model"] = model.to_dict()
+        manager._profiles["user"]["sessions"] = [{"id": "stale"}]
+        payload = manager.export_profile("user")
+        assert payload["format"] == "jackenberater-profile"
+        assert "sessions" not in payload
+        assert "weather" not in payload
+
+        manager._profiles["user"]["model"] = learning.PersonalModel.from_answers(3, 3, 3, 3).to_dict()
+        restored = await manager.async_import_profile("user", payload)
+        assert restored.general_offset_c == 1.25
+        assert restored.transient_tolerance == 0.82
+        assert restored.winter_bias_c == 0.35
+        assert manager._profiles["user"]["sessions"] == []
+
+    asyncio.run(run())
+
+
+def test_profile_import_sanitizes_values_and_rejects_wrong_format():
+    async def run():
+        manager = make_manager()
+        payload = {
+            "format": "jackenberater-profile",
+            "version": 1,
+            "model": {"setup_complete": True, "transient_tolerance": 99, "winter_bias_c": "oops"},
+        }
+        restored = await manager.async_import_profile("user", payload)
+        assert restored.transient_tolerance == 1.5
+        assert restored.winter_bias_c == 0.0
+        try:
+            await manager.async_import_profile("user", {"format": "wrong", "version": 1, "model": {}})
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("invalid profile backup must be rejected")
+
+    asyncio.run(run())

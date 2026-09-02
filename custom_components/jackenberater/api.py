@@ -48,6 +48,9 @@ def async_register_api(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_profile_setup)
     websocket_api.async_register_command(hass, ws_feedback)
     websocket_api.async_register_command(hass, ws_profiles)
+    websocket_api.async_register_command(hass, ws_profile_export)
+    websocket_api.async_register_command(hass, ws_profile_import)
+    websocket_api.async_register_command(hass, ws_profile_maintenance)
     domain_data["api_registered"] = True
 
 
@@ -78,17 +81,30 @@ def _can_use_shared_profiles(connection: websocket_api.ActiveConnection, entry: 
     return bool(connection.user.is_admin) or _is_shared_account(connection, entry)
 
 
+def _read_only_profile_summary(summary: dict[str, Any]) -> dict[str, Any]:
+    """Expose only what a wall tablet needs to select and render a profile."""
+    return {
+        key: summary[key]
+        for key in ("id", "name", "setup_complete")
+        if key in summary
+    }
+
+
 async def _profile(
     connection: websocket_api.ActiveConnection,
     manager: ProfileManager,
     requested_id: str | None,
     entry: ConfigEntry,
+    *,
+    allow_shared_read: bool = False,
 ) -> tuple[str, Any]:
     own_id = str(connection.user.id)
     own_name = str(connection.user.name or "Home-Assistant-Nutzer")
 
     if requested_id and requested_id != own_id:
-        if not _can_use_shared_profiles(connection, entry):
+        if not connection.user.is_admin and not (
+            allow_shared_read and _is_shared_account(connection, entry)
+        ):
             raise ValueError("shared_profile_access_denied")
         if requested_id not in manager.profile_ids:
             raise ValueError("profile_not_found")
@@ -127,7 +143,9 @@ async def _recommendation(
     max_horizon = max(MAX_FORECAST_HOURS, min(CALENDAR_MAX_HOURS, context_horizon or 0))
 
     work_points: list[WeatherPoint] = []
+    work_weather_available = True
     work_start: datetime | None = None
+    work_end: datetime | None = None
     active_work_context = False
     work_entity = entry.data.get(CONF_WORK_WEATHER)
     if isinstance(work_entity, str) and work_entity:
@@ -137,13 +155,17 @@ async def _recommendation(
         work_forecast = list((coordinator.data or {}).get("work_forecast", []))
         now = dt_util.now()
         if planning_windows:
-            work_start = (actual_windows or planning_windows)[0][0]
+            chosen_window = (actual_windows or planning_windows)[0]
+            work_start = chosen_window[0]
+            work_end = chosen_window[1] if actual_windows else None
             work_points = [
                 point
                 for point in work_forecast
                 if point.dt > current.dt
                 and any(start <= point.dt <= end for start, end in planning_windows)
             ]
+            if not work_points:
+                work_weather_available = False
             # Planning relevance starts 30 minutes around the work period, but the
             # current location does not. Home forecast points are replaced only for
             # the planning timeline; current weather switches below using the actual
@@ -200,12 +222,14 @@ async def _recommendation(
         rain_advice=bool(entry.data.get(CONF_RAIN_ADVICE, True)),
         work_points=work_points,
         work_start=work_start,
+        work_end=work_end,
         work_name=work_name,
         calendar_context=context_horizon is not None,
         activity_context_c=activity,
         activity_context_fn=lambda when: activity_context_c(when, model.evening_answer),
     )
     recommendation.source = "work" if active_work_context else "home"
+    recommendation.work_weather_available = work_weather_available
     if active_work_context and not recommendation.work_context:
         recommendation.work_context = True
         recommendation.work_jacket = recommendation.jacket_now
@@ -221,7 +245,8 @@ async def _cached_work_window_sets(
     now = dt_util.now()
     cache = runtime.setdefault("context_cache", {})
     updated = cache.get("updated")
-    if isinstance(updated, datetime) and now - updated < timedelta(minutes=15):
+    age = now - updated if isinstance(updated, datetime) else None
+    if isinstance(age, timedelta) and timedelta(0) <= age < timedelta(minutes=15):
         return (
             list(cache.get("work_windows_actual", [])),
             list(cache.get("work_windows_planning", [])),
@@ -243,7 +268,8 @@ async def _cached_calendar_horizon(
     now = dt_util.now()
     cache = runtime.setdefault("context_cache", {})
     updated = cache.get("calendar_updated")
-    if isinstance(updated, datetime) and now - updated < timedelta(minutes=15):
+    age = now - updated if isinstance(updated, datetime) else None
+    if isinstance(age, timedelta) and timedelta(0) <= age < timedelta(minutes=15):
         value = cache.get("calendar_horizon")
         return int(value) if isinstance(value, int) else None
     value = await calendar_context_horizon(hass, entry, now)
@@ -271,15 +297,20 @@ def _learning_contexts(rec: Recommendation) -> dict[str, dict[str, Any]]:
     """Store the actual start/later contexts used by feedback learning."""
     start = {
         "jacket": rec.jacket_now,
+        "observed_at": dt_util.now().isoformat(),
         "temperature_c": rec.current_temperature_c,
         "wind_kmh": _effective_wind(rec.current_wind_kmh, rec.current_gust_kmh),
         "wind_penalty_c": rec.current_wind_penalty_c,
         "condition": rec.current_condition,
         "effective_c": rec.effective_now_c,
         "transition_penalty_c": rec.transition_penalty_c,
+        "transient_override": rec.transient_override,
+        "transient_direction": rec.transient_direction,
+        "transient_burden": rec.transient_burden,
     }
     later = {
         "jacket": rec.jacket_later,
+        "observed_at": rec.later_at.isoformat() if rec.later_at is not None else None,
         "temperature_c": rec.later_temperature_c,
         "wind_kmh": _effective_wind(rec.later_wind_kmh, rec.later_gust_kmh),
         "wind_penalty_c": rec.later_wind_penalty_c,
@@ -304,16 +335,24 @@ async def ws_preview(hass, connection, msg) -> None:
     try:
         entry, runtime = _runtime(hass, msg.get("entry_id"))
         manager: ProfileManager = runtime["profiles"]
-        profile_id, model = await _profile(connection, manager, msg.get("profile_id"), entry)
+        profile_id, model = await _profile(
+            connection,
+            manager,
+            msg.get("profile_id"),
+            entry,
+            allow_shared_read=True,
+        )
         rec = await _recommendation(hass, entry, runtime, model)
+        read_only_shared = _is_shared_account(connection, entry) and not connection.user.is_admin
+        summary = manager.get_profile_summary(profile_id)
         connection.send_result(
             msg["id"],
             {
                 "entry_id": entry.entry_id,
-                "profile": manager.get_profile_summary(profile_id),
+                "profile": _read_only_profile_summary(summary) if read_only_shared else summary,
                 "recommendation": rec.as_dict(),
-                "feedback": manager.feedback_candidates(profile_id),
-                "latest_session": manager.latest_session(profile_id),
+                "feedback": [] if read_only_shared else manager.feedback_candidates(profile_id),
+                "latest_session": None if read_only_shared else manager.latest_session(profile_id),
             },
         )
     except ValueError as err:
@@ -444,6 +483,8 @@ def ws_profiles(hass, connection, msg) -> None:
             for summary in manager.summaries()
             if not (shared_account and summary.get("id") == own_id)
         ]
+        if shared_account and not connection.user.is_admin:
+            summaries = [_read_only_profile_summary(summary) for summary in summaries]
     else:
         summaries = (
             [manager.get_profile_summary(own_id)] if own_id in manager.profile_ids else []
@@ -451,9 +492,120 @@ def ws_profiles(hass, connection, msg) -> None:
     connection.send_result(
         msg["id"],
         {
+            "entry_id": entry.entry_id,
             "current_user_id": own_id,
             "shared_access": _can_use_shared_profiles(connection, entry),
             "shared_account": shared_account,
+            "is_admin": bool(connection.user.is_admin),
             "profiles": summaries,
         },
     )
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "jackenberater/profile_export",
+        vol.Optional("entry_id"): str,
+        vol.Optional("profile_id"): str,
+    }
+)
+@callback
+def ws_profile_export(hass, connection, msg) -> None:
+    """Export only compact personal learning state, never session/weather history."""
+    try:
+        entry, runtime = _runtime(hass, msg.get("entry_id"))
+        manager: ProfileManager = runtime["profiles"]
+        own_id = str(connection.user.id)
+        requested = msg.get("profile_id")
+        if requested and requested != own_id:
+            if not connection.user.is_admin:
+                raise ValueError("shared_profile_access_denied")
+            if requested not in manager.profile_ids:
+                raise ValueError("profile_not_found")
+            profile_id = requested
+        else:
+            if _is_shared_account(connection, entry):
+                raise ValueError("shared_profile_required")
+            profile_id = own_id
+            if profile_id not in manager.profile_ids:
+                raise ValueError("profile_not_found")
+        connection.send_result(msg["id"], manager.export_profile(profile_id))
+    except (ValueError, KeyError) as err:
+        connection.send_error(msg["id"], "profile_export_failed", str(err))
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "jackenberater/profile_import",
+        vol.Optional("entry_id"): str,
+        vol.Optional("profile_id"): str,
+        vol.Required("payload"): dict,
+    }
+)
+@websocket_api.async_response
+async def ws_profile_import(hass, connection, msg) -> None:
+    """Restore a compact profile backup.
+
+    A user may restore their own profile. Replacing somebody else's profile is
+    reserved for HA administrators even when a shared wall-tablet login can read
+    and use that profile for advice.
+    """
+    try:
+        entry, runtime = _runtime(hass, msg.get("entry_id"))
+        manager: ProfileManager = runtime["profiles"]
+        own_id = str(connection.user.id)
+        requested = msg.get("profile_id")
+        if requested and requested != own_id:
+            if not connection.user.is_admin:
+                raise ValueError("profile_import_admin_required")
+            if requested not in manager.profile_ids:
+                raise ValueError("profile_not_found")
+            profile_id = requested
+        else:
+            if _is_shared_account(connection, entry):
+                raise ValueError("shared_profile_required")
+            profile_id = own_id
+            await manager.async_ensure_profile(
+                profile_id, str(connection.user.name or "Home-Assistant-Nutzer")
+            )
+        model = await manager.async_import_profile(profile_id, msg["payload"])
+        connection.send_result(
+            msg["id"],
+            {
+                "profile": manager.get_profile_summary(profile_id),
+                "setup_complete": model.setup_complete,
+            },
+        )
+    except (ValueError, KeyError) as err:
+        connection.send_error(msg["id"], "profile_import_failed", str(err))
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "jackenberater/profile_maintenance",
+        vol.Optional("entry_id"): str,
+        vol.Optional("profile_id"): str,
+        vol.Required("action"): vol.In({"learning_on", "learning_off", "reset", "undo"}),
+    }
+)
+@websocket_api.async_response
+async def ws_profile_maintenance(hass, connection, msg) -> None:
+    """Run profile-changing maintenance only after authenticated profile checks."""
+    try:
+        entry, runtime = _runtime(hass, msg.get("entry_id"))
+        manager: ProfileManager = runtime["profiles"]
+        profile_id, _ = await _profile(connection, manager, msg.get("profile_id"), entry)
+        action = msg["action"]
+        result: bool | None = None
+        if action in {"learning_on", "learning_off"}:
+            await manager.async_set_learning(profile_id, action == "learning_on")
+        elif action == "reset":
+            await manager.async_reset_learning(profile_id)
+        else:
+            result = await manager.async_undo_last_feedback(profile_id)
+        connection.send_result(
+            msg["id"],
+            {"profile": manager.get_profile_summary(profile_id), "result": result},
+        )
+    except (ValueError, KeyError) as err:
+        connection.send_error(msg["id"], "profile_maintenance_failed", str(err))

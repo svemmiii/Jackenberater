@@ -44,6 +44,14 @@ def point(hours: int, temp: float, **kwargs):
     )
 
 
+def point_minutes(minutes: int, temp: float, **kwargs):
+    return WeatherPoint(
+        dt=datetime(2026, 9, 1, 12, tzinfo=timezone.utc) + timedelta(minutes=minutes),
+        temperature_c=temp,
+        **kwargs,
+    )
+
+
 def test_young_profile_keeps_clear_hot_advice_reachable():
     model = PersonalModel.from_answers(3, 3, 3, 3)
     rec = engine.build_recommendation(
@@ -578,6 +586,28 @@ def test_work_points_beyond_calendar_max_horizon_are_ignored():
     assert rec.horizon_hours <= const.CALENDAR_MAX_HOURS
 
 
+def test_short_global_minimum_does_not_hide_stable_lighter_jacket_later():
+    model = PersonalModel.from_answers(3, 3, 3, 3)
+    rec = engine.build_recommendation(
+        point(0, 0),
+        [point(1, 20), point(2, 0), point(3, 15), point(4, 15)],
+        model,
+        indoor_temperature_c=0,
+    )
+    assert rec.jacket_now == const.JACKET_WINTER
+    assert rec.jacket_later == const.JACKET_LIGHT
+    assert rec.later_at == point(3, 15).dt
+
+
+def test_snow_and_hail_trigger_precipitation_protection():
+    model = PersonalModel.from_answers(3, 3, 3, 3)
+    for condition in ("snowy", "hail"):
+        rec = engine.build_recommendation(
+            point(0, 10, condition=condition), [], model, indoor_temperature_c=20
+        )
+        assert rec.rain_status == const.RAIN_RECOMMENDED
+
+
 def test_work_override_clears_later_target_when_final_class_matches_now():
     model = PersonalModel.from_answers(3, 3, 3, 3)
     home = [point(i, 14) for i in range(1, 10)]
@@ -744,3 +774,111 @@ def test_hidden_requires_coverage_to_the_actual_work_extended_horizon():
     )
     assert rec.horizon_hours == 14
     assert rec.display_mode == const.DISPLAY_COMPACT
+
+
+def test_short_warming_transition_prefers_personally_practical_lighter_jacket():
+    model = PersonalModel.from_answers(3, 3, 3, 3)
+    current = point_minutes(0, 11.5)  # raw: warm
+    future = [
+        point_minutes(5, 14.0),
+        point_minutes(60, 15.0),
+        point_minutes(120, 16.0),
+    ]
+    rec = engine.build_recommendation(current, future, model, indoor_temperature_c=11.5)
+    assert rec.instant_jacket == const.JACKET_WARM
+    assert rec.jacket_now == const.JACKET_LIGHT
+    assert rec.transient_override is True
+    assert rec.transient_direction == "warming"
+    assert rec.trend == "warming"
+
+
+def test_short_but_severe_warming_mismatch_is_not_smoothed_away():
+    model = PersonalModel.from_answers(3, 3, 3, 3)
+    current = point_minutes(0, -10.0)  # far below winter boundary
+    future = [
+        point_minutes(10, 8.0),
+        point_minutes(60, 9.0),
+        point_minutes(120, 10.0),
+    ]
+    rec = engine.build_recommendation(current, future, model, indoor_temperature_c=-10.0)
+    assert rec.jacket_now == const.JACKET_WINTER
+    assert rec.transient_override is False
+
+
+def test_short_cooling_transition_can_choose_warmer_jacket_immediately():
+    model = PersonalModel.from_answers(3, 3, 3, 3)
+    current = point_minutes(0, 14.0)  # raw: light
+    future = [
+        point_minutes(10, 8.0),
+        point_minutes(60, 8.0),
+        point_minutes(120, 7.5),
+    ]
+    rec = engine.build_recommendation(current, future, model, indoor_temperature_c=14.0)
+    assert rec.instant_jacket == const.JACKET_LIGHT
+    assert rec.jacket_now == const.JACKET_WARM
+    assert rec.transient_override is True
+    assert rec.transient_direction == "cooling"
+
+
+def test_cooling_only_after_two_hours_remains_later_advice_not_immediate_override():
+    model = PersonalModel.from_answers(3, 3, 3, 3)
+    current = point(0, 14.0)
+    future = [point(1, 14.0), point(2, 8.0), point(3, 8.0), point(4, 7.5)]
+    rec = engine.build_recommendation(current, future, model, indoor_temperature_c=14.0)
+    assert rec.jacket_now == const.JACKET_LIGHT
+    assert rec.jacket_later == const.JACKET_WARM
+    assert rec.later_at == future[1].dt
+    assert rec.transient_override is False
+
+
+def test_transient_feedback_personalizes_short_term_tolerance_without_history():
+    model = PersonalModel.from_answers(3, 3, 3, 3)
+    before = model.transient_tolerance
+    general_before = model.general_offset_c
+    light_before = model.light_threshold_delta_c
+    warm_before = model.warm_threshold_delta_c
+    learning.apply_feedback(
+        model,
+        rating=const.FEEDBACK_TOO_COLD,
+        jacket=const.JACKET_LIGHT,
+        effective_c=11.8,
+        observed_at=datetime(2026, 9, 2, 12, tzinfo=timezone.utc),
+        transient_override=True,
+        transient_direction="warming",
+    )
+    assert model.transient_tolerance < before
+    assert model.transient_stat.samples == 1
+    assert model.general_offset_c == general_before
+    assert model.light_threshold_delta_c == light_before
+    assert model.warm_threshold_delta_c == warm_before
+    assert "history" not in model.to_dict()
+
+
+def test_seasonal_learning_only_nudges_matching_season_slowly():
+    model = PersonalModel.from_answers(3, 3, 3, 3)
+    winter = datetime(2026, 1, 15, 12, tzinfo=timezone.utc)
+    for _ in range(6):
+        learning.apply_feedback(
+            model, rating=const.FEEDBACK_PERFECT, jacket=const.JACKET_LIGHT,
+            effective_c=15.0, observed_at=winter,
+        )
+    learning.apply_feedback(
+        model, rating=const.FEEDBACK_TOO_COLD, jacket=const.JACKET_LIGHT,
+        effective_c=15.0, observed_at=winter,
+    )
+    assert model.winter_bias_c > 0.0
+    assert model.summer_bias_c == 0.0
+    assert model.winter_bias_c < model.general_offset_c
+
+
+def test_matching_season_bias_affects_only_that_seasons_assessment():
+    model = PersonalModel.from_answers(3, 3, 3, 3)
+    model.winter_bias_c = 0.8
+    model.summer_bias_c = 0.0
+    winter_point = WeatherPoint(dt=datetime(2026, 1, 15, 12, tzinfo=timezone.utc), temperature_c=15.0)
+    summer_point = WeatherPoint(dt=datetime(2026, 7, 15, 12, tzinfo=timezone.utc), temperature_c=15.0)
+    winter_result = engine.assess_point(winter_point, model)
+    summer_result = engine.assess_point(summer_point, model)
+    assert winter_result.seasonal_adjustment_c == 0.8
+    assert summer_result.seasonal_adjustment_c == 0.0
+    assert winter_result.effective_temperature_c < summer_result.effective_temperature_c

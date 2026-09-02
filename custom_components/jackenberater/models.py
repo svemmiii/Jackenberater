@@ -33,6 +33,7 @@ class ThermalResult:
     rain_penalty_c: float
     humidity_adjustment_c: float
     threshold_margin_c: float
+    seasonal_adjustment_c: float = 0.0
     reasons: list[str] = field(default_factory=list)
 
 
@@ -64,15 +65,27 @@ class Recommendation:
     later_effective_c: float | None = None
     later_wind_penalty_c: float | None = None
     work_context: bool = False
+    work_weather_available: bool = True
     work_jacket: str | None = None
     work_start: datetime | None = None
     work_name: str | None = None
     calendar_context: bool = False
     source: str = "home"
+    trend: str = "unknown"
+    forecast_coverage_complete: bool = False
+    stay_context: str = "unknown"
+    later_context: str = "home"
+    work_end: datetime | None = None
+    transient_override: bool = False
+    transient_direction: str | None = None
+    transient_until: datetime | None = None
+    transient_burden: float | None = None
+    instant_jacket: str | None = None
+    seasonal_adjustment_c: float = 0.0
 
     def as_dict(self) -> dict[str, Any]:
         result = asdict(self)
-        for key in ("later_at", "work_start"):
+        for key in ("later_at", "work_start", "work_end", "transient_until"):
             value = result.get(key)
             if isinstance(value, datetime):
                 result[key] = value.isoformat()

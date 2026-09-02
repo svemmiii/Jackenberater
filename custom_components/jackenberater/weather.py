@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime
 import logging
+import math
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
@@ -24,30 +25,43 @@ def _float(value: Any) -> float | None:
         number = float(value)
     except (TypeError, ValueError):
         return None
-    if number != number:
+    if not math.isfinite(number):
+        return None
+    return number
+
+
+def _bounded(value: Any, minimum: float, maximum: float) -> float | None:
+    """Return a finite provider number only when it is physically plausible."""
+    number = _float(value)
+    if number is None or not minimum <= number <= maximum:
         return None
     return number
 
 
 def _wind_to_kmh(value: Any, unit: str | None) -> float | None:
-    number = _float(value)
+    number = _bounded(value, 0.0, 500.0)
     if number is None:
         return None
     normalized = (unit or "km/h").strip().lower()
+    converted: float | None = None
     if normalized in {"km/h", "kmh", "kph"}:
-        return number
-    if normalized in {"m/s", "mps"}:
-        return number * 3.6
-    if normalized in {"mph", "mi/h"}:
-        return number * 1.609344
-    if normalized in {"ft/s", "fps"}:
-        return number * 1.09728
-    if normalized in {"kn", "kt", "knot", "knots"}:
-        return number * 1.852
+        converted = number
+    elif normalized in {"m/s", "mps"}:
+        converted = number * 3.6
+    elif normalized in {"mph", "mi/h"}:
+        converted = number * 1.609344
+    elif normalized in {"ft/s", "fps"}:
+        converted = number * 1.09728
+    elif normalized in {"kn", "kt", "knot", "knots"}:
+        converted = number * 1.852
     if normalized in {"beaufort", "bft", "bf"}:
         # Standard empirical Beaufort equivalent: v = 0.836 * B^(3/2) m/s.
-        beaufort = max(0.0, min(12.0, number))
-        return 0.836 * (beaufort ** 1.5) * 3.6
+        if number > 12.0:
+            return None
+        beaufort = number
+        converted = 0.836 * (beaufort ** 1.5) * 3.6
+    if converted is not None:
+        return converted if converted <= 500.0 else None
     # Unknown units must never be treated as km/h silently.
     return None
 
@@ -57,21 +71,23 @@ def _temperature_to_c(value: Any, unit: str | None) -> float | None:
     if number is None:
         return None
     if not unit or unit == UnitOfTemperature.CELSIUS:
-        return number
+        return number if -100.0 <= number <= 70.0 else None
     try:
-        return float(TemperatureConverter.convert(number, unit, UnitOfTemperature.CELSIUS))
+        converted = float(TemperatureConverter.convert(number, unit, UnitOfTemperature.CELSIUS))
+        return converted if math.isfinite(converted) and -100.0 <= converted <= 70.0 else None
     except (HomeAssistantError, TypeError, ValueError):
         return None
 
 
 
 def _precipitation_to_mm(value: Any, unit: str | None) -> float | None:
-    number = _float(value)
+    number = _bounded(value, 0.0, 10000.0)
     if number is None:
         return None
     from_unit = unit or UnitOfLength.MILLIMETERS
     try:
-        return float(DistanceConverter.convert(number, from_unit, UnitOfLength.MILLIMETERS))
+        converted = float(DistanceConverter.convert(number, from_unit, UnitOfLength.MILLIMETERS))
+        return converted if math.isfinite(converted) and 0.0 <= converted <= 10000.0 else None
     except (HomeAssistantError, TypeError, ValueError):
         return None
 
@@ -105,11 +121,11 @@ def current_weather(hass: HomeAssistant, entity_id: str) -> WeatherPoint | None:
     return WeatherPoint(
         dt=dt_util.now(),
         temperature_c=temp,
-        humidity=_float(attrs.get("humidity")),
+        humidity=_bounded(attrs.get("humidity"), 0.0, 100.0),
         wind_kmh=_wind_to_kmh(attrs.get("wind_speed"), wind_unit),
         gust_kmh=_wind_to_kmh(attrs.get("wind_gust_speed"), wind_unit),
-        cloud_coverage=_float(attrs.get("cloud_coverage")),
-        precipitation_probability=_float(attrs.get("precipitation_probability")),
+        cloud_coverage=_bounded(attrs.get("cloud_coverage"), 0.0, 100.0),
+        precipitation_probability=_bounded(attrs.get("precipitation_probability"), 0.0, 100.0),
         precipitation_mm=_precipitation_to_mm(attrs.get("precipitation"), precipitation_unit),
         condition=state.state,
     )
@@ -159,11 +175,11 @@ def normalize_forecast(
             WeatherPoint(
                 dt=dt,
                 temperature_c=temp,
-                humidity=_float(raw.get("humidity")),
+                humidity=_bounded(raw.get("humidity"), 0.0, 100.0),
                 wind_kmh=_wind_to_kmh(raw.get("wind_speed"), wind_unit),
                 gust_kmh=_wind_to_kmh(raw.get("wind_gust_speed"), wind_unit),
-                cloud_coverage=_float(raw.get("cloud_coverage")),
-                precipitation_probability=_float(raw.get("precipitation_probability")),
+                cloud_coverage=_bounded(raw.get("cloud_coverage"), 0.0, 100.0),
+                precipitation_probability=_bounded(raw.get("precipitation_probability"), 0.0, 100.0),
                 precipitation_mm=_precipitation_to_mm(raw.get("precipitation"), precipitation_unit),
                 condition=raw.get("condition") if isinstance(raw.get("condition"), str) else None,
             )

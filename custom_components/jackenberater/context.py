@@ -39,6 +39,13 @@ from .const import (
 _LOGGER = logging.getLogger(__name__)
 
 
+def _absolute_horizon_end(now: datetime, hours: int) -> datetime:
+    """Add real elapsed hours while retaining the input timezone for comparisons."""
+    if now.tzinfo is None:
+        return now + timedelta(hours=hours)
+    return (now.astimezone(dt_util.UTC) + timedelta(hours=hours)).astimezone(now.tzinfo)
+
+
 async def calendar_context_horizon(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -49,7 +56,7 @@ async def calendar_context_horizon(
     entity_id = entry.data.get(CONF_CONTEXT_CALENDAR)
     if not isinstance(entity_id, str) or not entity_id:
         return None
-    end = now + timedelta(hours=horizon_hours)
+    end = _absolute_horizon_end(now, horizon_hours)
     windows = await _calendar_windows(hass, entity_id, now, end, timed_only=True)
     if not windows:
         return None
@@ -74,7 +81,7 @@ async def work_windows(
     adds the ±30 minute buffer used to consider destination weather before/after
     work without pretending the user is already physically at that location.
     """
-    end = now + timedelta(hours=horizon_hours)
+    end = _absolute_horizon_end(now, horizon_hours)
     # Search one planning buffer into the past as well. Otherwise a fresh context
     # calculation at 17:10 would forget a 17:00 work end, while a cached result
     # from 16:59 would still retain the intended planning relevance until 17:30.

@@ -2,9 +2,9 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from datetime import datetime, timedelta
+from datetime import datetime
 import logging
-from typing import Any, Callable
+from typing import Any
 import uuid
 
 from homeassistant.config_entries import ConfigEntry
@@ -149,6 +149,39 @@ class ProfileManager:
         self._profiles[profile_id]["sessions"] = []
         self._schedule_save()
         self._updated(profile_id)
+
+    def export_profile(self, profile_id: str) -> dict[str, Any]:
+        """Return a compact, versioned learning backup without weather history."""
+        if profile_id not in self._profiles:
+            raise KeyError("profile not found")
+        return {
+            "format": "jackenberater-profile",
+            "version": 1,
+            "exported_at": dt_util.now().isoformat(),
+            "name": self.profile_name(profile_id),
+            "model": self.get_model(profile_id).to_dict(),
+        }
+
+    async def async_import_profile(
+        self, profile_id: str, payload: dict[str, Any]
+    ) -> PersonalModel:
+        """Restore compact learning state and discard stale feedback sessions."""
+        if profile_id not in self._profiles:
+            raise KeyError("profile not found")
+        if not isinstance(payload, dict) or payload.get("format") != "jackenberater-profile":
+            raise ValueError("invalid profile backup")
+        try:
+            version = int(payload.get("version", 0))
+        except (TypeError, ValueError):
+            version = 0
+        if version != 1 or not isinstance(payload.get("model"), dict):
+            raise ValueError("unsupported profile backup")
+        model = PersonalModel.from_dict(payload["model"])
+        self._profiles[profile_id]["model"] = model.to_dict()
+        self._profiles[profile_id]["sessions"] = []
+        self._schedule_save()
+        self._updated(profile_id)
+        return model
 
     async def async_open_session(
         self,
@@ -327,6 +360,13 @@ class ProfileManager:
                 voluntary=bool(voluntary),
                 count_feedback=count_feedback,
                 apply_general=apply_general,
+                observed_at=_parse_dt(target.get("observed_at")),
+                transient_override=bool(target.get("transient_override")),
+                transient_direction=(
+                    str(target.get("transient_direction"))
+                    if target.get("transient_direction") in {"warming", "cooling"}
+                    else None
+                ),
             )
 
         if phase == PHASE_ALL and isinstance(later_context, dict):
@@ -499,6 +539,9 @@ def _session_context_matches(
         "source",
         "work_jacket",
         "work_context",
+        "transient_override",
+        "transient_direction",
+        "transient_until",
     )
     if any(old_rec.get(key) != new_rec.get(key) for key in exact_keys):
         return False

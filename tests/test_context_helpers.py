@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 import asyncio
 import importlib.util
 from pathlib import Path
@@ -298,3 +299,13 @@ def test_post_work_planning_buffer_survives_fresh_recalculation_after_shift_end(
         start <= now <= end and end == datetime(2026, 9, 1, 17, 30, tzinfo=timezone.utc)
         for start, end in planning
     )
+
+
+def test_horizon_is_sixteen_real_hours_across_dst_changes():
+    berlin = ZoneInfo("Europe/Berlin")
+    for now in (
+        datetime(2026, 3, 28, 20, tzinfo=berlin),
+        datetime(2026, 10, 24, 20, tzinfo=berlin),
+    ):
+        end = context._absolute_horizon_end(now, 16)
+        assert end.astimezone(timezone.utc) - now.astimezone(timezone.utc) == timedelta(hours=16)

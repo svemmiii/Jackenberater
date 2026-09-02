@@ -174,25 +174,5 @@
       "already_configured": "Jacket Advisor is already configured.",
       "reconfigure_successful": "Jacket Advisor was updated."
     }
-  },
-  "entity": {
-    "sensor": {
-      "learning_status": {
-        "name": "Learning status {name}"
-      }
-    },
-    "switch": {
-      "learning_enabled": {
-        "name": "Learning {name}"
-      }
-    },
-    "button": {
-      "reset_learning": {
-        "name": "Reset learning profile {name}"
-      },
-      "undo_feedback": {
-        "name": "Undo last rating {name}"
-      }
-    }
   }
 }

@@ -7,6 +7,7 @@ dataset.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+from datetime import datetime
 import math
 from typing import Any
 
@@ -88,6 +89,18 @@ class PersonalModel:
     general_offset_c: float = 0.0
     wind_bias_c: float = 0.0
     transition_bias_c: float = 0.0
+    # How willing the user is to accept a short mismatch in exchange for the
+    # jacket that fits the continuing trend. 1.0 is neutral; it is deliberately
+    # tightly bounded so transient learning can refine, not dominate, the model.
+    transient_tolerance: float = 1.0
+
+    # Small fixed-size seasonal corrections. Positive means a little more warmth
+    # is preferred in that season. They learn slowly and never replace the global
+    # profile.
+    winter_bias_c: float = 0.0
+    spring_bias_c: float = 0.0
+    summer_bias_c: float = 0.0
+    autumn_bias_c: float = 0.0
 
     # Threshold deltas shift the baseline thresholds at which a warmer class is
     # selected. Positive = warmer garment is chosen sooner / at higher temp.
@@ -98,6 +111,11 @@ class PersonalModel:
     general_stat: RunningStat = field(default_factory=RunningStat)
     wind_stat: RunningStat = field(default_factory=RunningStat)
     transition_stat: RunningStat = field(default_factory=RunningStat)
+    transient_stat: RunningStat = field(default_factory=RunningStat)
+    winter_season_stat: RunningStat = field(default_factory=RunningStat)
+    spring_season_stat: RunningStat = field(default_factory=RunningStat)
+    summer_season_stat: RunningStat = field(default_factory=RunningStat)
+    autumn_season_stat: RunningStat = field(default_factory=RunningStat)
     light_stat: RunningStat = field(default_factory=RunningStat)
     warm_stat: RunningStat = field(default_factory=RunningStat)
     winter_stat: RunningStat = field(default_factory=RunningStat)
@@ -132,6 +150,20 @@ class PersonalModel:
         model.winter_threshold_delta_c = warmth_tendency * 1.15
         model.wind_bias_c = (wind - 3) * 0.35
         return model
+
+    def seasonal_bias_for(self, when: datetime | None) -> float:
+        """Return the small learned seasonal comfort adjustment."""
+        if when is None:
+            return 0.0
+        name = _season_name(when)
+        return float(getattr(self, f"{name}_bias_c", 0.0))
+
+    def seasonal_stat_for(self, when: datetime | None) -> RunningStat | None:
+        if when is None:
+            return None
+        name = _season_name(when)
+        value = getattr(self, f"{name}_season_stat", None)
+        return value if isinstance(value, RunningStat) else None
 
     def reset_to_answers(self) -> None:
         fresh = PersonalModel.from_answers(
@@ -195,11 +227,20 @@ class PersonalModel:
         model.general_offset_c = _safe_number(raw.get("general_offset_c"), 0.0, -5.0, 5.0)
         model.wind_bias_c = _safe_number(raw.get("wind_bias_c"), 0.0, -2.0, 3.0)
         model.transition_bias_c = _safe_number(raw.get("transition_bias_c"), 0.0, -1.5, 2.5)
+        model.transient_tolerance = _safe_number(raw.get("transient_tolerance"), 1.0, 0.5, 1.5)
+        model.winter_bias_c = _safe_number(raw.get("winter_bias_c"), 0.0, -1.2, 1.2)
+        model.spring_bias_c = _safe_number(raw.get("spring_bias_c"), 0.0, -1.2, 1.2)
+        model.summer_bias_c = _safe_number(raw.get("summer_bias_c"), 0.0, -1.2, 1.2)
+        model.autumn_bias_c = _safe_number(raw.get("autumn_bias_c"), 0.0, -1.2, 1.2)
         model.light_threshold_delta_c = _safe_number(raw.get("light_threshold_delta_c"), 0.0, -3.0, 4.0)
         model.warm_threshold_delta_c = _safe_number(raw.get("warm_threshold_delta_c"), 0.0, -3.0, 4.0)
         model.winter_threshold_delta_c = _safe_number(raw.get("winter_threshold_delta_c"), 0.0, -3.0, 4.0)
 
-        for name in ("general_stat", "wind_stat", "transition_stat", "light_stat", "warm_stat", "winter_stat"):
+        for name in (
+            "general_stat", "wind_stat", "transition_stat", "transient_stat",
+            "winter_season_stat", "spring_season_stat", "summer_season_stat",
+            "autumn_season_stat", "light_stat", "warm_stat", "winter_stat",
+        ):
             setattr(model, name, _safe_stat(raw.get(name)))
         model.total_feedback = _safe_int(raw.get("total_feedback"), 0)
         model.feedback_opportunities = _safe_int(raw.get("feedback_opportunities"), 0)
@@ -335,6 +376,9 @@ def apply_feedback(
     voluntary: bool = False,
     count_feedback: bool = True,
     apply_general: bool = True,
+    observed_at: datetime | None = None,
+    transient_override: bool = False,
+    transient_direction: str | None = None,
 ) -> None:
     """Fold one rating into the compact profile."""
     if rating == FEEDBACK_NOT_USED or recommendation_used is False:
@@ -361,6 +405,23 @@ def apply_feedback(
     weight = 0.30 if unusual_day else 1.0
     weight = max(0.2, min(1.2, weight))
 
+    # A transient override is a separate decision: accept a short mismatch now
+    # because the continuing trend favours another jacket. Feedback on that
+    # deliberate compromise must primarily teach *transient tolerance*, not move
+    # the user's ordinary all-day jacket thresholds or global comfort offset.
+    if transient_override and transient_direction in {"warming", "cooling"}:
+        signal = 0.0
+        if error != 0.0:
+            signal = (-error) if transient_direction == "warming" else error
+        previous_transient = model.transient_stat.weight_sum
+        model.transient_stat.add(signal, weight=weight)
+        if signal != 0.0:
+            transient_step = _learning_step(previous_transient) * 0.08 * weight
+            model.transient_tolerance = _clamp(
+                model.transient_tolerance + signal * transient_step, 0.5, 1.5
+            )
+        return
+
     if apply_general:
         previous_general_samples = model.general_stat.weight_sum
         model.general_stat.add(error, weight=weight)
@@ -375,6 +436,24 @@ def apply_feedback(
             -5.0,
             5.0,
         )
+
+        # Season-specific learning is intentionally much slower than the global
+        # profile. It lets winter/summer experience nudge the same user in
+        # different directions without storing a growing history or forgetting the
+        # long-term baseline.
+        season_stat = model.seasonal_stat_for(observed_at)
+        if season_stat is not None and model.general_stat.weight_sum >= 6.0:
+            previous_season = season_stat.weight_sum
+            season_stat.add(error, weight=weight)
+            if error != 0.0:
+                season = _season_name(observed_at)
+                attr = f"{season}_bias_c"
+                season_step = _learning_step(previous_season) * 0.12 * weight
+                setattr(
+                    model,
+                    attr,
+                    _clamp(getattr(model, attr) + error * season_step, -1.2, 1.2),
+                )
 
     # Boundary confidence should still grow during early learning. A perfect
     # rating is especially valuable here because it confirms that the current
@@ -448,6 +527,18 @@ def should_request_feedback(
     # not on feedback count; otherwise a skipped request could freeze forever.
     cadence = 3 if n < 25 else 10
     return opportunities > 0 and opportunities % cadence == 0
+
+
+def _season_name(when: datetime | None) -> str:
+    """Meteorological season name; fixed four-state storage keeps the model tiny."""
+    month = when.month if isinstance(when, datetime) else 1
+    if month in (12, 1, 2):
+        return "winter"
+    if month in (3, 4, 5):
+        return "spring"
+    if month in (6, 7, 8):
+        return "summer"
+    return "autumn"
 
 
 def _clamp(value: float, low: float, high: float) -> float:

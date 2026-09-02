@@ -4,8 +4,7 @@ from __future__ import annotations
 from datetime import timedelta
 
 DOMAIN = "jackenberater"
-INTEGRATION_VERSION = "0.1.1"
-PLATFORMS = ["sensor", "switch", "button"]
+INTEGRATION_VERSION = "0.1.2"
 
 CONF_WEATHER = "weather_entity"
 CONF_INDOOR_TEMP = "indoor_temperature"

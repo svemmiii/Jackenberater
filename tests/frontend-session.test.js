@@ -19,6 +19,12 @@ const context = {
   },
   window: {},
 };
+const localStorageData = new Map();
+context.window.localStorage = {
+  getItem(key) { return localStorageData.has(key) ? localStorageData.get(key) : null; },
+  setItem(key, value) { localStorageData.set(key, String(value)); },
+  removeItem(key) { localStorageData.delete(key); },
+};
 context.window.window = context.window;
 vm.createContext(context);
 const source = fs.readFileSync(
@@ -112,6 +118,7 @@ assert.ok(Card, "jackenberater-card must register itself");
   assert.equal(sharedCard._preview, null, "shared account must wait for a real user profile selection");
 
   assert.match(source, /this\._autoShared = Boolean\(profiles\?\.shared_account\)/, "shared HA accounts must switch the card automatically");
+  assert.match(source, /Shared wall tablets are read-only recommendation surfaces/, "shared tablets must remain read-only");
   assert.match(source, /unusualDay:\s*"Today was unusual/, "English unusual-day label must exist");
 
   const hiddenCard = new Card();
@@ -130,7 +137,68 @@ assert.ok(Card, "jackenberater-card must register itself");
     jacket_later: "winter",
     later_at: "2026-09-01T18:00:00+00:00",
   });
-  assert.match(laterText, /jetzt mitnehmen/, "later-warmer advice must make clear the jacket should be taken now");
+  const expectedLaterTime = new Intl.DateTimeFormat("de-DE", { hour: "2-digit", minute: "2-digit" }).format(new Date("2026-09-01T18:00:00+00:00"));
+  assert.match(laterText, /Wenn du länger unterwegs bist/, "later-warmer advice must transparently state its unknown-stay assumption");
+  assert.match(laterText, new RegExp(`ab etwa ${expectedLaterTime.replace(".", "\\.")}`), "later-warmer advice should use the browser's local time");
+
+
+  // Shared wall-tablet selection is local to this browser/account and survives
+  // closing/reloading until the user deliberately selects another profile.
+  const persistentCard = new Card();
+  persistentCard._config = { type: "custom:jackenberater-card" };
+  persistentCard._autoShared = true;
+  persistentCard._entryId = "entry-1";
+  persistentCard._currentUserId = "wall-tablet";
+  persistentCard._selectedProfile = "user";
+  persistentCard._persistSharedProfile();
+  assert.equal(
+    context.window.localStorage.getItem("jackenberater:selected-profile:entry-1:wall-tablet"),
+    "user",
+    "shared profile selection must be stored locally",
+  );
+  const reloadedCard = new Card();
+  reloadedCard._config = { type: "custom:jackenberater-card" };
+  reloadedCard._autoShared = true;
+  reloadedCard._entryId = "entry-1";
+  reloadedCard._currentUserId = "wall-tablet";
+  reloadedCard._restoreSharedProfile([{ id: "user", name: "User" }]);
+  assert.equal(reloadedCard._selectedProfile, "user", "shared profile must restore after a browser/card restart");
+  reloadedCard._open = true;
+  reloadedCard._render = () => {};
+  await reloadedCard._openAdvice();
+  assert.equal(reloadedCard._selectedProfile, "user", "closing details must not forget the wall-tablet profile");
+
+  // Info field explains assumptions and exposes compact profile backup controls.
+  textCard._currentUserId = "user";
+  const infoHtml = textCard._infoPanel(
+    {
+      horizon_hours: 9, stay_context: "unknown", trend: "warming",
+      forecast_coverage_complete: true, confidence: 0.64, transient_override: true,
+      transient_until: "2026-09-01T12:15:00+00:00", seasonal_adjustment_c: 0.2,
+    },
+    { id: "user", confidence: 0.64 },
+  );
+  assert.match(infoHtml, /data-action="profile-export"/, "info panel must offer compact profile export");
+  assert.match(infoHtml, /Betrachtet/, "info panel must explain the current horizon");
+  assert.match(source, /jackenberater\/profile_import/, "frontend must support profile restore");
+  assert.match(source, /mdi:information-outline/, "card must expose the circled information control");
+
+  const sharedReadOnlyCard = new Card();
+  sharedReadOnlyCard._hass = { language: "de" };
+  sharedReadOnlyCard._autoShared = true;
+  sharedReadOnlyCard._isAdmin = false;
+  sharedReadOnlyCard._currentUserId = "wall-tablet";
+  sharedReadOnlyCard._selectedProfile = "user";
+  sharedReadOnlyCard._preview = { profile: { id: "user", setup_complete: true } };
+  sharedReadOnlyCard._render = () => {};
+  sharedReadOnlyCard._send = async () => { throw new Error("read-only tablet attempted a write"); };
+  await sharedReadOnlyCard._openAdvice();
+  assert.equal(sharedReadOnlyCard._open, true, "shared tablet may open read-only details");
+  const sharedInfo = sharedReadOnlyCard._infoPanel(
+    { horizon_hours: 9, stay_context: "unknown", trend: "stable", forecast_coverage_complete: true },
+    { id: "user" },
+  );
+  assert.doesNotMatch(sharedInfo, /profile-export|data-maintenance/, "shared tablet must not expose profile write or export controls");
 
   const gustDetails = textCard._details(
     {

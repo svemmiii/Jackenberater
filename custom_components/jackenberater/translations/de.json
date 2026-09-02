@@ -174,25 +174,5 @@
       "already_configured": "JackenBerater ist bereits eingerichtet.",
       "reconfigure_successful": "JackenBerater wurde aktualisiert."
     }
-  },
-  "entity": {
-    "sensor": {
-      "learning_status": {
-        "name": "Lernstand {name}"
-      }
-    },
-    "switch": {
-      "learning_enabled": {
-        "name": "Lernen {name}"
-      }
-    },
-    "button": {
-      "reset_learning": {
-        "name": "Lernprofil {name} zurücksetzen"
-      },
-      "undo_feedback": {
-        "name": "Letzte Bewertung {name} zurücknehmen"
-      }
-    }
   }
 }

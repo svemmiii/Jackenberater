@@ -20,7 +20,6 @@ from .const import (
     DEFAULT_WORKDAY_START,
     DOMAIN,
     INTEGRATION_VERSION,
-    PLATFORMS,
     WORK_MODE_SHIFT,
     WORK_MODE_WEEKDAY,
 )
@@ -114,16 +113,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "coordinator": coordinator,
         "context_cache": {},
     }
-    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     entry.async_on_unload(entry.add_update_listener(_async_reload))
     return True
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
-    if unloaded:
-        hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
-    return unloaded
+    hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
+    return True
 
 
 async def _async_reload(hass: HomeAssistant, entry: ConfigEntry) -> None:

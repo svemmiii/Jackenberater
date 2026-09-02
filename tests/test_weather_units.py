@@ -113,3 +113,18 @@ def test_precipitation_inches_convert_to_mm():
 
 def test_unknown_temperature_unit_is_rejected():
     assert weather._temperature_to_c(68, "mystery") is None
+
+
+def test_non_finite_and_implausible_weather_values_are_rejected():
+    for value in (float("inf"), float("-inf"), float("nan")):
+        assert weather._float(value) is None
+        assert weather._temperature_to_c(value, "°C") is None
+        assert weather._wind_to_kmh(value, "km/h") is None
+        assert weather._precipitation_to_mm(value, "mm") is None
+    assert weather._temperature_to_c(71, "°C") is None
+    assert weather._temperature_to_c(-101, "°C") is None
+    assert weather._bounded(101, 0, 100) is None
+    assert weather._bounded(-1, 0, 100) is None
+    assert weather._wind_to_kmh(-1, "km/h") is None
+    assert weather._wind_to_kmh(13, "Beaufort") is None
+    assert weather._precipitation_to_mm(-1, "mm") is None
