@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import sys
 import types
+from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).parents[1] / "custom_components" / "jackenberater"
 PKG = "jackenberater_testpkg"
@@ -50,6 +51,84 @@ def point_minutes(minutes: int, temp: float, **kwargs):
         temperature_c=temp,
         **kwargs,
     )
+
+
+def dst_point(start: datetime, hours: int, temp: float, **kwargs):
+    instant = start.astimezone(timezone.utc) + timedelta(hours=hours)
+    return WeatherPoint(
+        dt=instant.astimezone(start.tzinfo), temperature_c=temp, **kwargs
+    )
+
+
+def test_spring_dst_keeps_the_sixteenth_real_forecast_hour():
+    berlin = ZoneInfo("Europe/Berlin")
+    start = datetime(2026, 3, 28, 20, tzinfo=berlin)
+    forecast = [
+        dst_point(start, hour, 0.0 if hour == 16 else 20.0)
+        for hour in range(1, 17)
+    ]
+    rec = engine.build_recommendation(
+        dst_point(start, 0, 20.0), forecast,
+        PersonalModel.from_answers(3, 3, 3, 3),
+        indoor_temperature_c=20.0, base_horizon_hours=16, max_horizon_hours=16,
+    )
+    assert rec.horizon_hours == 16
+    assert rec.jacket_later == const.JACKET_WINTER
+    assert rec.later_at == forecast[-1].dt
+
+
+def test_autumn_dst_excludes_the_seventeenth_real_forecast_hour():
+    berlin = ZoneInfo("Europe/Berlin")
+    start = datetime(2026, 10, 24, 20, tzinfo=berlin)
+    forecast = [
+        dst_point(start, hour, 0.0 if hour == 17 else 25.0)
+        for hour in range(1, 18)
+    ]
+    rec = engine.build_recommendation(
+        dst_point(start, 0, 25.0), forecast,
+        PersonalModel.from_answers(3, 3, 3, 3),
+        indoor_temperature_c=25.0, base_horizon_hours=16, max_horizon_hours=16,
+    )
+    assert rec.horizon_hours == 16
+    assert rec.jacket_now == const.JACKET_NONE
+    assert rec.jacket_later == const.JACKET_NONE
+    assert rec.later_at is None
+
+
+def test_second_fold_hour_is_kept_when_it_is_really_in_the_future():
+    berlin = ZoneInfo("Europe/Berlin")
+    current = WeatherPoint(
+        dt=datetime(2026, 10, 25, 2, 30, tzinfo=berlin, fold=0),
+        temperature_c=25.0,
+    )
+    future = WeatherPoint(
+        dt=datetime(2026, 10, 25, 2, 15, tzinfo=berlin, fold=1),
+        temperature_c=0.0,
+    )
+    rec = engine.build_recommendation(
+        current, [future], PersonalModel.from_answers(3, 3, 3, 3),
+        indoor_temperature_c=25.0, base_horizon_hours=1, max_horizon_hours=1,
+    )
+    assert rec.jacket_later == const.JACKET_WINTER
+    assert rec.later_at == future.dt
+
+
+def test_fold_hours_do_not_collide_when_location_timelines_are_merged():
+    berlin = ZoneInfo("Europe/Berlin")
+    first = WeatherPoint(
+        dt=datetime(2026, 10, 25, 2, 0, tzinfo=berlin, fold=0),
+        temperature_c=10.0,
+    )
+    second = WeatherPoint(
+        dt=datetime(2026, 10, 25, 2, 0, tzinfo=berlin, fold=1),
+        temperature_c=9.0,
+    )
+    window = [(
+        datetime(2026, 10, 26, 1, 0, tzinfo=berlin),
+        datetime(2026, 10, 26, 4, 0, tzinfo=berlin),
+    )]
+    merged = engine.merge_location_timeline([first, second], [], window)
+    assert merged == [first, second]
 
 
 def test_young_profile_keeps_clear_hot_advice_reachable():

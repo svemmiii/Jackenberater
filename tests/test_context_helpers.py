@@ -149,11 +149,12 @@ def test_work_windows_can_return_actual_and_planning_sets():
         const.CONF_WORKDAY_END: "17:00",
     })
     now = datetime(2026, 9, 1, 7, tzinfo=timezone.utc)
-    actual, planning = asyncio.run(
+    actual, planning, vacation_status = asyncio.run(
         context.work_windows(hass, entry, now, horizon_hours=12, return_actual=True)
     )
     assert actual[0][0].hour == 8
     assert planning[0][0].hour == 7 and planning[0][0].minute == 30
+    assert vacation_status == const.CALENDAR_STATUS_NOT_CONFIGURED
 
 
 def test_evening_activity_answer_maps_to_actual_activity_not_outing_frequency():
@@ -176,20 +177,23 @@ def test_full_shift_absence_removes_planning_buffer_too():
         original = context._calendar_windows
 
         async def fake_calendar(*args, **kwargs):
-            return [(
-                datetime(2026, 9, 1, 8, tzinfo=timezone.utc),
-                datetime(2026, 9, 1, 17, tzinfo=timezone.utc),
-            )]
+            return ([
+                (
+                    datetime(2026, 9, 1, 8, tzinfo=timezone.utc),
+                    datetime(2026, 9, 1, 17, tzinfo=timezone.utc),
+                )
+            ], True)
 
         context._calendar_windows = fake_calendar
         try:
-            actual, planning = await context.work_windows(
+            actual, planning, vacation_status = await context.work_windows(
                 types.SimpleNamespace(), entry, now, horizon_hours=12, return_actual=True
             )
         finally:
             context._calendar_windows = original
         assert actual == []
         assert planning == []
+        assert vacation_status == const.CALENDAR_STATUS_AVAILABLE
 
     asyncio.run(run())
 
@@ -206,14 +210,16 @@ def test_partial_absence_stays_a_gap_in_planning_window():
         original = context._calendar_windows
 
         async def fake_calendar(*args, **kwargs):
-            return [(
-                datetime(2026, 9, 1, 12, tzinfo=timezone.utc),
-                datetime(2026, 9, 1, 13, tzinfo=timezone.utc),
-            )]
+            return ([
+                (
+                    datetime(2026, 9, 1, 12, tzinfo=timezone.utc),
+                    datetime(2026, 9, 1, 13, tzinfo=timezone.utc),
+                )
+            ], True)
 
         context._calendar_windows = fake_calendar
         try:
-            actual, planning = await context.work_windows(
+            actual, planning, vacation_status = await context.work_windows(
                 types.SimpleNamespace(), entry, now, horizon_hours=12, return_actual=True
             )
         finally:
@@ -226,6 +232,7 @@ def test_partial_absence_stays_a_gap_in_planning_window():
             (datetime(2026, 9, 1, 7, 30, tzinfo=timezone.utc), datetime(2026, 9, 1, 12, tzinfo=timezone.utc)),
             (datetime(2026, 9, 1, 13, tzinfo=timezone.utc), datetime(2026, 9, 1, 17, 30, tzinfo=timezone.utc)),
         ]
+        assert vacation_status == const.CALENDAR_STATUS_AVAILABLE
 
     asyncio.run(run())
 
@@ -269,7 +276,7 @@ def test_work_windows_are_capped_at_configured_horizon():
     })
     now = datetime(2026, 9, 6, 18, tzinfo=timezone.utc)  # Sunday
     end = now + timedelta(hours=16)  # Monday 10:00
-    actual, planning = asyncio.run(
+    actual, planning, vacation_status = asyncio.run(
         context.work_windows(hass, entry, now, horizon_hours=16, return_actual=True)
     )
     assert actual == [(
@@ -277,6 +284,7 @@ def test_work_windows_are_capped_at_configured_horizon():
         end,
     )]
     assert planning[-1][1] == end
+    assert vacation_status == const.CALENDAR_STATUS_NOT_CONFIGURED
 
 
 def test_post_work_planning_buffer_survives_fresh_recalculation_after_shift_end():
@@ -291,7 +299,7 @@ def test_post_work_planning_buffer_survives_fresh_recalculation_after_shift_end(
         const.CONF_WORKDAY_END: "17:00",
     })
     now = datetime(2026, 9, 1, 17, 10, tzinfo=timezone.utc)
-    actual, planning = asyncio.run(
+    actual, planning, vacation_status = asyncio.run(
         context.work_windows(hass, entry, now, horizon_hours=12, return_actual=True)
     )
     assert not any(start <= now <= end for start, end in actual)
@@ -299,6 +307,61 @@ def test_post_work_planning_buffer_survives_fresh_recalculation_after_shift_end(
         start <= now <= end and end == datetime(2026, 9, 1, 17, 30, tzinfo=timezone.utc)
         for start, end in planning
     )
+    assert vacation_status == const.CALENDAR_STATUS_NOT_CONFIGURED
+
+
+def test_context_calendar_offline_is_distinct_from_successful_empty_calendar():
+    class Services:
+        def __init__(self, fail):
+            self.fail = fail
+
+        async def async_call(self, *args, **kwargs):
+            if self.fail:
+                raise context.HomeAssistantError("calendar offline")
+            return {"calendar.context": {"events": []}}
+
+    entry = types.SimpleNamespace(
+        data={const.CONF_CONTEXT_CALENDAR: "calendar.context"}
+    )
+    now = datetime(2026, 9, 1, 7, tzinfo=timezone.utc)
+    empty = asyncio.run(
+        context.calendar_context_horizon(
+            types.SimpleNamespace(services=Services(False)), entry, now
+        )
+    )
+    offline = asyncio.run(
+        context.calendar_context_horizon(
+            types.SimpleNamespace(services=Services(True)), entry, now
+        )
+    )
+    assert empty == (None, const.CALENDAR_STATUS_AVAILABLE)
+    assert offline == (None, const.CALENDAR_STATUS_UNAVAILABLE)
+
+
+def test_vacation_calendar_offline_disables_work_location_planning():
+    class Services:
+        async def async_call(self, *args, **kwargs):
+            raise context.HomeAssistantError("calendar offline")
+
+    entry = types.SimpleNamespace(data={
+        const.CONF_WORK_MODE: const.WORK_MODE_WEEKDAY,
+        const.CONF_WORKDAY_START: "08:00",
+        const.CONF_WORKDAY_END: "17:00",
+        const.CONF_VACATION_CALENDAR: "calendar.vacation",
+    })
+    now = datetime(2026, 9, 1, 7, tzinfo=timezone.utc)
+    actual, planning, status = asyncio.run(
+        context.work_windows(
+            types.SimpleNamespace(services=Services()),
+            entry,
+            now,
+            horizon_hours=12,
+            return_actual=True,
+        )
+    )
+    assert actual == []
+    assert planning == []
+    assert status == const.CALENDAR_STATUS_UNAVAILABLE
 
 
 def test_horizon_is_sixteen_real_hours_across_dst_changes():

@@ -1,10 +1,10 @@
-# 🧥 JackenBerater v0.1.2
+# 🧥 JackenBerater v0.1.3
 
 Eine schlanke Home-Assistant-Integration, die nicht nur auf die Außentemperatur schaut, sondern eine **persönliche Jackenempfehlung** aus Wetter, Wetterverlauf, Innen→Außen-Wechsel und freiwilligem Nutzerfeedback ableitet.
 
 > **Status:** erste Testversion. Der Name „JackenBerater“ ist noch nicht als endgültiger Projektname gedacht.
 
-## Was v0.1.2 kann
+## Was v0.1.3 kann
 
 - Empfehlung in vier Wärmestufen:
   - Keine Jacke
@@ -31,7 +31,7 @@ Eine schlanke Home-Assistant-Integration, die nicht nur auf die Außentemperatur
 - transparente Langzeit-Hinweise wie **„Leichte Jacke reicht aktuell. Wenn du länger unterwegs bist, wird ab etwa 18:00 eine warme Jacke sinnvoll.“**
 - kleine saisonale Feinanpassung des persönlichen Profils, ohne wachsende Historie
 - ⓘ-Infofeld mit betrachtetem Zeitraum, Aufenthaltsannahme, thermischem Trend, Forecast-Abdeckung und persönlicher Confidence
-- kompaktes Lernprofil kann als JSON gesichert und wiederhergestellt werden
+- ein kompakter Diagnose-Sensor je Profil zeigt die tatsächlich gelernten Werte ohne wachsende Historie
 - auf Shared-/Wandtablets bleibt das ausgewählte Personenprofil lokal auf diesem Browser gespeichert, bis es bewusst gewechselt wird
 - Geschützte Verwaltung direkt in der Karte: Lernen pausieren, Lernprofil zurücksetzen, letzte Bewertung zurücknehmen
 
@@ -91,6 +91,8 @@ Ein ausgewählter Kalender wird **nicht inhaltlich analysiert**. JackenBerater l
 
 Ein Kalendereintrag bedeutet ausdrücklich **nicht**, dass der Nutzer draußen ist. Er kann lediglich den Zeitraum erweitern, den der Berater vorsichtshalber betrachtet.
 
+Ein erfolgreich gelesener Kalender ohne passende Termine wird normal als leer behandelt. Ist der konfigurierte Kalender dagegen vorübergehend nicht lesbar, bleibt dieser Zustand als **nicht verfügbar** erhalten und die Karte weist sichtbar darauf hin, dass längere Termine in der Planung fehlen können.
+
 ### Arbeitskontext – optional
 
 Falls Arbeit klimatisch deutlich anders ist als zuhause:
@@ -111,6 +113,8 @@ Verfügbare Arbeitsmodelle:
 - **Rotierendes Schichtsystem**
 
 Ein optionaler Urlaubs-/Abwesenheitskalender erzeugt niemals selbst Arbeit. Er kann nur Zeiträume aussetzen, in denen der Berater sonst Arbeit vermuten würde. Wird eine komplette Schicht als abwesend markiert, verschwinden auch die zugehörigen Planungs-Puffer; bei teilweiser Abwesenheit bleibt genau dieser Zeitraum ausgespart. Kalenderinhalte wie Titel oder Beschreibung werden weiterhin nicht analysiert.
+
+Ist ein eingerichteter Abwesenheitskalender nicht erreichbar, wird das nicht mit „keine Abwesenheit“ gleichgesetzt. JackenBerater verwendet die Arbeitsortplanung dann vorsichtshalber nicht und zeigt die Datenlücke direkt auf der Karte an. Sobald der Kalender wieder erfolgreich gelesen wurde, arbeitet die normale Planung weiter.
 
 Während der tatsächlichen Arbeitszeit verwendet JackenBerater die aktuelle Wetterquelle des Arbeitsorts. Ist diese vorübergehend nicht verfügbar, wird bewusst **nicht** still auf das Zuhause-Wetter zurückgefallen – die Karte meldet die fehlenden Arbeitswetterdaten stattdessen transparent.
 
@@ -165,7 +169,7 @@ Zusätzlich besitzt jedes Profil vier kleine saisonale Korrekturwerte. Sie lerne
 
 ## Feedback
 
-Eine sichtbare Dashboard-Karte gilt **nicht** als Nutzung. Erst ein bewusster Tap auf den Berater erzeugt eine Empfehlungssession.
+Eine sichtbare Dashboard-Karte gilt **nicht** als Nutzung. Erst ein bewusster Tap auf den normalen Aufklapp-Pfeil erzeugt eine Empfehlungssession. Das Öffnen des eingekreisten **ⓘ** erzeugt keine Session.
 
 Eine neue Empfehlung wird **nicht sofort** zur Bewertung angeboten. Normalerweise wird Feedback frühestens nach etwa 30 Minuten freigegeben. Wenn die Empfehlung ausdrücklich auf einen späteren Jackenwechsel zielt, wartet der Berater bis etwa 30 Minuten nach diesem späteren Zeitpunkt. Freiwilliges Feedback kann über einen kleinen manuellen Weg trotzdem jederzeit bewusst abgegeben werden.
 
@@ -186,7 +190,9 @@ In der Integration können bestimmte Home-Assistant-Konten als **gemeinsame Tabl
 
 Ein solches Tablet bekommt **kein eigenes Wärmeprofil**. Stattdessen fragt die Karte vor der Beratung direkt, für welches vorhandene Komfortprofil sie rechnen soll. Die Auswahl wird lokal im Browser des jeweiligen Wandtablets gespeichert und bleibt auch nach Dashboardwechsel, Browser-Refresh, Home-Assistant-Neustart oder Tablet-Neustart erhalten, bis sie über die Profilauswahl bewusst gewechselt wird. Sie wird **nicht serverweit** für das HA-Konto gesetzt.
 
-Auf persönlichen Geräten verwendet JackenBerater weiterhin automatisch die eigene Home-Assistant-User-ID. Freigegebene Shared-Konten dürfen fremde Profile ausschließlich für die Anzeige einer Empfehlung auswählen. Sie können weder Feedback/Sessions noch Setup, Wartung, Reset, Undo, Import oder Export des Profils ausführen. Schreibzugriffe auf fremde Profile bleiben Administratoren vorbehalten. Es wird keine Anwesenheit oder Geräteposition geraten.
+Auf persönlichen Geräten verwendet JackenBerater weiterhin automatisch die eigene Home-Assistant-User-ID. Auf dem Wandtablet erzeugt der normale Aufklapp-Pfeil eine Session **nur für das ausgewählte Profil**. Ohne Profilauswahl, bei der bloßen Vorschau und über das eingekreiste **ⓘ** wird keine Session angelegt. Ein später fälliges Feedback darf auf demselben Shared-Konto beantwortet werden und wird deutlich als **„Feedback für &lt;Profilname&gt;“** beschriftet. Ein Profilwechsel verwirft den lokalen Kartenkontext; Sessions und Feedback verschiedener Profile oder Shared-Konten werden nicht vermischt.
+
+Shared-Konten dürfen weder manuelles Sofort-Feedback noch Setup, Lernpause, Wartung, Reset, Undo, Import oder Export ausführen. Das Backend akzeptiert vom Tablet ausschließlich fälliges Feedback zu einer Session, die genau dieses Shared-Konto zuvor für genau dieses Profil geöffnet hat. Es wird keine Anwesenheit oder Geräteposition geraten.
 
 ## Karte hinzufügen
 
@@ -196,7 +202,7 @@ Danach im Dashboard eine Karte hinzufügen und **JackenBerater** auswählen.
 
 Falls Lovelace komplett über YAML verwaltet wird, die Modul-Ressource manuell eintragen:
 
-`/jackenberater/frontend/jackenberater-card.js?v=0.1.2`
+`/jackenberater/frontend/jackenberater-card.js?v=0.1.3`
 
 Karten-YAML:
 
@@ -212,7 +218,7 @@ title: Jacke heute
 shared: true
 ```
 
-## ⓘ Info & Lernprofil-Backup
+## ⓘ Info & Lerndiagnose
 
 Ein kleines eingekreistes **ⓘ** öffnet eine verständliche Erklärung der aktuellen Empfehlung. Dort stehen nur die für die Entscheidung relevanten Annahmen, z. B.:
 
@@ -224,7 +230,17 @@ Ein kleines eingekreistes **ⓘ** öffnet eine verständliche Erklärung der akt
 - persönliche Entscheidungs-Confidence
 - Hinweis auf saisonale oder Kurzzeit-Feinanpassung, falls aktiv
 
-Im selben Bereich kann das **kompakte Lernprofil als JSON exportiert** werden. Enthalten sind nur die persönlichen Lernparameter und Statistikwerte, keine Wetter- oder Sessionhistorie. Ein eigenes Profil kann später wieder importiert werden; Administratoren können bei Bedarf auch ein ausgewähltes Profil wiederherstellen.
+Unter **„Was hat dieses Profil gelernt?“** zeigt die persönliche Karte die festen Lernparameter und Statistikwerte des eigenen Profils. Shared-/Wandtablet-Konten erhalten diese Detailwerte weder in der Vorschau noch nach dem Öffnen einer Session oder dem Abgeben von Feedback.
+
+Zusätzlich wird pro Profil ein Diagnose-Sensor vorbereitet, zum Beispiel `sensor.jackenberater_sven_lernprofil`. Er ist aus Datenschutzgründen **standardmäßig deaktiviert** und gelangt damit nicht automatisch als lesbare Entität in den HA-Zustandsautomaten. Ein Administrator kann ihn für gezieltes Troubleshooting manuell aktivieren. Sein Zustand ist die Anzahl verarbeiteter Bewertungen; die kompakten Modellwerte liegen als Attribute vor und sind von der Recorder-Historie ausgeschlossen. Wichtig: Home-Assistant-Rechte gelten auf Entitätsebene. Wer den Sensor aktiviert, muss dessen Sichtbarkeit deshalb mit den eigenen HA-Berechtigungen passend begrenzen.
+
+### Sicherer Testmodus über Entwicklerwerkzeuge
+
+Nach dem bewussten Aktivieren des Diagnose-Sensors kann dessen Zustand oder ein Attribut unter **Entwicklerwerkzeuge → Zustände** vorübergehend verändert werden. Die Empfehlung reagiert mit einer Simulation; die Karte kennzeichnet das sichtbar mit **„Testmodus aktiv – keine Speicherung, keine Session, kein Lernen.“**
+
+Die simulierten Werte werden begrenzt und ausschließlich auf einer flüchtigen Kopie des Lernmodells ausgewertet. Währenddessen werden keine Session, kein Nutzungszähler, kein Feedback und keine Lern- oder Undo-Änderung erzeugt. Das gespeicherte Profil bleibt unverändert. Ein echter Profilvorgang oder Neustart beendet den Testmodus und stellt die gespeicherten Werte wieder her.
+
+Der vorhandene Code für JSON-Export und -Import bleibt zunächst erhalten, ist in v0.1.3 aber vollständig deaktiviert: Die Karte zeigt keine Schaltflächen und die zugehörigen WebSocket-Befehle werden nicht registriert.
 
 ## Kartenverhalten
 
@@ -236,7 +252,7 @@ Damit soll die Karte nicht im Hochsommer monatelang Platz verschwenden.
 
 ## Berechnungsmodell
 
-v0.1.2 verwendet bewusst **kein großes ML-Modell** und auch nicht den vollständigen UTCI-Polynomblock. Stattdessen nutzt die Engine eine transparente, kleine thermische Bewertung mit den gleichen wichtigen Kategorien: Temperatur, Wind, Feuchte, Strahlung/Sonne, Nässe, Aktivitätskontext und Bekleidung.
+v0.1.3 verwendet bewusst **kein großes ML-Modell** und auch nicht den vollständigen UTCI-Polynomblock. Stattdessen nutzt die Engine eine transparente, kleine thermische Bewertung mit den gleichen wichtigen Kategorien: Temperatur, Wind, Feuchte, Strahlung/Sonne, Nässe, Aktivitätskontext und Bekleidung.
 
 Im kalten Bereich wird die offizielle Wind-Chill-Gleichung nur innerhalb ihres sinnvollen Temperatur-/Windbereichs verwendet. Oberhalb davon wird Wind deutlich schwächer als Komfortkorrektur gewertet.
 
@@ -257,6 +273,6 @@ Bei Kalendern werden in der normalen Logik nur Start-/Endzeiten genutzt. Titel, 
 
 JackenBerater ist ein Komfortberater und keine Sicherheits- oder Gesundheitsanwendung. Bei extremen Wetterlagen, amtlichen Warnungen oder gesundheitlichen Besonderheiten haben geeignete Schutzmaßnahmen und offizielle Warnhinweise Vorrang.
 
-## Teststatus v0.1.2
+## Teststatus v0.1.3
 
-Die lokale Regressionstest-Suite umfasst aktuell **120 Python-Tests** sowie einen funktionalen JavaScript-Test für den Feedback-/Frontend-Pfad. Dazu gehören inzwischen auch Glue-Tests für Arbeitswetter-Kontext, die Rollen normal/shared/admin, Providerwert-Validierung, Cache-Uhrkorrekturen, Zeitumstellung und Reconfigure-Verhalten. Zusätzlich prüft der CI-Workflow Python-Kompilierung, Ruff-F/E9, JavaScript-Syntax, hassfest und HACS.
+Die lokale Regressionstest-Suite umfasst aktuell **141 Python-Tests** sowie einen funktionalen JavaScript-Test für den Feedback-/Frontend-Pfad. Dazu gehören insbesondere Rollen- und Sessiontrennung für normal/shared/admin, UTC-/DST-Grenzfälle, die Unterscheidung zwischen leeren und nicht verfügbaren Kalendern sowie Unveränderlichkeitsprüfungen für gespeichertes Modell und Sessions während einer Simulation. Ein zusätzlicher CI-Job unter Python 3.14 und Home Assistant 2026.9 durchläuft den echten Integrationslebenszyklus mit WebSocket-Preview, Session, Feedback, Shared-Preview, Reload und Unload. Außerdem prüft CI Python-Kompilierung, Ruff-F/E9, JavaScript-Syntax, hassfest und HACS.

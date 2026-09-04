@@ -14,6 +14,10 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.util import dt as dt_util
 
 from .const import (
+    CALENDAR_STATUS_AVAILABLE,
+    CALENDAR_STATUS_NOT_APPLICABLE,
+    CALENDAR_STATUS_NOT_CONFIGURED,
+    CALENDAR_STATUS_UNAVAILABLE,
     CALENDAR_MAX_HOURS,
     CONF_CONTEXT_CALENDAR,
     CONF_SHIFT_ANCHOR_DATE,
@@ -35,15 +39,22 @@ from .const import (
     WORK_MODE_SHIFT,
     WORK_MODE_WEEKDAY,
 )
+from .time_utils import (
+    elapsed,
+    instant_key,
+    is_after,
+    is_at_or_after,
+    is_at_or_before,
+    is_before,
+    real_add,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
 
 def _absolute_horizon_end(now: datetime, hours: int) -> datetime:
     """Add real elapsed hours while retaining the input timezone for comparisons."""
-    if now.tzinfo is None:
-        return now + timedelta(hours=hours)
-    return (now.astimezone(dt_util.UTC) + timedelta(hours=hours)).astimezone(now.tzinfo)
+    return real_add(now, timedelta(hours=hours))
 
 
 async def calendar_context_horizon(
@@ -51,18 +62,22 @@ async def calendar_context_horizon(
     entry: ConfigEntry,
     now: datetime,
     horizon_hours: int = CALENDAR_MAX_HOURS,
-) -> int | None:
-    """Return the furthest relevant timed calendar hour, without reading content."""
+) -> tuple[int | None, str]:
+    """Return the timed-calendar horizon and its read status."""
     entity_id = entry.data.get(CONF_CONTEXT_CALENDAR)
     if not isinstance(entity_id, str) or not entity_id:
-        return None
+        return None, CALENDAR_STATUS_NOT_CONFIGURED
     end = _absolute_horizon_end(now, horizon_hours)
-    windows = await _calendar_windows(hass, entity_id, now, end, timed_only=True)
+    windows, available = await _calendar_windows(
+        hass, entity_id, now, end, timed_only=True
+    )
+    if not available:
+        return None, CALENDAR_STATUS_UNAVAILABLE
     if not windows:
-        return None
-    furthest = max(window_end for _, window_end in windows)
-    hours = int(((furthest - now).total_seconds() + 3599) // 3600)
-    return max(1, min(horizon_hours, hours))
+        return None, CALENDAR_STATUS_AVAILABLE
+    furthest = max((window_end for _, window_end in windows), key=instant_key)
+    hours = int((elapsed(now, furthest).total_seconds() + 3599) // 3600)
+    return max(1, min(horizon_hours, hours)), CALENDAR_STATUS_AVAILABLE
 
 
 async def work_windows(
@@ -73,7 +88,7 @@ async def work_windows(
     *,
     return_actual: bool = False,
 ) -> list[tuple[datetime, datetime]] | tuple[
-    list[tuple[datetime, datetime]], list[tuple[datetime, datetime]]
+    list[tuple[datetime, datetime]], list[tuple[datetime, datetime]], str
 ]:
     """Return probable work windows without tracking the user.
 
@@ -81,24 +96,38 @@ async def work_windows(
     adds the ±30 minute buffer used to consider destination weather before/after
     work without pretending the user is already physically at that location.
     """
+    mode = str(entry.data.get(CONF_WORK_MODE) or "").strip().lower()
+    if not mode:
+        mode = WORK_MODE_SHIFT if entry.data.get(CONF_SHIFT_PATTERN) else WORK_MODE_WEEKDAY
+    if mode == WORK_MODE_NONE:
+        return (
+            ([], [], CALENDAR_STATUS_NOT_APPLICABLE)
+            if return_actual
+            else []
+        )
+
     end = _absolute_horizon_end(now, horizon_hours)
     # Search one planning buffer into the past as well. Otherwise a fresh context
     # calculation at 17:10 would forget a 17:00 work end, while a cached result
     # from 16:59 would still retain the intended planning relevance until 17:30.
-    search_start = now - WORK_BUFFER
+    search_start = real_add(now, -WORK_BUFFER)
     vacation_windows: list[tuple[datetime, datetime]] = []
+    vacation_status = CALENDAR_STATUS_NOT_CONFIGURED
     vacation_calendar = entry.data.get(CONF_VACATION_CALENDAR)
     if isinstance(vacation_calendar, str) and vacation_calendar:
-        vacation_windows = await _calendar_windows(
+        vacation_windows, vacation_available = await _calendar_windows(
             hass, vacation_calendar, search_start, end, timed_only=False
         )
-
-    mode = str(entry.data.get(CONF_WORK_MODE) or "").strip().lower()
-    if not mode:
-        mode = WORK_MODE_SHIFT if entry.data.get(CONF_SHIFT_PATTERN) else WORK_MODE_WEEKDAY
-
-    if mode == WORK_MODE_NONE:
-        return ([], []) if return_actual else []
+        vacation_status = (
+            CALENDAR_STATUS_AVAILABLE
+            if vacation_available
+            else CALENDAR_STATUS_UNAVAILABLE
+        )
+        if not vacation_available:
+            # We cannot know whether the configured work period is blocked by
+            # absence. Do not substitute work-location weather for the home
+            # timeline until that distinction is available again.
+            return ([], [], vacation_status) if return_actual else []
     if mode == WORK_MODE_SHIFT:
         raw_actual = _cycle_windows(entry, search_start, end, buffered=False)
     else:
@@ -116,7 +145,7 @@ async def work_windows(
     # A partial absence must also remain a gap in the expanded planning range.
     planning = _subtract_blocked_windows(planning, vacation_windows)
     planning = _clip_window_ends(planning, end)
-    return (actual, planning) if return_actual else planning
+    return (actual, planning, vacation_status) if return_actual else planning
 
 
 def activity_context_c(now: datetime, evening_answer: int) -> float:
@@ -144,7 +173,7 @@ async def _calendar_windows(
     end: datetime,
     *,
     timed_only: bool,
-) -> list[tuple[datetime, datetime]]:
+) -> tuple[list[tuple[datetime, datetime]], bool]:
     try:
         response = await hass.services.async_call(
             "calendar",
@@ -159,11 +188,12 @@ async def _calendar_windows(
         )
     except (HomeAssistantError, ValueError) as err:
         _LOGGER.debug("Calendar context unavailable for %s: %s", entity_id, err)
-        return []
+        return [], False
     payload = response.get(entity_id) if isinstance(response, dict) else None
     events = payload.get("events") if isinstance(payload, dict) else None
     if not isinstance(events, list):
-        return []
+        _LOGGER.debug("Calendar context returned no usable response for %s", entity_id)
+        return [], False
 
     result: list[tuple[datetime, datetime]] = []
     for event in events:
@@ -176,10 +206,14 @@ async def _calendar_windows(
             continue
         parsed_start = _parse_calendar_time(raw_start, start.tzinfo)
         parsed_end = _parse_calendar_time(raw_end, start.tzinfo)
-        if parsed_start is None or parsed_end is None or parsed_end <= parsed_start:
+        if (
+            parsed_start is None
+            or parsed_end is None
+            or not is_after(parsed_end, parsed_start)
+        ):
             continue
         result.append((parsed_start, parsed_end))
-    return result
+    return result, True
 
 
 def _looks_all_day(start: Any, end: Any) -> bool:
@@ -239,9 +273,11 @@ def _weekday_windows(
             b = datetime.combine(day, end_time, tzinfo=start.tzinfo)
             if b <= a:
                 b += timedelta(days=1)
-            if b >= start and a <= end:
+            if is_at_or_after(b, start) and is_at_or_before(a, end):
                 windows.append(
-                    (a - WORK_BUFFER, b + WORK_BUFFER) if buffered else (a, b)
+                    (real_add(a, -WORK_BUFFER), real_add(b, WORK_BUFFER))
+                    if buffered
+                    else (a, b)
                 )
         day += timedelta(days=1)
     return _merge_windows(windows)
@@ -273,9 +309,16 @@ def _cycle_windows(
         token = pattern[(day - anchor).days % len(pattern)]
         if token != "X":
             bounds = _shift_bounds(entry, token, day, start.tzinfo)
-            if bounds and bounds[1] >= start and bounds[0] <= end:
+            if (
+                bounds
+                and is_at_or_after(bounds[1], start)
+                and is_at_or_before(bounds[0], end)
+            ):
                 windows.append(
-                    (bounds[0] - WORK_BUFFER, bounds[1] + WORK_BUFFER)
+                    (
+                        real_add(bounds[0], -WORK_BUFFER),
+                        real_add(bounds[1], WORK_BUFFER),
+                    )
                     if buffered
                     else bounds
                 )
@@ -322,8 +365,12 @@ def _current_or_future_windows(
     """Keep current/future real work periods while preserving their true start."""
     kept: list[tuple[datetime, datetime]] = []
     for window_start, window_end in windows:
-        clipped_end = min(window_end, end)
-        if clipped_end >= now and window_start <= end and clipped_end > window_start:
+        clipped_end = min((window_end, end), key=instant_key)
+        if (
+            is_at_or_after(clipped_end, now)
+            and is_at_or_before(window_start, end)
+            and is_after(clipped_end, window_start)
+        ):
             kept.append((window_start, clipped_end))
     return kept
 
@@ -335,8 +382,8 @@ def _clip_window_ends(
     """Clip work/planning windows to the configured maximum future horizon."""
     clipped: list[tuple[datetime, datetime]] = []
     for start, stop in windows:
-        clipped_stop = min(stop, end)
-        if clipped_stop > start:
+        clipped_stop = min((stop, end), key=instant_key)
+        if is_after(clipped_stop, start):
             clipped.append((start, clipped_stop))
     return clipped
 
@@ -346,7 +393,10 @@ def _buffer_windows(
 ) -> list[tuple[datetime, datetime]]:
     """Expand surviving work periods for planning without changing actual work."""
     return _merge_windows(
-        [(start - WORK_BUFFER, end + WORK_BUFFER) for start, end in windows]
+        [
+            (real_add(start, -WORK_BUFFER), real_add(end, WORK_BUFFER))
+            for start, end in windows
+        ]
     )
 
 
@@ -363,27 +413,33 @@ def _subtract_blocked_windows(
         for block_start, block_end in blocked:
             next_parts: list[tuple[datetime, datetime]] = []
             for part_start, part_end in parts:
-                if block_end <= part_start or block_start >= part_end:
+                if is_at_or_before(block_end, part_start) or is_at_or_after(
+                    block_start, part_end
+                ):
                     next_parts.append((part_start, part_end))
                     continue
-                if block_start > part_start:
-                    next_parts.append((part_start, min(block_start, part_end)))
-                if block_end < part_end:
-                    next_parts.append((max(block_end, part_start), part_end))
+                if is_after(block_start, part_start):
+                    next_parts.append(
+                        (part_start, min((block_start, part_end), key=instant_key))
+                    )
+                if is_before(block_end, part_end):
+                    next_parts.append(
+                        (max((block_end, part_start), key=instant_key), part_end)
+                    )
             parts = next_parts
-        result.extend((a, b) for a, b in parts if b > a)
+        result.extend((a, b) for a, b in parts if is_after(b, a))
     return _merge_windows(result)
 
 
 def _merge_windows(windows: list[tuple[datetime, datetime]]) -> list[tuple[datetime, datetime]]:
     if not windows:
         return []
-    ordered = sorted(windows, key=lambda item: item[0])
+    ordered = sorted(windows, key=lambda item: instant_key(item[0]))
     merged = [ordered[0]]
     for start, end in ordered[1:]:
         old_start, old_end = merged[-1]
-        if start <= old_end:
-            merged[-1] = (old_start, max(old_end, end))
+        if is_at_or_before(start, old_end):
+            merged[-1] = (old_start, max((old_end, end), key=instant_key))
         else:
             merged.append((start, end))
     return merged

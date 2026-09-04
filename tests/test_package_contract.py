@@ -37,11 +37,40 @@ def test_local_brand_icon_is_present_and_hacs_does_not_ignore_brands():
     assert "ignore: brands" not in workflow
 
 
-def test_private_profiles_are_not_exposed_as_global_ha_entities():
-    for module in ("button.py", "switch.py", "sensor.py", "entity.py"):
+def test_only_compact_profile_diagnostics_are_exposed_as_ha_entities():
+    for module in ("button.py", "switch.py", "entity.py"):
         source = (INTEGRATION / module).read_text(encoding="utf-8")
         assert "Compatibility placeholder" in source
         assert "ProfileManager" not in source
         assert "Entity" not in source.replace("entities", "")
+    sensor_source = (INTEGRATION / "sensor.py").read_text(encoding="utf-8")
+    assert "class ProfileDiagnosticsSensor" in sensor_source
+    assert "profile_diagnostics" in sensor_source
+    assert "_unrecorded_attributes = frozenset({MATCH_ALL})" in sensor_source
+    assert "_attr_entity_registry_enabled_default = False" in sensor_source
+    assert "_ignore_next_state_event" not in sensor_source
+    assert "async_reset" not in sensor_source
+    assert "async_undo" not in sensor_source
+    assert "learning_enabled =" not in sensor_source
     init_source = (INTEGRATION / "__init__.py").read_text(encoding="utf-8")
-    assert "async_forward_entry_setups" not in init_source
+    assert 'PLATFORMS = ["sensor"]' in (INTEGRATION / "const.py").read_text(encoding="utf-8")
+    assert "async_forward_entry_setups(entry, PLATFORMS)" in init_source
+    assert "_async_remove_legacy_profile_entities(hass, entry)" in init_source
+    for suffix in (
+        "_learning_enabled",
+        "_reset_learning",
+        "_undo_feedback",
+        "_learning_status",
+    ):
+        assert suffix in init_source
+
+
+def test_profile_backup_is_disabled_in_backend_and_frontend():
+    const_source = (INTEGRATION / "const.py").read_text(encoding="utf-8")
+    api_source = (INTEGRATION / "api.py").read_text(encoding="utf-8")
+    frontend_source = (INTEGRATION / "frontend" / "jackenberater-card.js").read_text(
+        encoding="utf-8"
+    )
+    assert "PROFILE_BACKUP_ENABLED = False" in const_source
+    assert "if PROFILE_BACKUP_ENABLED:" in api_source
+    assert "const JB_PROFILE_BACKUP_ENABLED = false;" in frontend_source

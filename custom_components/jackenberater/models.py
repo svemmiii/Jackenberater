@@ -82,6 +82,10 @@ class Recommendation:
     transient_burden: float | None = None
     instant_jacket: str | None = None
     seasonal_adjustment_c: float = 0.0
+    simulation_active: bool = False
+    work_forecast_coverage: str = "not_applicable"
+    context_calendar_status: str = "not_configured"
+    vacation_calendar_status: str = "not_applicable"
 
     def as_dict(self) -> dict[str, Any]:
         result = asdict(self)

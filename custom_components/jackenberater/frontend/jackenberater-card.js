@@ -1,3 +1,5 @@
+const JB_PROFILE_BACKUP_ENABLED = false;
+
 const JB_I18N = {
   de: {
     title: "JackenBerater",
@@ -93,12 +95,18 @@ const JB_I18N = {
     profileImported: "Lernprofil wiederhergestellt.",
     profileImportError: "Profil-Backup konnte nicht importiert werden.",
     workWeatherIncomplete: "Arbeitswetter derzeit nicht verfügbar – Empfehlung für die Arbeit unvollständig.",
+    workWeatherPartial: "Arbeitsforecast nur teilweise abgedeckt – Empfehlung für die Arbeit unvollständig.",
+    contextCalendarUnavailable: "Kontextkalender nicht verfügbar – längere Termine können aktuell fehlen.",
+    vacationCalendarUnavailable: "Abwesenheitskalender nicht verfügbar – die Arbeitsortplanung wird vorsichtshalber nicht verwendet.",
     maintenanceTitle: "Lernprofil verwalten",
     learningPause: "Lernen pausieren",
     learningResume: "Lernen fortsetzen",
     undoFeedback: "Letzte Bewertung zurücknehmen",
     resetLearning: "Lernprofil zurücksetzen",
     maintenanceDone: "Lernprofil aktualisiert.",
+    learnedProfileTitle: "Was hat dieses Profil gelernt?",
+    simulationWarning: "Testmodus aktiv – keine Speicherung, keine Session, kein Lernen.",
+    feedbackFor: "Feedback für",
   },
   en: {
     title: "Jacket Advisor",
@@ -194,12 +202,18 @@ const JB_I18N = {
     profileImported: "Learning profile restored.",
     profileImportError: "The profile backup could not be imported.",
     workWeatherIncomplete: "Work weather is currently unavailable — the advice for work is incomplete.",
+    workWeatherPartial: "The work forecast is only partially covered — the advice for work is incomplete.",
+    contextCalendarUnavailable: "The context calendar is unavailable — longer appointments may currently be missing.",
+    vacationCalendarUnavailable: "The absence calendar is unavailable — work-location planning is conservatively not used.",
     maintenanceTitle: "Manage learning profile",
     learningPause: "Pause learning",
     learningResume: "Resume learning",
     undoFeedback: "Undo last rating",
     resetLearning: "Reset learning profile",
     maintenanceDone: "Learning profile updated.",
+    learnedProfileTitle: "What has this profile learned?",
+    simulationWarning: "Test mode active — no storage, no session, no learning.",
+    feedbackFor: "Feedback for",
   },
 };
 
@@ -274,10 +288,12 @@ class JackenBeraterCard extends HTMLElement {
   }
 
   getCardSize() {
-    const hidden = this._preview?.recommendation?.display_mode === "hidden";
+    const recommendation = this._preview?.recommendation || {};
+    const hidden = recommendation.display_mode === "hidden";
+    const calendarWarning = Boolean(this._calendarWarnings(recommendation));
     const setup = this._preview?.profile?.setup_complete;
     const pending = this._preview?.feedback || [];
-    if (hidden && setup && !this._open && !this._infoOpen && pending.length === 0) return 0;
+    if (hidden && !calendarWarning && setup && !this._open && !this._infoOpen && pending.length === 0) return 0;
     return (this._open || this._infoOpen) ? 6 : 2;
   }
 
@@ -302,6 +318,7 @@ class JackenBeraterCard extends HTMLElement {
     const raw = err?.message || String(err);
     if (raw.includes("work_weather_unavailable")) return this._t("workWeatherUnavailable");
     if (raw.includes("weather_unavailable")) return this._t("noData");
+    if (raw.includes("simulation_active")) return this._t("simulationWarning");
     return raw;
   }
 
@@ -390,9 +407,8 @@ class JackenBeraterCard extends HTMLElement {
       this._render();
       return;
     }
-    // Shared wall tablets are read-only recommendation surfaces. Opening the
-    // details must not create a session or expose profile setup controls.
-    if (this._autoShared && !this._isAdmin) {
+    // Simulated profile values may affect display only. Never create a session.
+    if (this._preview?.recommendation?.simulation_active) {
       this._open = !this._open;
       this._phasePending = null;
       this._notice = "";
@@ -419,7 +435,7 @@ class JackenBeraterCard extends HTMLElement {
     this._open = true;
     try {
       const response = await this._send("jackenberater/open_session");
-      this._session = response?.session || null;
+      this._session = this._autoShared && !this._isAdmin ? null : (response?.session || null);
       if (response?.recommendation) this._preview.recommendation = response.recommendation;
       if (response?.feedback) this._preview.feedback = response.feedback;
       this._error = "";
@@ -639,7 +655,28 @@ class JackenBeraterCard extends HTMLElement {
     return Boolean(this._isAdmin || (profile?.id && profile.id === this._currentUserId && !this._autoShared));
   }
 
-  _infoPanel(rec, profile) {
+  _diagnosticsPanel(diagnostics) {
+    if (!diagnostics || typeof diagnostics !== "object") return "";
+    const rows = Object.entries(diagnostics).map(([key, value]) => {
+      const shown = value && typeof value === "object" ? JSON.stringify(value) : String(value ?? "–");
+      return `<div><span>${jbEscape(key)}</span><strong>${jbEscape(shown)}</strong></div>`;
+    }).join("");
+    return `<details class="jb-diagnostics"><summary>${jbEscape(this._t("learnedProfileTitle"))}</summary><div class="jb-diagnostics-grid">${rows}</div></details>`;
+  }
+
+  _calendarWarnings(rec) {
+    const warnings = [];
+    if (rec?.context_calendar_status === "unavailable") {
+      warnings.push(this._t("contextCalendarUnavailable"));
+    }
+    if (rec?.vacation_calendar_status === "unavailable") {
+      warnings.push(this._t("vacationCalendarUnavailable"));
+    }
+    if (!warnings.length) return "";
+    return `<div class="jb-calendar-warnings">${warnings.map(text => `<div class="jb-info-note jb-warning"><ha-icon icon="mdi:calendar-alert"></ha-icon>${jbEscape(text)}</div>`).join("")}</div>`;
+  }
+
+  _infoPanel(rec, profile, diagnostics) {
     const horizon = rec.horizon_hours > 0 ? `${rec.horizon_hours} h` : this._t("nowOnly");
     let stay = this._t("stayUnknown");
     if (rec.stay_context === "work") {
@@ -656,8 +693,13 @@ class JackenBeraterCard extends HTMLElement {
       : "";
     const canImport = this._canImportProfile(profile);
     const canManage = this._canManageProfile(profile);
-    const workWarning = rec.work_weather_available === false
-      ? `<div class="jb-info-note jb-warning"><ha-icon icon="mdi:weather-cloudy-alert"></ha-icon>${jbEscape(this._t("workWeatherIncomplete"))}</div>`
+    const workWarning = rec.work_forecast_coverage === "partial"
+      ? `<div class="jb-info-note jb-warning"><ha-icon icon="mdi:weather-cloudy-alert"></ha-icon>${jbEscape(this._t("workWeatherPartial"))}</div>`
+      : (rec.work_forecast_coverage === "missing" || rec.work_weather_available === false)
+        ? `<div class="jb-info-note jb-warning"><ha-icon icon="mdi:weather-cloudy-alert"></ha-icon>${jbEscape(this._t("workWeatherIncomplete"))}</div>`
+        : "";
+    const simulationWarning = rec.simulation_active
+      ? `<div class="jb-info-note jb-warning"><ha-icon icon="mdi:flask-outline"></ha-icon>${jbEscape(this._t("simulationWarning"))}</div>`
       : "";
     return `<div class="jb-info-panel">
       <div class="jb-info-title"><ha-icon icon="mdi:information-outline"></ha-icon>${this._t("infoTitle")}</div>
@@ -668,8 +710,9 @@ class JackenBeraterCard extends HTMLElement {
         <div><span>${this._t("infoForecast")}</span><strong>${jbEscape(rec.forecast_coverage_complete ? this._t("forecastComplete") : this._t("forecastPartial"))}</strong></div>
         <div><span>${this._t("infoPersonal")}</span><strong>${Math.round((rec.confidence || profile.confidence || 0) * 100)} %</strong></div>
       </div>
-      ${workWarning}${transient}${seasonal}
-      ${canManage ? `<div class="jb-info-backup"><div class="jb-section-title">${this._t("backupTitle")}</div><div class="jb-info-actions">
+      ${simulationWarning}${workWarning}${transient}${seasonal}
+      ${this._diagnosticsPanel(diagnostics)}
+      ${canManage && JB_PROFILE_BACKUP_ENABLED ? `<div class="jb-info-backup"><div class="jb-section-title">${this._t("backupTitle")}</div><div class="jb-info-actions">
         <button data-action="profile-export"><ha-icon icon="mdi:tray-arrow-down"></ha-icon>${this._t("exportProfile")}</button>
         ${canImport ? `<button data-action="profile-import"><ha-icon icon="mdi:tray-arrow-up"></ha-icon>${this._t("importProfile")}</button><input type="file" accept="application/json,.json" data-profile-import hidden>` : ""}
       </div></div>` : ""}
@@ -752,7 +795,8 @@ class JackenBeraterCard extends HTMLElement {
     const profile = this._preview?.profile || {};
     const rec = this._preview?.recommendation || {};
     const pending = this._preview?.feedback || [];
-    if (rec.display_mode === "hidden" && profile.setup_complete && !this._open && !this._infoOpen && pending.length === 0) {
+    const calendarWarnings = this._calendarWarnings(rec);
+    if (rec.display_mode === "hidden" && profile.setup_complete && !this._open && !this._infoOpen && pending.length === 0 && !calendarWarnings) {
       this.innerHTML = `<div style="display:none"></div>`;
       return;
     }
@@ -781,7 +825,7 @@ class JackenBeraterCard extends HTMLElement {
           <div class="jb-icon ${rec.jacket_now}"><ha-icon icon="${this._jacketIcon(rec.jacket_now)}"></ha-icon></div>
           <div class="jb-copy"><div class="jb-kicker">${jbEscape(title)}</div><div class="jb-headline">${jbEscape(this._jacketLabel(rec.jacket_now))}</div><div class="jb-sub">${Math.round(rec.current_temperature_c * 10) / 10} °C · ${this._t("effective")} ${Math.round(rec.effective_now_c * 10) / 10} °C</div></div>
           ${feedbackBadge}${infoButton}<ha-icon class="jb-chevron" icon="mdi:chevron-right"></ha-icon>
-        </div>${this._infoOpen ? this._infoPanel(rec, profile) : ""}`;
+        </div>${calendarWarnings}${this._infoOpen ? this._infoPanel(rec, profile, this._preview?.diagnostics) : ""}`;
     } else {
       content = `
         <div class="jb-main" data-action="open">
@@ -790,8 +834,8 @@ class JackenBeraterCard extends HTMLElement {
             <div class="jb-sub">${jbEscape(this._laterText(rec) || `${rec.current_temperature_c ?? "–"} °C · ${this._t("effective")} ${rec.effective_now_c ?? "–"} °C`)}</div>
           </div>
           ${feedbackBadge}${infoButton}<ha-icon class="jb-chevron" icon="mdi:${this._open ? "chevron-up" : "chevron-right"}"></ha-icon>
-        </div>
-        ${this._infoOpen ? this._infoPanel(rec, profile) : ""}
+        </div>${calendarWarnings}
+        ${this._infoOpen ? this._infoPanel(rec, profile, this._preview?.diagnostics) : ""}
         ${this._open ? this._details(rec, profile, pending) : ""}`;
     }
 
@@ -817,7 +861,12 @@ class JackenBeraterCard extends HTMLElement {
       : rec.rain_status === "take"
         ? `<div class="jb-rain"><ha-icon icon="mdi:weather-partly-rainy"></ha-icon>${this._t("rainTake")}</div>`
         : "";
-    const pendingHtml = pending.length ? `<div class="jb-divider"></div><div class="jb-section-title">${pending.length} ${pending.length === 1 ? this._t("feedbackOpen") : this._t("feedbackPlural")}</div>${pending.map(session => this._feedbackCard(session, true)).join("")}` : "";
+    const workWarning = rec.work_forecast_coverage === "partial"
+      ? `<div class="jb-info-note jb-warning"><ha-icon icon="mdi:weather-cloudy-alert"></ha-icon>${jbEscape(this._t("workWeatherPartial"))}</div>`
+      : (rec.work_forecast_coverage === "missing" || rec.work_weather_available === false)
+        ? `<div class="jb-info-note jb-warning"><ha-icon icon="mdi:weather-cloudy-alert"></ha-icon>${jbEscape(this._t("workWeatherIncomplete"))}</div>`
+        : "";
+    const pendingHtml = pending.length ? `<div class="jb-divider"></div><div class="jb-section-title">${this._t("feedbackFor")} ${jbEscape(profile.name || "")} · ${pending.length} ${pending.length === 1 ? this._t("feedbackOpen") : this._t("feedbackPlural")}</div>${pending.map(session => this._feedbackCard(session, true)).join("")}` : "";
     const pendingIds = new Set(pending.map(session => session.id));
     const latest = this._preview?.latest_session;
     const manualCandidate = [this._session, latest].find(session =>
@@ -832,6 +881,8 @@ class JackenBeraterCard extends HTMLElement {
       : "";
     const phase = this._phasePending ? this._phasePanel() : "";
     return `<div class="jb-panel">
+      ${rec.simulation_active ? `<div class="jb-info-note jb-warning"><ha-icon icon="mdi:flask-outline"></ha-icon>${jbEscape(this._t("simulationWarning"))}</div>` : ""}
+      ${workWarning}
       ${rain}
       <div class="jb-metrics"><span>${rec.current_temperature_c ?? "–"} °C</span><span>${rec.current_wind_kmh != null ? `${rec.current_wind_kmh} km/h${rec.current_gust_kmh != null && rec.current_gust_kmh > rec.current_wind_kmh ? ` · ${this._t("gusts")} ${rec.current_gust_kmh} km/h` : ""}` : (rec.current_gust_kmh != null ? `${this._t("gusts")} ${rec.current_gust_kmh} km/h` : "–")}</span><span>${rec.horizon_hours > 0 ? `${rec.horizon_hours} h` : this._t("nowOnly")}</span></div>
       ${rec.work_context && rec.work_jacket ? `<div class="jb-context"><ha-icon icon="mdi:briefcase-outline"></ha-icon>${jbEscape(rec.work_name || this._t("work"))}: ${this._jacketLabel(rec.work_jacket)}</div>` : ""}
@@ -937,7 +988,7 @@ class JackenBeraterCard extends HTMLElement {
       .jb-panel{padding:0 18px 18px}.jb-panel-title{font-size:18px;font-weight:700;margin:2px 0 7px}.jb-panel-text{font-size:13px;color:var(--secondary-text-color);line-height:1.45;margin-bottom:16px}.jb-question{margin:15px 0}.jb-question>div:first-child{font-weight:600;font-size:14px;margin-bottom:8px}.jb-scale{display:grid;grid-template-columns:repeat(5,1fr);gap:7px}.jb-scale button{border:1px solid var(--divider-color);background:color-mix(in srgb,var(--card-background-color) 82%,transparent);color:var(--primary-text-color);border-radius:11px;padding:8px 0;cursor:pointer}.jb-scale button.active{background:var(--primary-color);color:var(--text-primary-color,#fff);border-color:var(--primary-color)}.jb-scale-label{display:flex;justify-content:space-between;font-size:10px;color:var(--secondary-text-color);margin-top:5px}.jb-actions{display:flex;justify-content:flex-end;margin-top:18px}.jb-actions button.primary{border:0;border-radius:11px;padding:10px 15px;background:var(--primary-color);color:var(--text-primary-color,#fff);font-weight:600;cursor:pointer}
       .jb-metrics{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 12px}.jb-metrics span,.jb-learning span{font-size:12px;padding:5px 9px;border-radius:999px;background:color-mix(in srgb,var(--primary-text-color) 6%,transparent);color:var(--secondary-text-color)}.jb-rain,.jb-context{display:flex;gap:8px;align-items:center;padding:10px 12px;border-radius:12px;background:color-mix(in srgb,#2196f3 10%,transparent);margin-bottom:12px;font-size:13px}.jb-rain.strong{background:color-mix(in srgb,#2196f3 18%,transparent);font-weight:600}.jb-section-title{font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--secondary-text-color);font-weight:700;margin:14px 0 7px}.jb-reasons{margin:0;padding-left:20px;color:var(--primary-text-color);font-size:13px;line-height:1.45}.jb-learning{display:flex;gap:8px;margin-top:14px}.jb-divider{height:1px;background:var(--divider-color);margin:17px 0}
       .jb-feedback{padding:11px 0}.jb-feedback+.jb-feedback{border-top:1px solid var(--divider-color)}.jb-feedback-time{font-size:11px;color:var(--secondary-text-color);margin-bottom:5px}.jb-feedback-rec{font-weight:650;display:flex;justify-content:space-between;gap:10px}.jb-feedback-rec span{font-size:12px;font-weight:400;color:var(--secondary-text-color)}.jb-unusual{display:flex;align-items:center;gap:7px;margin-top:8px;font-size:11px;color:var(--secondary-text-color);font-weight:400}.jb-unusual input{margin:0}.jb-feedback-buttons{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px;margin-top:9px}.jb-feedback-buttons button,.jb-phase-buttons button{border:1px solid var(--divider-color);background:transparent;color:var(--primary-text-color);border-radius:10px;padding:8px 5px;font-size:11px;cursor:pointer}.jb-manual-button{border:1px solid var(--divider-color);background:transparent;color:var(--secondary-text-color);border-radius:10px;padding:8px 10px;font-size:11px;cursor:pointer}.jb-phase{margin-top:12px;padding:12px;border-radius:12px;background:color-mix(in srgb,var(--primary-color) 8%,transparent);font-size:13px;font-weight:600}.jb-phase-buttons{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}.jb-notice{margin-top:10px;font-size:12px;color:var(--success-color,#43a047)}
-      .jb-profile-row{display:flex;justify-content:flex-end;align-items:center;gap:8px;padding:9px 16px 0;font-size:11px;color:var(--secondary-text-color)}.jb-profile-row select{border:1px solid var(--divider-color);border-radius:9px;background:var(--card-background-color);color:var(--primary-text-color);padding:5px 8px}.jb-info-panel{padding:14px 18px 18px;border-top:1px solid var(--divider-color);background:color-mix(in srgb,var(--primary-color) 3%,transparent)}.jb-info-title{display:flex;align-items:center;gap:8px;font-weight:700;font-size:15px;margin-bottom:12px}.jb-info-title ha-icon{--mdc-icon-size:21px}.jb-info-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.jb-info-grid>div{display:flex;flex-direction:column;gap:3px;padding:9px 10px;border-radius:10px;background:color-mix(in srgb,var(--primary-text-color) 5%,transparent)}.jb-info-grid span{font-size:10px;color:var(--secondary-text-color);text-transform:uppercase;letter-spacing:.03em}.jb-info-grid strong{font-size:12px;font-weight:650}.jb-info-note{display:flex;align-items:center;gap:8px;margin-top:9px;padding:9px 10px;border-radius:10px;background:color-mix(in srgb,var(--primary-color) 8%,transparent);font-size:12px;color:var(--secondary-text-color)}.jb-info-note ha-icon{--mdc-icon-size:18px}.jb-info-backup{margin-top:10px}.jb-info-actions{display:flex;gap:8px;flex-wrap:wrap}.jb-info-actions button{display:flex;align-items:center;gap:6px;border:1px solid var(--divider-color);background:transparent;color:var(--primary-text-color);border-radius:10px;padding:8px 10px;font-size:11px;cursor:pointer}.jb-info-actions button ha-icon{--mdc-icon-size:17px}.jb-loading,.jb-error{padding:18px}.jb-error{display:flex;gap:9px;align-items:center;color:var(--error-color)}
+      .jb-profile-row{display:flex;justify-content:flex-end;align-items:center;gap:8px;padding:9px 16px 0;font-size:11px;color:var(--secondary-text-color)}.jb-profile-row select{border:1px solid var(--divider-color);border-radius:9px;background:var(--card-background-color);color:var(--primary-text-color);padding:5px 8px}.jb-info-panel{padding:14px 18px 18px;border-top:1px solid var(--divider-color);background:color-mix(in srgb,var(--primary-color) 3%,transparent)}.jb-info-title{display:flex;align-items:center;gap:8px;font-weight:700;font-size:15px;margin-bottom:12px}.jb-info-title ha-icon{--mdc-icon-size:21px}.jb-info-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.jb-info-grid>div{display:flex;flex-direction:column;gap:3px;padding:9px 10px;border-radius:10px;background:color-mix(in srgb,var(--primary-text-color) 5%,transparent)}.jb-info-grid span{font-size:10px;color:var(--secondary-text-color);text-transform:uppercase;letter-spacing:.03em}.jb-info-grid strong{font-size:12px;font-weight:650}.jb-info-note{display:flex;align-items:center;gap:8px;margin-top:9px;padding:9px 10px;border-radius:10px;background:color-mix(in srgb,var(--primary-color) 8%,transparent);font-size:12px;color:var(--secondary-text-color)}.jb-info-note.jb-warning{background:color-mix(in srgb,#ff9800 18%,transparent);color:var(--primary-text-color)}.jb-info-note ha-icon{--mdc-icon-size:18px}.jb-calendar-warnings{padding:0 16px 12px}.jb-calendar-warnings .jb-info-note{margin-top:6px}.jb-info-backup{margin-top:10px}.jb-info-actions{display:flex;gap:8px;flex-wrap:wrap}.jb-info-actions button{display:flex;align-items:center;gap:6px;border:1px solid var(--divider-color);background:transparent;color:var(--primary-text-color);border-radius:10px;padding:8px 10px;font-size:11px;cursor:pointer}.jb-info-actions button ha-icon{--mdc-icon-size:17px}.jb-diagnostics{margin-top:12px}.jb-diagnostics summary{cursor:pointer;font-size:12px;font-weight:700}.jb-diagnostics-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;margin-top:8px}.jb-diagnostics-grid>div{min-width:0;padding:7px 8px;border-radius:8px;background:color-mix(in srgb,var(--primary-text-color) 5%,transparent)}.jb-diagnostics-grid span{display:block;font-size:9px;color:var(--secondary-text-color);overflow-wrap:anywhere}.jb-diagnostics-grid strong{display:block;font-size:11px;overflow-wrap:anywhere}.jb-loading,.jb-error{padding:18px}.jb-error{display:flex;gap:9px;align-items:center;color:var(--error-color)}
       @media(max-width:520px){.jb-feedback-buttons{grid-template-columns:repeat(2,1fr)}.jb-badge{display:none}.jb-info-grid{grid-template-columns:1fr}}
     </style>`;
   }

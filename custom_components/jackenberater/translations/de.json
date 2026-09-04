@@ -174,5 +174,12 @@
       "already_configured": "JackenBerater ist bereits eingerichtet.",
       "reconfigure_successful": "JackenBerater wurde aktualisiert."
     }
+  },
+  "entity": {
+    "sensor": {
+      "profile_diagnostics": {
+        "name": "Lernprofil {name}"
+      }
+    }
   }
 }

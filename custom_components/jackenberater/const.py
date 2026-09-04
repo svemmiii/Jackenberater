@@ -4,7 +4,14 @@ from __future__ import annotations
 from datetime import timedelta
 
 DOMAIN = "jackenberater"
-INTEGRATION_VERSION = "0.1.2"
+INTEGRATION_VERSION = "0.1.3"
+PLATFORMS = ["sensor"]
+PROFILE_BACKUP_ENABLED = False
+
+CALENDAR_STATUS_AVAILABLE = "available"
+CALENDAR_STATUS_NOT_CONFIGURED = "not_configured"
+CALENDAR_STATUS_NOT_APPLICABLE = "not_applicable"
+CALENDAR_STATUS_UNAVAILABLE = "unavailable"
 
 CONF_WEATHER = "weather_entity"
 CONF_INDOOR_TEMP = "indoor_temperature"

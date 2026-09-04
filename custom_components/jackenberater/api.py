@@ -15,6 +15,9 @@ from homeassistant.util import dt as dt_util
 
 from .const import (
     CALENDAR_MAX_HOURS,
+    CALENDAR_STATUS_AVAILABLE,
+    CALENDAR_STATUS_NOT_APPLICABLE,
+    CALENDAR_STATUS_NOT_CONFIGURED,
     CONF_CONTEXT_CALENDAR,
     CONF_FALLBACK_INDOOR_TEMP,
     CONF_INDOOR_TEMP,
@@ -28,11 +31,14 @@ from .const import (
     FEEDBACK_VALUES,
     MAX_FORECAST_HOURS,
     PHASE_VALUES,
+    PROFILE_BACKUP_ENABLED,
 )
 from .context import activity_context_c, calendar_context_horizon, work_windows
+from .diagnostics import model_diagnostics
 from .engine import build_recommendation, merge_location_timeline
 from .models import Recommendation, WeatherPoint
 from .profiles import ProfileManager
+from .time_utils import elapsed, instant_key, is_after, is_between
 from .weather import current_weather, indoor_temperature_c
 
 _LOGGER = logging.getLogger(__name__)
@@ -48,8 +54,9 @@ def async_register_api(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_profile_setup)
     websocket_api.async_register_command(hass, ws_feedback)
     websocket_api.async_register_command(hass, ws_profiles)
-    websocket_api.async_register_command(hass, ws_profile_export)
-    websocket_api.async_register_command(hass, ws_profile_import)
+    if PROFILE_BACKUP_ENABLED:
+        websocket_api.async_register_command(hass, ws_profile_export)
+        websocket_api.async_register_command(hass, ws_profile_import)
     websocket_api.async_register_command(hass, ws_profile_maintenance)
     domain_data["api_registered"] = True
 
@@ -88,6 +95,17 @@ def _read_only_profile_summary(summary: dict[str, Any]) -> dict[str, Any]:
         for key in ("id", "name", "setup_complete")
         if key in summary
     }
+
+
+def _profile_summary_for_connection(
+    connection: websocket_api.ActiveConnection,
+    entry: ConfigEntry,
+    summary: dict[str, Any],
+) -> dict[str, Any]:
+    """Hide personal learning metadata on non-admin shared control surfaces."""
+    if _is_shared_account(connection, entry) and not connection.user.is_admin:
+        return _read_only_profile_summary(summary)
+    return summary
 
 
 async def _profile(
@@ -138,18 +156,25 @@ async def _recommendation(
     )
     forecast = list((coordinator.data or {}).get("home_forecast", []))
     activity = activity_context_c(dt_util.now(), model.evening_answer)
-    context_horizon = await _cached_calendar_horizon(hass, entry, runtime)
+    context_horizon, context_calendar_status = await _cached_calendar_horizon(
+        hass, entry, runtime
+    )
     base_horizon = max(9, context_horizon or 0)
     max_horizon = max(MAX_FORECAST_HOURS, min(CALENDAR_MAX_HOURS, context_horizon or 0))
 
     work_points: list[WeatherPoint] = []
-    work_weather_available = True
+    work_forecast_coverage = "not_applicable"
     work_start: datetime | None = None
     work_end: datetime | None = None
     active_work_context = False
+    vacation_calendar_status = CALENDAR_STATUS_NOT_APPLICABLE
     work_entity = entry.data.get(CONF_WORK_WEATHER)
     if isinstance(work_entity, str) and work_entity:
-        actual_windows, planning_windows = await _cached_work_window_sets(
+        (
+            actual_windows,
+            planning_windows,
+            vacation_calendar_status,
+        ) = await _cached_work_window_sets(
             hass, entry, runtime
         )
         work_forecast = list((coordinator.data or {}).get("work_forecast", []))
@@ -161,11 +186,15 @@ async def _recommendation(
             work_points = [
                 point
                 for point in work_forecast
-                if point.dt > current.dt
-                and any(start <= point.dt <= end for start, end in planning_windows)
+                if is_after(point.dt, current.dt)
+                and any(
+                    is_between(point.dt, start, end)
+                    for start, end in planning_windows
+                )
             ]
-            if not work_points:
-                work_weather_available = False
+            work_forecast_coverage = _work_forecast_coverage(
+                current.dt, work_forecast, planning_windows
+            )
             # Planning relevance starts 30 minutes around the work period, but the
             # current location does not. Home forecast points are replaced only for
             # the planning timeline; current weather switches below using the actual
@@ -177,7 +206,9 @@ async def _recommendation(
         # Only the unbuffered actual work window may replace the *current* weather.
         # The ±30 minute planning buffer is for “take it with you”, not a location
         # claim about where the user already is.
-        if actual_windows and any(start <= now <= end for start, end in actual_windows):
+        if actual_windows and any(
+            is_between(now, start, end) for start, end in actual_windows
+        ):
             work_current = current_weather(hass, work_entity)
             if work_current is None:
                 # During an actual work window, silently falling back to home
@@ -196,9 +227,9 @@ async def _recommendation(
     # end time. Otherwise a home cold/rain event at e.g. +13 h could be skipped
     # while a work point at +14 h makes the card claim a 14-hour horizon.
     if work_points:
-        latest_work = max(point.dt for point in work_points)
+        latest_work = max((point.dt for point in work_points), key=instant_key)
         work_horizon = math.ceil(
-            max(0.0, (latest_work - current.dt).total_seconds()) / 3600.0
+            max(0.0, elapsed(current.dt, latest_work).total_seconds()) / 3600.0
         )
         max_horizon = max(
             max_horizon,
@@ -229,7 +260,13 @@ async def _recommendation(
         activity_context_fn=lambda when: activity_context_c(when, model.evening_answer),
     )
     recommendation.source = "work" if active_work_context else "home"
-    recommendation.work_weather_available = work_weather_available
+    recommendation.work_forecast_coverage = work_forecast_coverage
+    recommendation.context_calendar_status = context_calendar_status
+    recommendation.vacation_calendar_status = vacation_calendar_status
+    recommendation.work_weather_available = work_forecast_coverage not in {
+        "missing",
+        "partial",
+    }
     if active_work_context and not recommendation.work_context:
         recommendation.work_context = True
         recommendation.work_jacket = recommendation.jacket_now
@@ -237,45 +274,102 @@ async def _recommendation(
     return recommendation
 
 
+def _work_forecast_coverage(
+    origin: datetime,
+    points: list[WeatherPoint],
+    windows: list[tuple[datetime, datetime]],
+    *,
+    max_gap: timedelta = timedelta(minutes=90),
+) -> str:
+    """Classify coverage of relevant work windows by real UTC instants."""
+    relevant_points = sorted(
+        (
+            point
+            for point in points
+            if is_after(point.dt, origin)
+            and any(is_between(point.dt, start, end) for start, end in windows)
+        ),
+        key=lambda point: instant_key(point.dt),
+    )
+    if not relevant_points:
+        return "missing"
+
+    for window_start, window_end in windows:
+        start = max((origin, window_start), key=instant_key)
+        if not is_after(window_end, start):
+            continue
+        within = [
+            point
+            for point in relevant_points
+            if is_between(point.dt, start, window_end)
+        ]
+        if not within:
+            return "partial"
+        if elapsed(start, within[0].dt) > max_gap:
+            return "partial"
+        if elapsed(within[-1].dt, window_end) > max_gap:
+            return "partial"
+        if any(
+            elapsed(left.dt, right.dt) > max_gap
+            for left, right in zip(within, within[1:], strict=False)
+        ):
+            return "partial"
+    return "complete"
+
+
 async def _cached_work_window_sets(
     hass: HomeAssistant,
     entry: ConfigEntry,
     runtime: dict[str, Any],
-) -> tuple[list[tuple[datetime, datetime]], list[tuple[datetime, datetime]]]:
+) -> tuple[
+    list[tuple[datetime, datetime]],
+    list[tuple[datetime, datetime]],
+    str,
+]:
     now = dt_util.now()
     cache = runtime.setdefault("context_cache", {})
     updated = cache.get("updated")
-    age = now - updated if isinstance(updated, datetime) else None
+    age = elapsed(updated, now) if isinstance(updated, datetime) else None
     if isinstance(age, timedelta) and timedelta(0) <= age < timedelta(minutes=15):
         return (
             list(cache.get("work_windows_actual", [])),
             list(cache.get("work_windows_planning", [])),
+            str(
+                cache.get(
+                    "vacation_calendar_status", CALENDAR_STATUS_NOT_CONFIGURED
+                )
+            ),
         )
-    actual, planning = await work_windows(hass, entry, now, return_actual=True)
+    actual, planning, vacation_status = await work_windows(
+        hass, entry, now, return_actual=True
+    )
     cache["updated"] = now
     cache["work_windows_actual"] = actual
     cache["work_windows_planning"] = planning
-    return actual, planning
+    cache["vacation_calendar_status"] = vacation_status
+    return actual, planning, vacation_status
 
 
 async def _cached_calendar_horizon(
     hass: HomeAssistant,
     entry: ConfigEntry,
     runtime: dict[str, Any],
-) -> int | None:
+) -> tuple[int | None, str]:
     if not entry.data.get(CONF_CONTEXT_CALENDAR):
-        return None
+        return None, CALENDAR_STATUS_NOT_CONFIGURED
     now = dt_util.now()
     cache = runtime.setdefault("context_cache", {})
     updated = cache.get("calendar_updated")
-    age = now - updated if isinstance(updated, datetime) else None
+    age = elapsed(updated, now) if isinstance(updated, datetime) else None
     if isinstance(age, timedelta) and timedelta(0) <= age < timedelta(minutes=15):
         value = cache.get("calendar_horizon")
-        return int(value) if isinstance(value, int) else None
-    value = await calendar_context_horizon(hass, entry, now)
+        status = str(cache.get("calendar_status", CALENDAR_STATUS_AVAILABLE))
+        return (int(value) if isinstance(value, int) else None), status
+    value, status = await calendar_context_horizon(hass, entry, now)
     cache["calendar_updated"] = now
     cache["calendar_horizon"] = value
-    return value
+    cache["calendar_status"] = status
+    return value, status
 
 
 def _effective_wind(wind_kmh: float | None, gust_kmh: float | None) -> float | None:
@@ -342,19 +436,39 @@ async def ws_preview(hass, connection, msg) -> None:
             entry,
             allow_shared_read=True,
         )
-        rec = await _recommendation(hass, entry, runtime, model)
+        simulated_model = runtime.setdefault("simulations", {}).get(profile_id)
+        active_model = simulated_model or model
+        rec = await _recommendation(hass, entry, runtime, active_model)
+        rec.simulation_active = simulated_model is not None
         read_only_shared = _is_shared_account(connection, entry) and not connection.user.is_admin
-        summary = manager.get_profile_summary(profile_id)
-        connection.send_result(
-            msg["id"],
-            {
-                "entry_id": entry.entry_id,
-                "profile": _read_only_profile_summary(summary) if read_only_shared else summary,
-                "recommendation": rec.as_dict(),
-                "feedback": [] if read_only_shared else manager.feedback_candidates(profile_id),
-                "latest_session": None if read_only_shared else manager.latest_session(profile_id),
-            },
+        summary = _profile_summary_for_connection(
+            connection, entry, manager.get_profile_summary(profile_id)
         )
+        feedback = (
+            manager.feedback_candidates(
+                profile_id, opened_by_user_id=str(connection.user.id)
+            )
+            if read_only_shared
+            else manager.feedback_candidates(profile_id)
+        )
+        result = {
+            "entry_id": entry.entry_id,
+            "profile": summary,
+            "recommendation": rec.as_dict(),
+            "feedback": [] if rec.simulation_active else feedback,
+            "latest_session": (
+                None
+                if read_only_shared or rec.simulation_active
+                else manager.latest_session(profile_id)
+            ),
+        }
+        # Detailed model values are personal diagnostics. Shared control
+        # surfaces receive only the selected profile's advice and due feedback.
+        if not read_only_shared:
+            result["diagnostics"] = model_diagnostics(
+                active_model, simulation_active=rec.simulation_active
+            )
+        connection.send_result(msg["id"], result)
     except ValueError as err:
         connection.send_error(msg["id"], "unavailable", str(err))
 
@@ -371,21 +485,40 @@ async def ws_open_session(hass, connection, msg) -> None:
     try:
         entry, runtime = _runtime(hass, msg.get("entry_id"))
         manager: ProfileManager = runtime["profiles"]
-        profile_id, model = await _profile(connection, manager, msg.get("profile_id"), entry)
+        profile_id, model = await _profile(
+            connection,
+            manager,
+            msg.get("profile_id"),
+            entry,
+            allow_shared_read=True,
+        )
+        if profile_id in runtime.setdefault("simulations", {}):
+            raise ValueError("simulation_active")
+        shared_account = _is_shared_account(connection, entry) and not connection.user.is_admin
         rec = await _recommendation(hass, entry, runtime, model)
         session = await manager.async_open_session(
             profile_id,
             rec,
             weather_context=_weather_context(rec),
             learning_contexts=_learning_contexts(rec),
+            opened_by_user_id=str(connection.user.id),
         )
         connection.send_result(
             msg["id"],
             {
-                "profile": manager.get_profile_summary(profile_id),
+                "profile": _profile_summary_for_connection(
+                    connection, entry, manager.get_profile_summary(profile_id)
+                ),
                 "recommendation": rec.as_dict(),
-                "session": session,
-                "feedback": manager.feedback_candidates(profile_id),
+                "session": None if shared_account else session,
+                "feedback": manager.feedback_candidates(
+                    profile_id,
+                    **(
+                        {"opened_by_user_id": str(connection.user.id)}
+                        if shared_account
+                        else {}
+                    ),
+                ),
             },
         )
     except ValueError as err:
@@ -439,7 +572,25 @@ async def ws_feedback(hass, connection, msg) -> None:
     try:
         entry, runtime = _runtime(hass, msg.get("entry_id"))
         manager: ProfileManager = runtime["profiles"]
-        profile_id, _ = await _profile(connection, manager, msg.get("profile_id"), entry)
+        profile_id, _ = await _profile(
+            connection,
+            manager,
+            msg.get("profile_id"),
+            entry,
+            allow_shared_read=True,
+        )
+        if profile_id in runtime.setdefault("simulations", {}):
+            raise ValueError("simulation_active")
+        shared_account = _is_shared_account(connection, entry) and not connection.user.is_admin
+        if shared_account and (
+            msg.get("voluntary", False)
+            or not manager.is_feedback_candidate(
+                profile_id,
+                msg["session_id"],
+                opened_by_user_id=str(connection.user.id),
+            )
+        ):
+            raise ValueError("shared_feedback_not_allowed")
         session = await manager.async_feedback(
             profile_id,
             msg["session_id"],
@@ -453,7 +604,9 @@ async def ws_feedback(hass, connection, msg) -> None:
             msg["id"],
             {
                 "session": session,
-                "profile": manager.get_profile_summary(profile_id),
+                "profile": _profile_summary_for_connection(
+                    connection, entry, manager.get_profile_summary(profile_id)
+                ),
             },
         )
     except (ValueError, KeyError) as err:
@@ -513,6 +666,8 @@ def ws_profiles(hass, connection, msg) -> None:
 def ws_profile_export(hass, connection, msg) -> None:
     """Export only compact personal learning state, never session/weather history."""
     try:
+        if not PROFILE_BACKUP_ENABLED:
+            raise ValueError("profile_backup_disabled")
         entry, runtime = _runtime(hass, msg.get("entry_id"))
         manager: ProfileManager = runtime["profiles"]
         own_id = str(connection.user.id)
@@ -551,6 +706,8 @@ async def ws_profile_import(hass, connection, msg) -> None:
     and use that profile for advice.
     """
     try:
+        if not PROFILE_BACKUP_ENABLED:
+            raise ValueError("profile_backup_disabled")
         entry, runtime = _runtime(hass, msg.get("entry_id"))
         manager: ProfileManager = runtime["profiles"]
         own_id = str(connection.user.id)

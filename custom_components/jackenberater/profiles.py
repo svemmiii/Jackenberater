@@ -32,6 +32,13 @@ from .const import (
 )
 from .learning import PersonalModel, apply_feedback, should_request_feedback
 from .models import Recommendation
+from .time_utils import (
+    elapsed,
+    instant_key,
+    is_at_or_after,
+    is_before,
+    real_add,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -190,6 +197,7 @@ class ProfileManager:
         *,
         weather_context: dict[str, Any],
         learning_contexts: dict[str, dict[str, Any]],
+        opened_by_user_id: str = "",
     ) -> dict[str, Any]:
         now = dt_util.now()
         raw = self._profiles[profile_id]
@@ -201,15 +209,21 @@ class ProfileManager:
         # duplicate training candidates from repeated taps.
         for session in reversed(sessions):
             created = _parse_dt(session.get("created_at"))
-            if created is None or (now - created).total_seconds() > 600:
+            if created is None:
+                continue
+            age_seconds = elapsed(created, now).total_seconds()
+            if age_seconds < 0:
+                continue
+            if age_seconds > 600:
                 break
             if (
                 session.get("feedback") is None
+                and session.get("opened_by_user_id") == opened_by_user_id
                 and _session_context_matches(
                     session, recommendation, weather_context, learning_contexts
                 )
             ):
-                return deepcopy(session)
+                return _public_session(session)
 
         model = self.get_model(profile_id)
         near_threshold = "near_threshold" in recommendation.reasons
@@ -232,13 +246,19 @@ class ProfileManager:
         )
         raw["model"] = model.to_dict()
 
-        ready_at = now + FEEDBACK_MIN_DELAY
+        ready_at = real_add(now, FEEDBACK_MIN_DELAY)
         if (
             recommendation.later_at is not None
             and recommendation.jacket_later != recommendation.jacket_now
         ):
-            ready_at = max(ready_at, recommendation.later_at + FEEDBACK_MIN_DELAY)
-        expires_at = now + SESSION_EXPIRY
+            ready_at = max(
+                (
+                    ready_at,
+                    real_add(recommendation.later_at, FEEDBACK_MIN_DELAY),
+                ),
+                key=instant_key,
+            )
+        expires_at = real_add(now, SESSION_EXPIRY)
         session = {
             "id": uuid.uuid4().hex[:12],
             "created_at": now.isoformat(),
@@ -250,26 +270,50 @@ class ProfileManager:
             "learning_contexts": learning_contexts,
             "feedback": None,
             "learning_before": None,
+            "opened_by_user_id": opened_by_user_id,
         }
         sessions.append(session)
         self._cap_sessions(profile_id)
         self._schedule_save()
-        return deepcopy(session)
+        return _public_session(session)
 
-    def feedback_candidates(self, profile_id: str) -> list[dict[str, Any]]:
+    def feedback_candidates(
+        self, profile_id: str, *, opened_by_user_id: str | None = None
+    ) -> list[dict[str, Any]]:
         now = dt_util.now()
         self._cleanup_profile(profile_id, now)
         candidates: list[dict[str, Any]] = []
         for session in reversed(self._sessions(profile_id)):
+            if (
+                opened_by_user_id is not None
+                and session.get("opened_by_user_id") != opened_by_user_id
+            ):
+                continue
             if session.get("feedback") is not None or not session.get("request_feedback"):
                 continue
             ready = _parse_dt(session.get("ready_at"))
             expires = _parse_dt(session.get("expires_at"))
-            if ready and expires and ready <= now < expires:
+            if (
+                ready
+                and expires
+                and is_at_or_after(now, ready)
+                and is_before(now, expires)
+            ):
                 candidates.append(_public_session(session))
             if len(candidates) >= MAX_OPEN_FEEDBACK:
                 break
         return candidates
+
+    def is_feedback_candidate(
+        self, profile_id: str, session_id: str, *, opened_by_user_id: str
+    ) -> bool:
+        """Verify that a shared login may answer this mature, owned session."""
+        return any(
+            candidate.get("id") == session_id
+            for candidate in self.feedback_candidates(
+                profile_id, opened_by_user_id=opened_by_user_id
+            )
+        )
 
     async def async_feedback(
         self,
@@ -292,7 +336,7 @@ class ProfileManager:
         if session.get("feedback") is not None:
             raise ValueError("feedback already submitted")
         expires = _parse_dt(session.get("expires_at"))
-        if expires is not None and dt_util.now() >= expires:
+        if expires is not None and is_at_or_after(dt_util.now(), expires):
             raise ValueError("feedback expired")
 
         model = self.get_model(profile_id)
@@ -441,7 +485,11 @@ class ProfileManager:
         kept: list[dict[str, Any]] = []
         for session in sessions:
             expires = _parse_dt(session.get("expires_at"))
-            if session.get("feedback") is None and expires and now >= expires:
+            if (
+                session.get("feedback") is None
+                and expires
+                and is_at_or_after(now, expires)
+            ):
                 continue
             kept.append(session)
         self._profiles[profile_id]["sessions"] = _bounded_sessions(kept)
@@ -471,6 +519,7 @@ def _public_session(session: dict[str, Any]) -> dict[str, Any]:
     result = deepcopy(session)
     result.pop("learning_before", None)
     result.pop("learning_contexts", None)
+    result.pop("opened_by_user_id", None)
     return result
 
 

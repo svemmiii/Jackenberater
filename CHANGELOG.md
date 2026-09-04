@@ -1,9 +1,38 @@
 # Changelog
 
+## v0.1.3
+
+### Wandtablet-Sessions und Feedback
+
+- Der normale Aufklapp-Pfeil startet auf einem Wandtablet eine Empfehlungssession ausschließlich für das aktuell ausgewählte Profil.
+- Eine bloß sichtbare Karte, das eingekreiste Infofeld und ein Tablet ohne gewähltes Profil erzeugen weiterhin keine Session.
+- Fälliges Feedback kann auf dem Wandtablet beantwortet werden und nennt das betroffene Profil ausdrücklich. Zugelassen sind nur reife Feedback-Sessions, die dasselbe Shared-Konto zuvor für dasselbe Profil geöffnet hat.
+- Profilwechsel löschen den lokalen Session-/Feedbackkontext. Manuelles Sofort-Feedback, Setup, Lernpause, Reset, Undo und andere Wartungsaktionen bleiben auf Shared-Konten gesperrt.
+
+### Sichtbares Lernprofil und sicherer Testmodus
+
+- Die persönliche Karte bündelt die Werte im aufklappbaren Bereich **„Was hat dieses Profil gelernt?“**. Shared-/Wandtablet-Konten erhalten keine detaillierten fremden Lernwerte.
+- Pro Profil wird ein kompakter Diagnose-Sensor vorbereitet, aber aus Datenschutzgründen standardmäßig deaktiviert. Ein Administrator kann ihn gezielt zum Troubleshooting aktivieren; sein Zustand zeigt die Zahl der verarbeiteten Bewertungen, seine Modellattribute sind von der Recorder-Historie ausgeschlossen.
+- Manuell unter **Entwicklerwerkzeuge → Zustände** gesetzte Sensorwerte werden als flüchtige, begrenzte Simulation ausgewertet und sichtbar als Testmodus markiert.
+- Simulationen arbeiten ausschließlich auf einer Modellkopie im Arbeitsspeicher. Dabei entstehen weder Sessions noch Nutzungs-/Feedbackzähler, Lernen, Feedbackkandidaten oder Undo-Änderungen; gespeichertes Modell und gespeicherte Sessions bleiben unverändert.
+- Ein echter Profilvorgang oder Neustart verwirft die Simulation und stellt den gespeicherten Stand wieder her.
+
+### Aufräumen und Absicherung
+
+- Profil-Export und -Import bleiben im Code erhalten, sind aber vorerst deaktiviert: keine Karten-Schaltflächen, keine registrierten WebSocket-Befehle und defensive Ablehnung bei direktem Handler-Aufruf.
+- Der Vorschau-Crash durch das fehlplatzierte `simulation_active`-Feld ist behoben und wird nun über den echten `ws_preview`-Handler getestet.
+- Forecast-, Arbeits-, Kalender-, Cache-, Session- und Feedback-Zeiten werden für Dauer, Vergleich, Sortierung und Schlüssel konsequent als UTC-Zeitpunkte behandelt. Eigene Regressionstests decken Sommerzeitlücke, Winterzeitwiederholung und beide `fold`-Stunden ab.
+- Fehlende oder nur teilweise Arbeitsforecast-Abdeckung wird direkt in der normalen aufgeklappten Beratung sichtbar gewarnt, nicht erst im zusätzlichen Infofeld.
+- Erfolgreich leere Kalender und nicht erreichbare Kalender werden getrennt behandelt. Bei einem Ausfall bleibt der Kontext sichtbar `unavailable`; ein ausgefallener Abwesenheitskalender deaktiviert vorsichtshalber die Arbeitsortplanung, statt „keine Abwesenheit“ anzunehmen. Die Karte bleibt dafür auch dann sichtbar, wenn sie thermisch sonst ausgeblendet wäre.
+- Der Testmodus erkennt manuelle Zustandsänderungen über deren Benutzerkontext und besitzt keinen hängenbleibenden „ignoriere nächstes Ereignis“-Schalter mehr.
+- Die neue Diagnose-Entität ersetzt nicht die alten v0.1.1-Schalter und Buttons; deren Registry-Einträge und verwaiste Gerätekarte werden beim Start weiterhin bereinigt.
+- Teststand v0.1.3: **141 lokale Python-Tests** plus funktionaler Frontend-Vertragstest. CI enthält zusätzlich einen echten Home-Assistant-2026.9-Runtime-Smoke-Test unter Python 3.14 für Setup, Sensorplattform, WebSockets, Reload und Unload.
+
 ## v0.1.2
 
 ### Audit-Korrekturen vor der Erstveröffentlichung
 
+- Beim Start entfernt die Integration automatisch verwaiste Schalter, Buttons, Diagnosesensoren und die alte Gerätekarte aus der Home-Assistant-Registry. Damit verschwinden nach einem Update die ausgegrauten v0.1.1-Einträge aus der Geräteansicht.
 - Shared-/Wandtablet-Konten sind reine Anzeige- und Auswahlkonten. Sie dürfen fremde Profile für Empfehlungen auswählen, aber weder Sessions/Feedback erzeugen noch Setup, Wartung, Undo, Reset oder Export ausführen; Administratoren behalten diese Rechte.
 - Shared-Vorschauen enthalten keine offenen Feedbacks, letzte Session oder detaillierte Lernstatistik des ausgewählten Profils.
 - Arbeits- und Kalender-Caches akzeptieren nur ein Alter zwischen null und 15 Minuten; zukünftige Zeitstempel nach Uhrkorrekturen erzwingen eine Aktualisierung.

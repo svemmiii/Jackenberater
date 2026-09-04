@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import importlib.util
 from pathlib import Path
 import sys
 import types
+from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).parents[1] / "custom_components" / "jackenberater"
 PKG = "jackenberater_profiles_testpkg"
@@ -383,6 +384,90 @@ def test_recent_session_reuses_nearly_identical_learning_context():
         assert second["id"] == first["id"]
 
     asyncio.run(run())
+
+
+def test_recent_sessions_are_scoped_to_the_login_that_opened_them():
+    async def run():
+        manager = make_manager()
+        rec = recommendation()
+        context = {
+            "start": {"jacket": const.JACKET_LIGHT, "effective_c": 15.0},
+            "later": {"jacket": const.JACKET_LIGHT, "effective_c": 15.0},
+        }
+        first = await manager.async_open_session(
+            "user", rec, weather_context={"condition": "cloudy"},
+            learning_contexts=context, opened_by_user_id="tablet-a",
+        )
+        same_login = await manager.async_open_session(
+            "user", rec, weather_context={"condition": "cloudy"},
+            learning_contexts=context, opened_by_user_id="tablet-a",
+        )
+        other_login = await manager.async_open_session(
+            "user", rec, weather_context={"condition": "cloudy"},
+            learning_contexts=context, opened_by_user_id="tablet-b",
+        )
+        assert same_login["id"] == first["id"]
+        assert other_login["id"] != first["id"]
+        assert "opened_by_user_id" not in first
+        assert "opened_by_user_id" not in other_login
+
+    asyncio.run(run())
+
+
+def test_session_feedback_delay_and_expiry_use_real_time_across_dst():
+    async def run():
+        manager = make_manager()
+        start = datetime(2026, 3, 28, 20, tzinfo=ZoneInfo("Europe/Berlin"))
+        original_now = profiles.dt_util.now
+        profiles.dt_util.now = lambda: start
+        try:
+            session = await manager.async_open_session(
+                "user",
+                recommendation(),
+                weather_context={"condition": "cloudy"},
+                learning_contexts={
+                    "start": {"jacket": const.JACKET_LIGHT, "effective_c": 15.0},
+                    "later": {"jacket": const.JACKET_LIGHT, "effective_c": 15.0},
+                },
+            )
+        finally:
+            profiles.dt_util.now = original_now
+
+        ready = profiles._parse_dt(session["ready_at"])
+        expires = profiles._parse_dt(session["expires_at"])
+        assert profiles.elapsed(start, ready) == timedelta(minutes=30)
+        assert profiles.elapsed(start, expires) == timedelta(hours=36)
+
+    asyncio.run(run())
+
+
+def test_feedback_candidates_can_be_scoped_to_the_opening_login():
+    manager = make_manager()
+    manager._profiles["user"]["sessions"] = [
+        {
+            "id": "a", "created_at": "2026-09-01T10:00:00+00:00",
+            "ready_at": "2026-09-01T11:00:00+00:00",
+            "expires_at": "2026-09-02T11:00:00+00:00",
+            "request_feedback": True, "feedback": None,
+            "opened_by_user_id": "tablet-a",
+        },
+        {
+            "id": "b", "created_at": "2026-09-01T10:05:00+00:00",
+            "ready_at": "2026-09-01T11:00:00+00:00",
+            "expires_at": "2026-09-02T11:00:00+00:00",
+            "request_feedback": True, "feedback": None,
+            "opened_by_user_id": "tablet-b",
+        },
+    ]
+    assert [item["id"] for item in manager.feedback_candidates(
+        "user", opened_by_user_id="tablet-a"
+    )] == ["a"]
+    assert manager.is_feedback_candidate(
+        "user", "a", opened_by_user_id="tablet-a"
+    ) is True
+    assert manager.is_feedback_candidate(
+        "user", "b", opened_by_user_id="tablet-a"
+    ) is False
 
 
 def test_existing_profile_rename_emits_profile_update_signal():

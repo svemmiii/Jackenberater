@@ -118,7 +118,7 @@ assert.ok(Card, "jackenberater-card must register itself");
   assert.equal(sharedCard._preview, null, "shared account must wait for a real user profile selection");
 
   assert.match(source, /this\._autoShared = Boolean\(profiles\?\.shared_account\)/, "shared HA accounts must switch the card automatically");
-  assert.match(source, /Shared wall tablets are read-only recommendation surfaces/, "shared tablets must remain read-only");
+  assert.match(source, /Simulated profile values may affect display only/, "simulation must remain display-only");
   assert.match(source, /unusualDay:\s*"Today was unusual/, "English unusual-day label must exist");
 
   const hiddenCard = new Card();
@@ -127,6 +127,26 @@ assert.ok(Card, "jackenberater-card must register itself");
   assert.equal(hiddenCard.getCardSize(), 0, "closed hidden card may report size zero");
   hiddenCard._open = true;
   assert.equal(hiddenCard.getCardSize(), 6, "opened hidden card must keep a real layout size");
+
+  const calendarWarningCard = new Card();
+  calendarWarningCard._config = { type: "custom:jackenberater-card" };
+  calendarWarningCard._hass = { language: "de" };
+  calendarWarningCard._preview = {
+    recommendation: {
+      display_mode: "hidden",
+      jacket_now: "none",
+      jacket_later: "none",
+      context_calendar_status: "unavailable",
+      vacation_calendar_status: "unavailable",
+    },
+    profile: { setup_complete: true },
+    feedback: [],
+  };
+  calendarWarningCard._bind = () => {};
+  assert.equal(calendarWarningCard.getCardSize(), 2, "calendar outages must keep an otherwise hidden card visible");
+  calendarWarningCard._render();
+  assert.match(calendarWarningCard.innerHTML, /Kontextkalender nicht verfügbar/, "context-calendar outage must be visible");
+  assert.match(calendarWarningCard.innerHTML, /Abwesenheitskalender nicht verfügbar/, "vacation-calendar outage must be visible");
 
   assert.match(source, /Wie aktiv bist du dabei\?/, "evening setup question must measure the activity used by the model");
 
@@ -168,7 +188,7 @@ assert.ok(Card, "jackenberater-card must register itself");
   await reloadedCard._openAdvice();
   assert.equal(reloadedCard._selectedProfile, "user", "closing details must not forget the wall-tablet profile");
 
-  // Info field explains assumptions and exposes compact profile backup controls.
+  // Info field explains assumptions and keeps profile backups disabled.
   textCard._currentUserId = "user";
   const infoHtml = textCard._infoPanel(
     {
@@ -178,7 +198,7 @@ assert.ok(Card, "jackenberater-card must register itself");
     },
     { id: "user", confidence: 0.64 },
   );
-  assert.match(infoHtml, /data-action="profile-export"/, "info panel must offer compact profile export");
+  assert.doesNotMatch(infoHtml, /profile-export|profile-import/, "disabled profile backups must not be shown");
   assert.match(infoHtml, /Betrachtet/, "info panel must explain the current horizon");
   assert.match(source, /jackenberater\/profile_import/, "frontend must support profile restore");
   assert.match(source, /mdi:information-outline/, "card must expose the circled information control");
@@ -191,14 +211,44 @@ assert.ok(Card, "jackenberater-card must register itself");
   sharedReadOnlyCard._selectedProfile = "user";
   sharedReadOnlyCard._preview = { profile: { id: "user", setup_complete: true } };
   sharedReadOnlyCard._render = () => {};
-  sharedReadOnlyCard._send = async () => { throw new Error("read-only tablet attempted a write"); };
+  let sharedOpenCalls = 0;
+  sharedReadOnlyCard._send = async (type) => {
+    assert.equal(type, "jackenberater/open_session");
+    sharedOpenCalls += 1;
+    return { session: null, recommendation: { reasons: [] }, feedback: [] };
+  };
   await sharedReadOnlyCard._openAdvice();
-  assert.equal(sharedReadOnlyCard._open, true, "shared tablet may open read-only details");
+  assert.equal(sharedOpenCalls, 1, "shared tablet details must open a profile-scoped session");
+  assert.equal(sharedReadOnlyCard._session, null, "shared session internals must stay server-side");
+  assert.equal(sharedReadOnlyCard._open, true, "shared tablet may open details");
   const sharedInfo = sharedReadOnlyCard._infoPanel(
     { horizon_hours: 9, stay_context: "unknown", trend: "stable", forecast_coverage_complete: true },
     { id: "user" },
   );
   assert.doesNotMatch(sharedInfo, /profile-export|data-maintenance/, "shared tablet must not expose profile write or export controls");
+
+  const simulatedSharedCard = new Card();
+  simulatedSharedCard._autoShared = true;
+  simulatedSharedCard._isAdmin = false;
+  simulatedSharedCard._selectedProfile = "user";
+  simulatedSharedCard._preview = {
+    profile: { id: "user", setup_complete: true },
+    recommendation: { simulation_active: true },
+  };
+  simulatedSharedCard._render = () => {};
+  simulatedSharedCard._send = async () => { throw new Error("simulation attempted to create a session"); };
+  await simulatedSharedCard._openAdvice();
+  assert.equal(simulatedSharedCard._open, true, "simulated values may still open display details");
+
+  const feedbackHeading = textCard._details(
+    {
+      reasons: [], rain_status: "none", current_temperature_c: 15,
+      current_wind_kmh: 5, horizon_hours: 9, work_context: false,
+    },
+    { name: "Sven", confidence: 0.5, total_feedback: 0 },
+    [session],
+  );
+  assert.match(feedbackHeading, /Feedback für Sven/, "pending wall-tablet feedback must name its profile");
 
   const gustDetails = textCard._details(
     {
@@ -209,6 +259,16 @@ assert.ok(Card, "jackenberater-card must register itself");
     [],
   );
   assert.match(gustDetails, /Böen 30 km\/h/, "gusts used by the engine should be visible in details");
+  const partialWorkDetails = textCard._details(
+    {
+      reasons: [], rain_status: "none", current_temperature_c: 10,
+      current_wind_kmh: 5, horizon_hours: 9, work_context: true,
+      work_forecast_coverage: "partial", work_weather_available: false,
+    },
+    { confidence: 0.5, total_feedback: 0 },
+    [],
+  );
+  assert.match(partialWorkDetails, /Arbeitsforecast nur teilweise abgedeckt/, "partial work coverage must be visible in normal details");
   assert.match(textCard._errorText(new Error("work_weather_unavailable")), /Arbeitswetter/, "work-weather outage should be explained instead of showing a raw backend code");
 
   console.log("frontend session contract OK");

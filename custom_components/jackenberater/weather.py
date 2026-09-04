@@ -16,6 +16,7 @@ from homeassistant.const import UnitOfLength, UnitOfTemperature
 
 from .const import CONF_WEATHER, CONF_WORK_WEATHER, FORECAST_REFRESH
 from .models import WeatherPoint
+from .time_utils import instant_key
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -184,7 +185,7 @@ def normalize_forecast(
                 condition=raw.get("condition") if isinstance(raw.get("condition"), str) else None,
             )
         )
-    result.sort(key=lambda item: item.dt)
+    result.sort(key=lambda item: instant_key(item.dt))
     return result
 
 

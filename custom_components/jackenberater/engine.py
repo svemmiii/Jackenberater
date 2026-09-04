@@ -11,7 +11,6 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 import math
 from typing import Callable, Iterable
-from zoneinfo import ZoneInfo
 
 from .const import (
     BASE_LIGHT_THRESHOLD_C,
@@ -34,6 +33,15 @@ from .const import (
 )
 from .learning import PersonalModel
 from .models import Recommendation, ThermalResult, WeatherPoint
+from .time_utils import (
+    elapsed,
+    instant_key,
+    is_after,
+    is_at_or_before,
+    is_between,
+    is_before,
+    real_add,
+)
 
 
 RAIN_CONDITIONS = {
@@ -176,8 +184,8 @@ def build_recommendation(
     )
 
     forecast = sorted(
-        (point for point in forecast if point.dt > current.dt),
-        key=lambda point: point.dt,
+        (point for point in forecast if is_after(point.dt, current.dt)),
+        key=lambda point: instant_key(point.dt),
     )
     horizon_points, horizon_hours = _select_horizon(
         current.dt,
@@ -268,8 +276,12 @@ def build_recommendation(
     # future decision or bypass the global calendar/work maximum horizon.
     work_limit = _absolute_horizon_end(current.dt, CALENDAR_MAX_HOURS)
     work_points = sorted(
-        (p for p in (work_points or []) if current.dt < p.dt <= work_limit),
-        key=lambda p: p.dt,
+        (
+            p
+            for p in (work_points or [])
+            if is_after(p.dt, current.dt) and is_at_or_before(p.dt, work_limit)
+        ),
+        key=lambda p: instant_key(p.dt),
     )
     work_jacket: str | None = None
     work_context = bool(work_points)
@@ -298,16 +310,25 @@ def build_recommendation(
                 later_at = work_target_point.dt
                 later_point = work_target_point
                 later_result = work_target_result
-        latest_work = max((p.dt for p in work_points), default=None)
+        latest_work = max(
+            (p.dt for p in work_points), default=None, key=instant_key
+        )
         if latest_work is not None:
             work_hours = math.ceil(
-                max(0.0, (latest_work - current.dt).total_seconds()) / 3600.0
+                max(0.0, elapsed(current.dt, latest_work).total_seconds()) / 3600.0
             )
             horizon_hours = max(
                 horizon_hours, min(CALENDAR_MAX_HOURS, work_hours)
             )
 
-    later_context = "work" if (later_at is not None and any(p.dt == later_at for p in work_points)) else "home"
+    later_context = (
+        "work"
+        if (
+            later_at is not None
+            and any(instant_key(p.dt) == instant_key(later_at) for p in work_points)
+        )
+        else "home"
+    )
 
     # later_* describes a real final class change. A work override may cancel a
     # previously detected home change, in which case no future feedback target may
@@ -461,10 +482,7 @@ def _trend_label(
 
 def _absolute_horizon_end(now: datetime, hours: int) -> datetime:
     """Return a horizon measured in elapsed hours across DST boundaries."""
-    if now.tzinfo is None:
-        return now + timedelta(hours=hours)
-    utc = ZoneInfo("UTC")
-    return (now.astimezone(utc) + timedelta(hours=hours)).astimezone(now.tzinfo)
+    return real_add(now, timedelta(hours=hours))
 
 
 def _transition_boundary(
@@ -494,11 +512,11 @@ def _transient_burden_degree_minutes(
     samples.extend(
         (point.dt, result.effective_temperature_c)
         for point, result in future_results
-        if current_dt < point.dt < until
+        if is_after(point.dt, current_dt) and is_before(point.dt, until)
     )
     # At the persistent change point the mismatch has effectively reached zero.
     samples.append((until, boundary))
-    samples.sort(key=lambda item: item[0])
+    samples.sort(key=lambda item: instant_key(item[0]))
 
     def mismatch(value: float) -> float:
         if direction == "warming":
@@ -507,7 +525,7 @@ def _transient_burden_degree_minutes(
 
     burden = 0.0
     for (a_dt, a_value), (b_dt, b_value) in zip(samples, samples[1:], strict=False):
-        minutes = max(0.0, (b_dt - a_dt).total_seconds() / 60.0)
+        minutes = max(0.0, elapsed(a_dt, b_dt).total_seconds() / 60.0)
         burden += (mismatch(a_value) + mismatch(b_value)) * 0.5 * minutes
     return burden
 
@@ -556,11 +574,15 @@ def _transient_now_override(
 
     if not candidates:
         return None
-    until, target_rank, direction = min(candidates, key=lambda item: item[0])
+    until, target_rank, direction = min(
+        candidates, key=lambda item: instant_key(item[0])
+    )
     if target_rank < 0 or target_rank >= len(JACKET_LEVELS):
         return None
 
-    duration_minutes = max(0.0, (until - current_dt).total_seconds() / 60.0)
+    duration_minutes = max(
+        0.0, elapsed(current_dt, until).total_seconds() / 60.0
+    )
     if duration_minutes <= 0:
         return None
 
@@ -766,7 +788,10 @@ def _rain_status_forecast_only(forecast: list[WeatherPoint]) -> str:
     pouring = False
     previous_dt: datetime | None = None
     for point, probability in zip(relevant, probabilities, strict=False):
-        if previous_dt is not None and point.dt - previous_dt > timedelta(minutes=90):
+        if (
+            previous_dt is not None
+            and elapsed(previous_dt, point.dt) > timedelta(minutes=90)
+        ):
             # Missing hours break a rain streak. Two rainy points five hours apart
             # are not a continuous rain period just because they are adjacent in
             # the provider list.
@@ -821,21 +846,27 @@ def _forecast_covers_horizon(
     """
     if horizon_hours <= 0:
         return False
-    target = origin + timedelta(hours=horizon_hours)
+    target = real_add(origin, timedelta(hours=horizon_hours))
+    latest_allowed = real_add(target, max_gap)
     points = sorted(
-        (point for point in forecast if origin < point.dt <= target + max_gap),
-        key=lambda point: point.dt,
+        (
+            point
+            for point in forecast
+            if is_after(point.dt, origin)
+            and is_at_or_before(point.dt, latest_allowed)
+        ),
+        key=lambda point: instant_key(point.dt),
     )
-    if not points or points[0].dt - origin > max_gap:
+    if not points or elapsed(origin, points[0].dt) > max_gap:
         return False
     previous = points[0].dt
     for point in points[1:]:
-        if point.dt - previous > max_gap:
+        if elapsed(previous, point.dt) > max_gap:
             return False
         previous = point.dt
-        if previous >= target:
+        if not is_before(previous, target):
             return True
-    return target - previous <= max_gap
+    return elapsed(previous, target) <= max_gap
 
 
 def _select_horizon(
@@ -851,13 +882,17 @@ def _select_horizon(
     if not forecast:
         return [], 0
 
-    base_end = origin + timedelta(hours=base_horizon_hours)
-    max_end = origin + timedelta(hours=max_horizon_hours)
-    points = [point for point in forecast if origin < point.dt <= max_end]
+    base_end = real_add(origin, timedelta(hours=base_horizon_hours))
+    max_end = real_add(origin, timedelta(hours=max_horizon_hours))
+    points = [
+        point
+        for point in forecast
+        if is_after(point.dt, origin) and is_at_or_before(point.dt, max_end)
+    ]
     if not points:
         return [], 0
-    base = [point for point in points if point.dt <= base_end]
-    extension = [point for point in points if point.dt > base_end]
+    base = [point for point in points if is_at_or_before(point.dt, base_end)]
+    extension = [point for point in points if is_after(point.dt, base_end)]
 
     def actual_hours(selected: list[WeatherPoint]) -> int:
         if not selected:
@@ -866,7 +901,7 @@ def _select_horizon(
             0,
             min(
                 max_horizon_hours,
-                math.ceil((selected[-1].dt - origin).total_seconds() / 3600.0),
+                math.ceil(elapsed(origin, selected[-1].dt).total_seconds() / 3600.0),
             ),
         )
 
@@ -962,17 +997,19 @@ def merge_location_timeline(
     provide the same timestamp, the context-appropriate point wins.
     """
     if not work_windows:
-        return sorted(home_points, key=lambda point: point.dt)
+        return sorted(home_points, key=lambda point: instant_key(point.dt))
 
     def in_work_window(point: WeatherPoint) -> bool:
-        return any(start <= point.dt <= end for start, end in work_windows)
+        return any(is_between(point.dt, start, end) for start, end in work_windows)
 
     merged: dict[datetime, WeatherPoint] = {
-        point.dt: point for point in home_points if not in_work_window(point)
+        instant_key(point.dt): point
+        for point in home_points
+        if not in_work_window(point)
     }
     for point in work_points:
         if in_work_window(point):
-            merged[point.dt] = point
+            merged[instant_key(point.dt)] = point
     return [merged[key] for key in sorted(merged)]
 
 

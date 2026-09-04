@@ -8,6 +8,8 @@ from homeassistant.components.http import StaticPathConfig
 from homeassistant.components.lovelace.const import LOVELACE_DATA, MODE_STORAGE
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import entity_registry as er
 
 from .api import async_register_api
 from .const import (
@@ -20,6 +22,7 @@ from .const import (
     DEFAULT_WORKDAY_START,
     DOMAIN,
     INTEGRATION_VERSION,
+    PLATFORMS,
     WORK_MODE_SHIFT,
     WORK_MODE_WEEKDAY,
 )
@@ -30,6 +33,42 @@ _LOGGER = logging.getLogger(__name__)
 
 FRONTEND_URL = "/jackenberater/frontend"
 FRONTEND_FILE = "jackenberater-card.js"
+LEGACY_PROFILE_ENTITY_SUFFIXES = (
+    "_learning_enabled",
+    "_reset_learning",
+    "_undo_feedback",
+    "_learning_status",
+)
+
+
+def _async_remove_legacy_profile_entities(
+    hass: HomeAssistant, entry: ConfigEntry
+) -> None:
+    """Remove registry leftovers from the retired global profile platforms."""
+    entity_registry = er.async_get(hass)
+    for entity in list(er.async_entries_for_config_entry(entity_registry, entry.entry_id)):
+        if (
+            entity.platform == DOMAIN
+            and entity.entity_id.split(".", 1)[0] in {"button", "switch", "sensor"}
+            and entity.unique_id.startswith(f"{entry.entry_id}_")
+            and entity.unique_id.endswith(LEGACY_PROFILE_ENTITY_SUFFIXES)
+        ):
+            entity_registry.async_remove(entity.entity_id)
+
+    # The old entities all shared one integration-owned device. Once their
+    # registry entries are gone, remove that obsolete device card as well.
+    device_registry = dr.async_get(hass)
+    remaining_device_ids = {
+        entity.device_id
+        for entity in er.async_entries_for_config_entry(entity_registry, entry.entry_id)
+        if entity.device_id is not None
+    }
+    for device in list(dr.async_entries_for_config_entry(device_registry, entry.entry_id)):
+        if (
+            (DOMAIN, entry.entry_id) in device.identifiers
+            and device.id not in remaining_device_ids
+        ):
+            device_registry.async_remove_device(device.id)
 
 
 async def _async_register_frontend(hass: HomeAssistant) -> None:
@@ -100,6 +139,7 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    _async_remove_legacy_profile_entities(hass, entry)
     await _async_register_frontend(hass)
     async_register_api(hass)
 
@@ -112,14 +152,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "profiles": manager,
         "coordinator": coordinator,
         "context_cache": {},
+        "simulations": {},
     }
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     entry.async_on_unload(entry.add_update_listener(_async_reload))
     return True
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
-    return True
+    unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    if unloaded:
+        hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
+    return unloaded
 
 
 async def _async_reload(hass: HomeAssistant, entry: ConfigEntry) -> None:

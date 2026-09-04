@@ -174,5 +174,12 @@
       "already_configured": "Jacket Advisor is already configured.",
       "reconfigure_successful": "Jacket Advisor was updated."
     }
+  },
+  "entity": {
+    "sensor": {
+      "profile_diagnostics": {
+        "name": "Learning profile {name}"
+      }
+    }
   }
 }
