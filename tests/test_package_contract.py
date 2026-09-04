@@ -74,3 +74,12 @@ def test_profile_backup_is_disabled_in_backend_and_frontend():
     assert "PROFILE_BACKUP_ENABLED = False" in const_source
     assert "if PROFILE_BACKUP_ENABLED:" in api_source
     assert "const JB_PROFILE_BACKUP_ENABLED = false;" in frontend_source
+
+
+def test_ha_runtime_job_imports_repository_package_reliably():
+    pytest_config = (ROOT / "pytest.ini").read_text(encoding="utf-8")
+    workflow = (ROOT / ".github" / "workflows" / "validate.yml").read_text(
+        encoding="utf-8"
+    )
+    assert "pythonpath = ." in pytest_config
+    assert "python -m pytest -q tests/ha_runtime" in workflow

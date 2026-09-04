@@ -24,9 +24,10 @@
 - Forecast-, Arbeits-, Kalender-, Cache-, Session- und Feedback-Zeiten werden für Dauer, Vergleich, Sortierung und Schlüssel konsequent als UTC-Zeitpunkte behandelt. Eigene Regressionstests decken Sommerzeitlücke, Winterzeitwiederholung und beide `fold`-Stunden ab.
 - Fehlende oder nur teilweise Arbeitsforecast-Abdeckung wird direkt in der normalen aufgeklappten Beratung sichtbar gewarnt, nicht erst im zusätzlichen Infofeld.
 - Erfolgreich leere Kalender und nicht erreichbare Kalender werden getrennt behandelt. Bei einem Ausfall bleibt der Kontext sichtbar `unavailable`; ein ausgefallener Abwesenheitskalender deaktiviert vorsichtshalber die Arbeitsortplanung, statt „keine Abwesenheit“ anzunehmen. Die Karte bleibt dafür auch dann sichtbar, wenn sie thermisch sonst ausgeblendet wäre.
+- Der Home-Assistant-Runtime-Test nimmt das Repository jetzt ausdrücklich in den Python-Importpfad auf und wird über `python -m pytest` gestartet; dadurch lässt sich `custom_components.jackenberater` auch im isolierten CI-Job zuverlässig importieren.
 - Der Testmodus erkennt manuelle Zustandsänderungen über deren Benutzerkontext und besitzt keinen hängenbleibenden „ignoriere nächstes Ereignis“-Schalter mehr.
 - Die neue Diagnose-Entität ersetzt nicht die alten v0.1.1-Schalter und Buttons; deren Registry-Einträge und verwaiste Gerätekarte werden beim Start weiterhin bereinigt.
-- Teststand v0.1.3: **141 lokale Python-Tests** plus funktionaler Frontend-Vertragstest. CI enthält zusätzlich einen echten Home-Assistant-2026.9-Runtime-Smoke-Test unter Python 3.14 für Setup, Sensorplattform, WebSockets, Reload und Unload.
+- Teststand v0.1.3: **142 lokale Python-Tests** plus funktionaler Frontend-Vertragstest. CI enthält zusätzlich einen echten Home-Assistant-2026.9-Runtime-Smoke-Test unter Python 3.14 für Setup, Sensorplattform, WebSockets, Reload und Unload.
 
 ## v0.1.2
 

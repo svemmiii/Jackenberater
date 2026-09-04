@@ -30,7 +30,7 @@ jobs:
         with:
           python-version: "3.14"
       - run: python -m pip install --upgrade pip pytest-homeassistant-custom-component==0.13.363
-      - run: pytest -q tests/ha_runtime
+      - run: python -m pytest -q tests/ha_runtime
 
   hassfest:
     runs-on: ubuntu-latest
