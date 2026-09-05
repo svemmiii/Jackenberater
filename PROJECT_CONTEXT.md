@@ -1,45 +1,50 @@
 # JackenBerater – Projektkontext
 
-Dieses lokale Projekt wurde am 2. September 2026 aus dem ChatGPT-Projekt
-„Jackenberater“ übernommen.
+Dieses lokale Projekt wurde ursprünglich am 2. September 2026 aus dem ChatGPT-Projekt „Jackenberater“ übernommen und seitdem als Home-Assistant-Custom-Integration weiterentwickelt.
 
 - Quellprojekt: https://chatgpt.com/g/g-p-6a983d3dc0288191b241cbfcd430cacf-jackenberater/project
 - Übernommener Chat: „Kältegefühl Tracken“
-- Importierter Stand: JackenBerater v0.1.2
-- Originalpaket: `JackenBerater_v0.1.2.zip`
+- Aktueller Entwicklungsstand: **JackenBerater v0.1.5**
+- Zielumgebung der CI: Home Assistant 2026.9, Runtime-Smoke-Test unter Python 3.14
 
 ## Zweck
 
-JackenBerater ist eine Home-Assistant-Integration, die auf Basis von Wetter,
-persönlichem Kälteempfinden und optionalem Arbeits-/Kalenderkontext eine
-Jackenempfehlung erzeugt.
+JackenBerater erzeugt aus aktuellem Wetter, stündlichem Forecast, persönlichem Wärmeempfinden und optionalem Arbeits-/Kalenderkontext eine nachvollziehbare Jacken- und Regenschutzempfehlung. Das persönliche Modell bleibt kompakt und lernt inkrementell, ohne eine jahrelange Wetter- oder Feedbackhistorie zu speichern.
 
-## In v0.1.2 umgesetzte Schwerpunkte
+## Aktuelle Produktregeln
 
-- Persönliche Trend- und Kurzzeitlogik mit einem Anti-Flattern-Mindestfenster
-  von ungefähr 15 Minuten.
-- Bewertung kurzfristiger Phasen anhand von Dauer, Abstand zur persönlichen
-  Jackengrenze, Wetterverstärkern und anschließendem thermischem Trend.
-- Separat lernende Kurzzeit-Toleranz, ohne die normalen Jackengrenzen
-  unbeabsichtigt zu verändern.
-- Saisonale Feinanpassung mit kompakter, begrenzter Historie.
-- Dauerhafte lokale Personenauswahl für Wandtablets.
-- Verständliches Infofeld zu Zeitraum, Trend, Forecast-Abdeckung, Confidence
-  und verwendetem Arbeits-/Kalenderkontext.
-- Export und Import des kompakten Lernprofils als JSON.
+- Normale Betrachtung: 9 reale Stunden, bei relevanten Änderungen bis etwa 12 Stunden; Kalender-/Arbeitskontext kann bis maximal 16 Stunden erweitern.
+- Aktuelle Wetterquelle ist zuhause, außer innerhalb einer tatsächlichen konfigurierten Arbeitszeit; dann ist das Arbeitswetter maßgeblich. Ein ausgefallenes Zuhause-Wetter darf eine gesunde Arbeitsquelle nicht blockieren.
+- Arbeitsforecast ersetzt Zuhause-Forecast nur innerhalb der geplanten Arbeitsfenster. Fehlende Arbeitsdaten werden nicht still mit Zuhause-Wetter gefüllt und müssen sichtbar gewarnt werden.
+- Eine sichtbare Karte erzeugt keine Session. Erst bewusstes Aufklappen erzeugt eine Nutzungssession; das Infofeld allein nicht.
+- Nahezu identische bewusste Öffnungen desselben Profils innerhalb von zehn Minuten zählen profilweit als eine reale Jackenentscheidung, unabhängig vom Gerät/Login.
+- Fälliges Feedback gehört zum Profil und kann deshalb auf einem freigegebenen Wandtablet beantwortet werden, auch wenn die Session am persönlichen Gerät entstand.
+- Nicht-freiwilliges Feedback ist serverseitig an `request_feedback` und `ready_at` gebunden; freiwilliges Feedback darf bewusst sofort erfolgen.
+- Shared-/Wandtablet-Rechte stammen ausschließlich aus `shared_user_ids` der Integration. Lovelace-`shared: true` ist keine Berechtigung und wird nicht als Shared-Modus ausgewertet.
+- Persönliche Kurzzeit-/Trend- und Saisonanpassungen bleiben begrenzt und ergänzen das allgemeine Wärmeprofil, statt es zu ersetzen.
+- Der sichtbare „Lernstand“ ist ein eigener Fortschrittswert, der im normalen fortlaufenden Lernen nicht durch schwankende Entscheidungs-Confidence zurückfällt; Reset und Undo dürfen ihn bewusst senken. Allgemeine Erfahrung und Jackengrenzen zählen stärker als einzelne Spezialkanäle.
+- Die Arbeitszone dient nur als Anzeigename. Präsenz, Koordinaten oder Zonenstatus werden nicht zur Standortentscheidung verwendet.
 
-## Letzter dokumentierter Prüfstand
+## Wartungs- und Datenschutzregeln
 
-Der Quellchat nennt 108/108 erfolgreiche Python-Tests sowie erfolgreiche
-Prüfungen für Frontend-Vertrag, JavaScript-Syntax, Python-Compile, JSON und
-Paketstruktur. Diese Angaben stammen aus dem Browserprojekt und sollten lokal
-erneut verifiziert werden, bevor v0.1.2 weiterentwickelt oder veröffentlicht
-wird.
+- Profile sind an Home-Assistant-User-IDs gebunden. Gelöschte HA-Nutzer werden aus dem JackenBerater-Store entfernt; umbenannte Nutzer werden beim Profilabruf synchronisiert.
+- Profil-Export/-Import ist im Code vorhanden, aber in v0.1.5 weiterhin deaktiviert.
+- Diagnose-Sensoren sind standardmäßig deaktiviert und ihre Modellattribute von der Recorder-Historie ausgeschlossen.
+- Der Test-/Simulationsmodus darf weder Sessions noch Feedback-Gelegenheiten, Lernen oder Undo-Zustand verändern.
+
+## Letzter lokal verifizierter Prüfstand
+
+- **172 / 172 Python-Tests bestanden** (`pytest -q tests --ignore=tests/ha_runtime`)
+- funktionaler JavaScript-/Frontend-Vertragstest bestanden
+- Python-Dateien kompilierbar
+- JavaScript-Syntaxprüfung bestanden
+- JSON-Dateien syntaktisch gültig
+
+Der separate Home-Assistant-Runtime-Smoke-Test liegt unter `tests/ha_runtime` und wird in CI mit installiertem Home-Assistant-Testframework ausgeführt.
 
 ## Wichtige Produktentscheidung
 
-Eine Jackenstufe soll nicht wegen eines winzigen Zeitfensters zur
-Hauptempfehlung werden. Das Mindestfenster schützt gegen Empfehlungen für nur
-wenige Minuten; oberhalb davon entscheidet weiterhin die persönliche
-thermische Belastung zusammen mit dem längerfristigen Verlauf. Kleidung unter
-der Jacke wird nicht abgefragt.
+Eine Jackenstufe soll nicht wegen eines winzigen Zeitfensters zur Hauptempfehlung werden. Kurzzeitphasen werden anhand von Dauer, persönlicher Grenzabweichung und weiterem thermischem Verlauf bewertet. Kleidung unter der Jacke wird nicht abgefragt.
+
+- Laufzeitdaten eines geladenen Config Entries liegen in `entry.runtime_data`; `hass.data[DOMAIN]` bleibt nur für integrationsglobale Frontend-/API-Marker.
+- Der Forecast-Coordinator erhält den `ConfigEntry` explizit und die automatisch verwaltete Lovelace-Ressource wird beim endgültigen Entfernen des Eintrags aufgeräumt.

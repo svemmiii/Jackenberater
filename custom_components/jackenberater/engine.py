@@ -259,9 +259,13 @@ def build_recommendation(
                 for index, (point, result) in enumerate(future_results):
                     if JACKET_RANK[result.jacket] != candidate_rank:
                         continue
-                    if all(
-                        JACKET_RANK[later.jacket] <= candidate_rank
-                        for _, later in future_results[index:]
+                    suffix = future_results[index:]
+                    if (
+                        _forecast_pairs_are_continuous(suffix)
+                        and all(
+                            JACKET_RANK[later.jacket] <= candidate_rank
+                            for _, later in suffix
+                        )
                     ):
                         jacket_later = result.jacket
                         later_at = point.dt
@@ -363,8 +367,12 @@ def build_recommendation(
     unusual_weather = any(result.wind_penalty_c >= 1.5 for result in feedback_results)
 
     decision_confidence = model.decision_confidence(jacket_now, jacket_later)
+    # Coverage is measured against the horizon we intended to evaluate, not
+    # merely against the last cached point that happened to be available.
+    # Otherwise one stale +1 h point would incorrectly report "complete".
+    coverage_horizon_hours = max(base_horizon_hours, horizon_hours)
     forecast_coverage_complete = _forecast_covers_horizon(
-        current.dt, forecast, horizon_hours
+        current.dt, forecast, coverage_horizon_hours
     )
     display = _display_mode(
         current_result,
@@ -558,7 +566,15 @@ def _transient_now_override(
         rank = JACKET_RANK[result.jacket]
         if rank >= current_rank:
             continue
-        if all(JACKET_RANK[later.jacket] <= rank for _, later in future_results[index:]):
+        # A lone final point cannot prove that the lighter class remains valid.
+        # Require at least one later forecast sample that confirms the change.
+        confirmation = future_results[index + 1 :]
+        suffix = future_results[index:]
+        if (
+            confirmation
+            and _forecast_pairs_are_continuous(suffix)
+            and all(JACKET_RANK[later.jacket] <= rank for _, later in confirmation)
+        ):
             candidates.append((point.dt, current_rank - 1, "warming"))
             break
 
@@ -568,7 +584,13 @@ def _transient_now_override(
         rank = JACKET_RANK[result.jacket]
         if rank <= current_rank:
             continue
-        if all(JACKET_RANK[later.jacket] >= rank for _, later in future_results[index:]):
+        confirmation = future_results[index + 1 :]
+        suffix = future_results[index:]
+        if (
+            confirmation
+            and _forecast_pairs_are_continuous(suffix)
+            and all(JACKET_RANK[later.jacket] >= rank for _, later in confirmation)
+        ):
             candidates.append((point.dt, current_rank + 1, "cooling"))
             break
 
@@ -692,9 +714,11 @@ def _cold_wind_penalty(temp_c: float, wind_kmh: float) -> float:
 def _wind_penalty(temp_c: float, wind_kmh: float) -> float:
     """Return a continuous comfort penalty for wind.
 
-    The official cold-range equations are used as an anchor, then smoothly
-    blended into a deliberately small comfort correction above the classic
-    wind-chill range. This keeps the heuristic stable around 5 km/h and 10 °C.
+    The ECCC cold-range equations are used as a smooth heuristic anchor. The
+    official wind-chill index itself applies at <= 0 °C; JackenBerater deliberately
+    extends the equation internally through 8 °C, then blends it into a much
+    smaller comfort correction from 8..14 °C. The result is not exposed as an
+    official wind-chill or feels-like temperature.
     """
     if wind_kmh <= 0.0 or temp_c >= 20.0:
         return 0.0
@@ -829,6 +853,22 @@ def _activity_for(
     fn: Callable[[datetime], float] | None,
 ) -> float:
     return float(fn(when)) if fn is not None else fixed_c
+
+
+def _forecast_pairs_are_continuous(
+    pairs: list[tuple[WeatherPoint, ThermalResult]],
+    *,
+    max_gap: timedelta = timedelta(minutes=90),
+) -> bool:
+    """Return whether adjacent forecast samples form one continuous period."""
+    if len(pairs) < 2:
+        return True
+    previous = pairs[0][0].dt
+    for point, _ in pairs[1:]:
+        if elapsed(previous, point.dt) > max_gap:
+            return False
+        previous = point.dt
+    return True
 
 
 def _forecast_covers_horizon(

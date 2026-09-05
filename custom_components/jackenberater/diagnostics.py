@@ -10,6 +10,7 @@ def model_diagnostics(model: PersonalModel, *, simulation_active: bool = False) 
     """Return the complete fixed-size model as Home Assistant-safe attributes."""
     result = model.to_dict()
     result["confidence"] = round(model.confidence(), 3)
+    result["learning_progress"] = round(model.learning_progress(), 3)
     result["simulation_active"] = simulation_active
     return result
 

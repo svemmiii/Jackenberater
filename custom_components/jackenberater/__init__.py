@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from datetime import timedelta
 
 from homeassistant.components.http import StaticPathConfig
 from homeassistant.components.lovelace.const import LOVELACE_DATA, MODE_STORAGE
@@ -10,6 +11,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.event import async_track_time_interval
 
 from .api import async_register_api
 from .const import (
@@ -33,6 +35,9 @@ _LOGGER = logging.getLogger(__name__)
 
 FRONTEND_URL = "/jackenberater/frontend"
 FRONTEND_FILE = "jackenberater-card.js"
+# UI-only cache revision. The integration release stays 0.1.5 while Lovelace
+# still receives a new resource URL for frontend-only fixes.
+FRONTEND_CACHE_REVISION = "3"
 LEGACY_PROFILE_ENTITY_SUFFIXES = (
     "_learning_enabled",
     "_reset_learning",
@@ -71,22 +76,40 @@ def _async_remove_legacy_profile_entities(
             device_registry.async_remove_device(device.id)
 
 
+def _async_remove_orphan_profile_diagnostics(
+    hass: HomeAssistant, entry: ConfigEntry, profile_ids: list[str]
+) -> None:
+    """Remove diagnostic registry entries for profiles pruned before sensors load."""
+    entity_registry = er.async_get(hass)
+    expected = {
+        f"{entry.entry_id}_{profile_id}_profile_diagnostics"
+        for profile_id in profile_ids
+    }
+    for entity in list(er.async_entries_for_config_entry(entity_registry, entry.entry_id)):
+        if (
+            entity.platform == DOMAIN
+            and entity.entity_id.split(".", 1)[0] == "sensor"
+            and entity.unique_id.startswith(f"{entry.entry_id}_")
+            and entity.unique_id.endswith("_profile_diagnostics")
+            and entity.unique_id not in expected
+        ):
+            entity_registry.async_remove(entity.entity_id)
+
+
 async def _async_register_frontend(hass: HomeAssistant) -> None:
     domain_data = hass.data.setdefault(DOMAIN, {})
     if domain_data.get("frontend_registered"):
         return
 
     frontend_dir = Path(__file__).parent / "frontend"
-    try:
+    if not domain_data.get("frontend_path_registered"):
+        # Do not blanket-swallow RuntimeError here. A real registration failure
+        # must fail setup visibly; successful path registration is remembered
+        # separately so a later partial setup retry does not register it twice.
         await hass.http.async_register_static_paths(
             [StaticPathConfig(FRONTEND_URL, str(frontend_dir), False)]
         )
-    except RuntimeError as err:
-        # Reloads may legitimately hit an already-registered path, but keep
-        # unexpected registration failures diagnosable without breaking setup.
-        _LOGGER.debug(
-            "Frontend static path already registered or unavailable: %s", err
-        )
+        domain_data["frontend_path_registered"] = True
 
     lovelace = hass.data.get(LOVELACE_DATA)
     if lovelace is None or lovelace.resource_mode != MODE_STORAGE:
@@ -100,7 +123,7 @@ async def _async_register_frontend(hass: HomeAssistant) -> None:
     resources = lovelace.resources
     await resources.async_get_info()
     base = f"{FRONTEND_URL}/{FRONTEND_FILE}"
-    wanted = f"{base}?v={INTEGRATION_VERSION}"
+    wanted = f"{base}?v={INTEGRATION_VERSION}&ui={FRONTEND_CACHE_REVISION}"
     existing = next(
         (
             item
@@ -117,6 +140,22 @@ async def _async_register_frontend(hass: HomeAssistant) -> None:
         )
 
     domain_data["frontend_registered"] = True
+
+
+async def _async_remove_frontend_resource(hass: HomeAssistant) -> None:
+    """Remove the storage-mode Lovelace resource owned by JackenBerater."""
+    domain_data = hass.data.setdefault(DOMAIN, {})
+    lovelace = hass.data.get(LOVELACE_DATA)
+    if lovelace is not None and lovelace.resource_mode == MODE_STORAGE:
+        resources = lovelace.resources
+        await resources.async_get_info()
+        base = f"{FRONTEND_URL}/{FRONTEND_FILE}"
+        for item in list(resources.async_items()):
+            if str(item.get("url", "")).split("?", 1)[0] == base:
+                await resources.async_delete_item(item["id"])
+    # Keep the static-path marker: Home Assistant still owns that registration
+    # for this process. A later re-add should recreate only the Lovelace item.
+    domain_data["frontend_registered"] = False
 
 
 async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -145,10 +184,33 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     manager = ProfileManager(hass, entry)
     await manager.async_load()
+    # Keep stored profile names aligned with Home Assistant and remove profiles
+    # whose HA user was actually deleted. Inactive-but-existing users are kept.
+    manager.sync_user_directory(await hass.auth.async_get_users())
+    # At startup PROFILE_DELETED listeners from the sensor platform do not exist
+    # yet. Remove stale diagnostic registry entries directly after pruning users.
+    _async_remove_orphan_profile_diagnostics(hass, entry, manager.profile_ids)
+
+    async def _async_sync_user_directory(_now) -> None:
+        manager.sync_user_directory(await hass.auth.async_get_users())
+
+    entry.async_on_unload(
+        async_track_time_interval(
+            hass,
+            _async_sync_user_directory,
+            timedelta(minutes=30),
+        )
+    )
     coordinator = JackenWeatherCoordinator(hass, entry)
     await coordinator.async_config_entry_first_refresh()
+    # DataUpdateCoordinator only schedules update_interval polling while at least
+    # one listener is registered. JackenBerater consumes the coordinator directly
+    # from its WebSocket API instead of through CoordinatorEntity, so keep one
+    # integration-owned listener alive or the startup forecast would slowly age
+    # away until only the final cached hour remained.
+    entry.async_on_unload(coordinator.async_add_listener(lambda: None))
 
-    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = {
+    entry.runtime_data = {
         "profiles": manager,
         "coordinator": coordinator,
         "context_cache": {},
@@ -160,10 +222,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
-    if unloaded:
-        hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
-    return unloaded
+    # Profile writes are intentionally delayed during normal operation. Force the
+    # current in-memory state to disk before a reload can create a new manager.
+    runtime = getattr(entry, "runtime_data", None)
+    if isinstance(runtime, dict):
+        manager = runtime.get("profiles")
+        if isinstance(manager, ProfileManager):
+            await manager.async_flush()
+    return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Remove integration-owned frontend and personal profile storage."""
+    runtime = getattr(entry, "runtime_data", None)
+    manager = runtime.get("profiles") if isinstance(runtime, dict) else None
+    if not isinstance(manager, ProfileManager):
+        manager = ProfileManager(hass, entry)
+    await manager.async_remove_storage()
+    await _async_remove_frontend_resource(hass)
 
 
 async def _async_reload(hass: HomeAssistant, entry: ConfigEntry) -> None:

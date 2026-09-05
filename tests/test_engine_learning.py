@@ -265,6 +265,17 @@ def test_current_only_recommendation_has_no_fake_forecast_horizon():
     assert rec.horizon_hours == 0
 
 
+
+
+def test_short_cached_forecast_does_not_claim_full_default_coverage():
+    model = PersonalModel.from_answers(3, 3, 3, 3)
+    rec = engine.build_recommendation(
+        point(0, 18), [point(1, 17)], model, indoor_temperature_c=22
+    )
+    assert rec.horizon_hours == 1
+    assert rec.forecast_coverage_complete is False
+
+
 def test_work_location_rain_can_raise_rain_advice():
     model = PersonalModel.from_answers(3, 3, 3, 3)
     home = [point(i, 20, precipitation_probability=0) for i in range(1, 10)]
@@ -500,6 +511,16 @@ def test_voluntary_feedback_has_normal_learning_weight():
     assert normal.general_stat.weight_sum == voluntary.general_stat.weight_sum == 1.0
     assert normal.general_offset_c == voluntary.general_offset_c
 
+
+
+
+def test_learning_progress_does_not_treat_one_specialist_channel_as_global_maturity():
+    model = PersonalModel.from_answers(3, 3, 3, 3)
+    model.transient_stat.weight_sum = 100.0
+    model.transient_stat.samples = 100
+    # Specialist-only evidence contributes, but must not make an otherwise new
+    # profile look almost fully learned.
+    assert 0.18 < model.learning_progress() < 0.50
 
 def test_recommendation_confidence_is_specific_to_shown_jacket_change():
     model = PersonalModel.from_answers(3, 3, 3, 3)
@@ -853,6 +874,82 @@ def test_hidden_requires_coverage_to_the_actual_work_extended_horizon():
     )
     assert rec.horizon_hours == 14
     assert rec.display_mode == const.DISPLAY_COMPACT
+
+
+
+
+def test_single_last_warming_point_cannot_override_now_without_confirmation():
+    model = PersonalModel.from_answers(3, 3, 3, 3)
+    current = point_minutes(0, 11.5)  # warm
+    future = [point_minutes(5, 14.0)]  # light, but nothing confirms it persists
+    rec = engine.build_recommendation(current, future, model, indoor_temperature_c=11.5)
+    assert rec.jacket_now == const.JACKET_WARM
+    assert rec.transient_override is False
+    assert rec.forecast_coverage_complete is False
+
+
+
+
+def test_change_only_at_last_forecast_point_cannot_override_now():
+    model = PersonalModel.from_answers(3, 3, 3, 3)
+    current = point_minutes(0, 11.5)
+    future = [
+        point_minutes(2, 11.6),
+        point_minutes(4, 11.7),
+        point_minutes(6, 14.0),
+    ]
+    rec = engine.build_recommendation(current, future, model, indoor_temperature_c=11.5)
+    assert rec.jacket_now == const.JACKET_WARM
+    assert rec.jacket_later == const.JACKET_LIGHT
+    assert rec.transient_override is False
+
+def test_single_last_cooling_point_cannot_override_now_without_confirmation():
+    model = PersonalModel.from_answers(3, 3, 3, 3)
+    current = point_minutes(0, 14.0)  # light
+    future = [point_minutes(10, 8.0)]  # warm, but nothing confirms it persists
+    rec = engine.build_recommendation(current, future, model, indoor_temperature_c=14.0)
+    assert rec.jacket_now == const.JACKET_LIGHT
+    assert rec.transient_override is False
+    assert rec.forecast_coverage_complete is False
+
+def test_large_gap_cannot_confirm_warming_transient_override():
+    model = PersonalModel.from_answers(3, 3, 3, 3)
+    current = point_minutes(0, 11.5)  # warm
+    future = [
+        point_minutes(5, 14.0),
+        point_minutes(360, 14.0),
+    ]
+    rec = engine.build_recommendation(current, future, model, indoor_temperature_c=11.5)
+    assert rec.jacket_now == const.JACKET_WARM
+    assert rec.transient_override is False
+    assert rec.forecast_coverage_complete is False
+
+
+def test_large_gap_cannot_confirm_cooling_transient_override():
+    model = PersonalModel.from_answers(3, 3, 3, 3)
+    current = point_minutes(0, 14.0)  # light
+    future = [
+        point_minutes(10, 8.0),
+        point_minutes(360, 8.0),
+    ]
+    rec = engine.build_recommendation(current, future, model, indoor_temperature_c=14.0)
+    assert rec.jacket_now == const.JACKET_LIGHT
+    assert rec.transient_override is False
+    assert rec.forecast_coverage_complete is False
+
+
+def test_large_gap_does_not_claim_lighter_class_from_first_unconfirmed_point():
+    model = PersonalModel.from_answers(3, 3, 3, 3)
+    current = point(0, 11.5)  # warm
+    future = [
+        point(1, 14.0),
+        point(8, 14.0),
+    ]
+    rec = engine.build_recommendation(current, future, model, indoor_temperature_c=11.5)
+    assert rec.jacket_now == const.JACKET_WARM
+    assert rec.jacket_later == const.JACKET_LIGHT
+    assert rec.later_at == future[1].dt
+    assert rec.forecast_coverage_complete is False
 
 
 def test_short_warming_transition_prefers_personally_practical_lighter_jacket():

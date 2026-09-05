@@ -8,12 +8,14 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.event import async_track_state_change_event
 
 from .const import (
     DOMAIN,
     INTEGRATION_VERSION,
     SIGNAL_PROFILE_CREATED,
+    SIGNAL_PROFILE_DELETED,
     SIGNAL_PROFILE_UPDATED,
 )
 from .diagnostics import model_diagnostics, simulation_from_state
@@ -26,18 +28,37 @@ async def async_setup_entry(
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
     """Create one compact diagnostic entity for every existing profile."""
-    runtime = hass.data[DOMAIN][entry.entry_id]
+    runtime = entry.runtime_data
     manager: ProfileManager = runtime["profiles"]
     known: set[str] = set()
+    entities: dict[str, ProfileDiagnosticsSensor] = {}
 
     @callback
     def add(profile_id: str) -> None:
         if profile_id in known:
             return
         known.add(profile_id)
-        async_add_entities(
-            [ProfileDiagnosticsSensor(entry, manager, runtime, profile_id)]
-        )
+        entity = ProfileDiagnosticsSensor(entry, manager, runtime, profile_id)
+        entities[profile_id] = entity
+        async_add_entities([entity])
+
+    @callback
+    def remove(profile_id: str) -> None:
+        """Remove volatile state and registry/runtime diagnostics for a profile."""
+        runtime.setdefault("simulations", {}).pop(profile_id, None)
+        known.discard(profile_id)
+        entity = entities.pop(profile_id, None)
+
+        async def _async_remove() -> None:
+            if entity is not None and getattr(entity, "hass", None) is not None:
+                await entity.async_remove()
+            registry = er.async_get(hass)
+            unique_id = f"{entry.entry_id}_{profile_id}_profile_diagnostics"
+            entity_id = registry.async_get_entity_id("sensor", DOMAIN, unique_id)
+            if entity_id is not None:
+                registry.async_remove(entity_id)
+
+        hass.async_create_task(_async_remove())
 
     for profile_id in manager.profile_ids:
         add(profile_id)
@@ -46,6 +67,13 @@ async def async_setup_entry(
             hass,
             SIGNAL_PROFILE_CREATED.format(entry_id=entry.entry_id),
             add,
+        )
+    )
+    entry.async_on_unload(
+        async_dispatcher_connect(
+            hass,
+            SIGNAL_PROFILE_DELETED.format(entry_id=entry.entry_id),
+            remove,
         )
     )
 
@@ -95,12 +123,20 @@ class ProfileDiagnosticsSensor(SensorEntity):
         return self.runtime.setdefault("simulations", {}).get(self.profile_id)
 
     @property
-    def native_value(self) -> int:
+    def native_value(self) -> int | None:
+        if self.profile_id not in self.manager.profile_ids:
+            return None
         model = self._simulation or self.manager.get_model(self.profile_id)
         return model.total_feedback
 
     @property
+    def available(self) -> bool:
+        return self.profile_id in self.manager.profile_ids
+
+    @property
     def extra_state_attributes(self) -> dict:
+        if self.profile_id not in self.manager.profile_ids:
+            return {}
         simulation = self._simulation
         model = simulation or self.manager.get_model(self.profile_id)
         return model_diagnostics(model, simulation_active=simulation is not None)

@@ -14,7 +14,13 @@ from homeassistant.util import dt as dt_util
 from homeassistant.util.unit_conversion import DistanceConverter, TemperatureConverter
 from homeassistant.const import UnitOfLength, UnitOfTemperature
 
-from .const import CONF_WEATHER, CONF_WORK_WEATHER, FORECAST_REFRESH
+from .const import (
+    CONF_WEATHER,
+    CONF_WORK_MODE,
+    CONF_WORK_WEATHER,
+    FORECAST_REFRESH,
+    WORK_MODE_NONE,
+)
 from .models import WeatherPoint
 from .time_utils import instant_key
 
@@ -165,7 +171,7 @@ def normalize_forecast(
     wind_unit = attrs.get("wind_speed_unit")
     precipitation_unit = attrs.get("precipitation_unit") or hass.config.units.accumulated_precipitation_unit
     result: list[WeatherPoint] = []
-    for raw in raw_items[:24]:
+    for raw in raw_items:
         if not isinstance(raw, dict):
             continue
         dt = _parse_dt(raw.get("datetime"))
@@ -186,7 +192,7 @@ def normalize_forecast(
             )
         )
     result.sort(key=lambda item: instant_key(item.dt))
-    return result
+    return result[:24]
 
 
 async def _fetch_hourly(hass: HomeAssistant, entity_id: str) -> list[WeatherPoint]:
@@ -218,6 +224,7 @@ class JackenWeatherCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         super().__init__(
             hass,
             _LOGGER,
+            config_entry=entry,
             name=f"JackenBerater {entry.entry_id}",
             update_interval=FORECAST_REFRESH,
         )
@@ -226,18 +233,25 @@ class JackenWeatherCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     async def _async_update_data(self) -> dict[str, Any]:
         home_entity = str(self.entry.data[CONF_WEATHER])
         home = await _fetch_hourly(self.hass, home_entity)
-        if not home:
-            # A forecast is valuable but not mandatory: current-only advice is
-            # still useful. Only fail if even the current weather is unavailable.
-            if current_weather(self.hass, home_entity) is None:
-                raise UpdateFailed(f"Weather entity {home_entity} is unavailable")
 
-        work_entity = self.entry.data.get(CONF_WORK_WEATHER)
+        work_enabled = self.entry.data.get(CONF_WORK_MODE) != WORK_MODE_NONE
+        work_entity = self.entry.data.get(CONF_WORK_WEATHER) if work_enabled else None
         work: list[WeatherPoint] = []
         if isinstance(work_entity, str) and work_entity and work_entity != home_entity:
             work = await _fetch_hourly(self.hass, work_entity)
         elif work_entity == home_entity:
             work = list(home)
+
+        # The recommendation layer decides which current location is relevant.
+        # Do not make a broken home source poison a healthy work source before
+        # that work-context decision can be made. Only fail the coordinator when
+        # neither configured location has forecast nor usable current weather.
+        home_usable = bool(home) or current_weather(self.hass, home_entity) is not None
+        work_usable = False
+        if isinstance(work_entity, str) and work_entity:
+            work_usable = bool(work) or current_weather(self.hass, work_entity) is not None
+        if not home_usable and not work_usable:
+            raise UpdateFailed("No configured weather source is currently usable")
 
         return {
             "home_forecast": home,

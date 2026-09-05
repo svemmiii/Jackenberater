@@ -1,5 +1,69 @@
 # Changelog
 
+## v0.1.5
+
+### Audit- und Konsistenzrelease
+
+1. **Arbeitswetter ohne Zuhause-Abhängigkeit:** Innerhalb einer tatsächlichen Arbeitszeit kann eine gesunde Arbeits-Wetterquelle die Empfehlung liefern, auch wenn die Zuhause-Entity ausgefallen ist. Der Forecast-Coordinator scheitert ebenfalls erst, wenn keine konfigurierte Wetterquelle mehr nutzbar ist.
+2. **Arbeitsforecast-Warnungen bleiben sichtbar:** `missing`/`partial` beim Arbeitsforecast verhindert nun das vollständige Ausblenden der Karte, damit genau diese Datenlücke nicht unsichtbar wird.
+3. **Profilweite Session-Deduplizierung:** Nahezu identische bewusste Öffnungen desselben Profils innerhalb von zehn Minuten werden geräte-/loginübergreifend wiederverwendet und zählen nur einmal als Feedback-Gelegenheit.
+4. **Wandtablet-Dokumentation korrigiert:** Fälliges Feedback gehört zum ausgewählten Profil und darf auch eine Session beantworten, die zuvor am persönlichen Gerät entstanden ist.
+5. **Release-Dokumentation auf v0.1.5 gezogen:** README, Ressourcen-Cache-Buster, Teststand und Versionshinweise sind konsistent; aktuell 172 lokale Python-Tests plus Frontend-Vertragstest.
+6. **„Jetzt mitnehmen“ umgesetzt:** Wird später eine wärmere Jacke nötig, formuliert die Karte ausdrücklich, dass diese jetzt mitgenommen werden sollte, falls man dann noch unterwegs ist.
+7. **30-Minuten-Regel serverseitig:** Nicht-freiwilliges Feedback wird auch für persönliche Nutzer und Administratoren vor `ready_at` beziehungsweise ohne angefordertes Feedback abgelehnt.
+8. **Frontend-Retry-Backoff:** Fehlgeschlagene WebSocket-Aktualisierungen werden zeitlich gedrosselt und bei wiederholten Fehlern bis auf fünf Minuten zurückgenommen, statt auf viele HA-Stateupdates erneut zu feuern.
+9. **Stabiler sichtbarer Lernstand:** Der UI-Lernstand ist jetzt ein eigener Fortschrittswert, der im normalen fortlaufenden Lernen nicht wegen schwankender Entscheidungs-Confidence zurückfällt. Reset und Undo dürfen ihn bewusst wieder senken. Die konservative Entscheidungs-Confidence bleibt intern separat.
+10. **Abendfrage präzisiert:** Die Startfrage beschreibt nun die tatsächlich verwendete typische Abendaktivität, statt einen nur „länger draußen“-spezifischen Kontext vorzutäuschen.
+11. **Arbeitszone präzisiert:** Setup/Reconfigure erklären ausdrücklich, dass die Zone nur einen Anzeigenamen liefert; Präsenz, Koordinaten und Zonenstatus fließen nicht in die Entscheidung ein.
+12. **`shared: true` entkoppelt:** Shared-Rechte und Shared-Modus stammen ausschließlich aus `shared_user_ids`; ein Lovelace-Flag kann weder Rechte noch Shared-Verhalten erzeugen.
+13. **Mehrere Arbeitsfenster korrekt angezeigt:** Bei mehreren relevanten Fenstern wird das Fenster angezeigt, das den späteren Arbeits-Jackenwechsel tatsächlich ausgelöst hat.
+14. **DST-Schichtgrenzen definiert:** Nicht existente lokale Schichtzeiten im Frühlingssprung werden auf die erste gültige Minute vorgezogen; bei der Herbst-Doppelstunde nutzt Start die erste und Ende die zweite Vorkommnis.
+15. **Frontend-Registrierungsfehler nicht mehr verschluckt:** Ein unerwarteter `RuntimeError` beim statischen Pfad schlägt sichtbar fehl; erfolgreiche Pfadregistrierung wird separat gemerkt, damit partielle Setup-Retries nicht doppelt registrieren.
+16. **Gelöschte HA-Nutzer werden bereinigt:** Nicht mehr vorhandene User-IDs werden aus dem persistenten Profilstore entfernt.
+17. **Umbenannte HA-Nutzer werden synchronisiert:** Profilnamen werden beim Profilabruf aus dem aktuellen HA-Benutzerverzeichnis aktualisiert.
+18. **`PROJECT_CONTEXT.md` aktualisiert:** Entwicklungsstand, Produktregeln und Teststatus beschreiben nun v0.1.5 statt den alten Importstand.
+19. **Reconfigure-Arbeitskontext erklärt:** Auch beim späteren Neu-Konfigurieren ist klar, dass das Arbeitsmodell erst zusammen mit einer Arbeits-Wetterquelle aktiv wird.
+20. **Home-Assistant-Single-Entry-Standard:** Das Manifest verwendet `"single_config_entry": true`; der alte eigene Unique-ID-Abbruch im Config Flow wurde entsprechend entfernt.
+
+
+### v0.1.5 – Release-Hardening nach erneuter Gesamtprüfung
+
+- Karten-UX: „Info“ und die normale Detail-Erweiterung sind jetzt gegenseitig exklusiv; beim Öffnen der einen wird die andere automatisch geschlossen.
+- Frontend-only Cache-Revision `ui=3`, damit diese Kartenänderung trotz unveränderter Integrationsversion `0.1.5` sicher neu geladen wird.
+- Ein einzelner letzter/unbestätigter Forecast-Punkt darf die aktuelle Jackenklasse nicht mehr über die Kurzzeitglättung überschreiben. Eine spätere Klasse braucht mindestens einen weiteren bestätigenden Forecast-Punkt.
+- Bestätigungen für Kurzzeitglättung und „später leichter“ müssen zeitlich zusammenhängen. Zwischen relevanten Forecast-Punkten sind höchstens 90 Minuten Lücke erlaubt; weiter entfernte Punkte gelten nicht als Beweis für einen stabilen Verlauf.
+- Nach einem fehlgeschlagenen erzwungenen Forecast-Refresh werden alte Cache-Daten nicht mehr als frischer Forecast weiterverwendet.
+- Reconfigure bereinigt nicht mehr aktive Schichtfelder; ein altes `shift_pattern` blockiert eine spätere normale 5-Tage-Konfiguration nicht mehr.
+- Offene Shared-Karten verkraften gelöschte Profile sowie Laufzeitwechsel normal ↔ Shared ohne Browserreload und setzen ungültige Profilauswahlen zurück.
+- Gelöschte HA-Nutzer räumen zusätzlich Diagnose-Entity-/Registry- und Simulationszustand auf; der Nutzerbestand wird während des Betriebs periodisch synchronisiert.
+- Shared-Konten legen/verwenden während des Shared-Betriebs kein eigenes Profil, vorhandene persönliche Lerndaten werden bei einer Rollenänderung aber nicht destruktiv gelöscht.
+- Fehlender Arbeits-**Forecast** wird auch genau so bezeichnet und die Warnung nur einmal angezeigt.
+- Der englische sichtbare Fortschrittswert heißt jetzt „Learning progress“ statt „Confidence“.
+- Der Lernstand gewichtet allgemeines Lernen und Jackengrenzen deutlich stärker als einzelne Spezialkanäle; Reset/Undo dürfen ihn erwartungsgemäß reduzieren.
+- README beschreibt die Wind-Chill-Nutzung korrekt als interne Komfortheuristik außerhalb des offiziellen ≤0-°C-Indexbereichs.
+- Arbeits-„jetzt mitnehmen“-Text ist konditional: nur wenn man vor dem relevanten Arbeitszeitraum nicht noch einmal nach Hause kommt.
+- Ein alter Frontend-State-Refresh-Timer wird bei jedem echten Refresh verworfen.
+- Arbeitsforecast wird bei deaktiviertem Arbeitsmodus nicht mehr unnötig gepollt.
+- Bugreport-Vorbelegung, interne Aktivitätsbeschreibung und weitere Release-Reste wurden auf v0.1.5 bereinigt.
+- Coordinator erhält den `ConfigEntry` explizit und Laufzeitdaten liegen primär in `entry.runtime_data`.
+- Beim Entfernen des Config Entries wird die automatisch verwaltete Lovelace-Ressource in Storage-Lovelace mit entfernt.
+- Der numerische interne **„thermisch“-Wert** wurde aus der normalen Nutzerkarte entfernt. Er bleibt vollständig in Engine, Lernen und Diagnose erhalten und wird nicht irreführend als „Gefühlt“ umbenannt.
+
+## v0.1.4
+
+### Forecast bleibt frisch
+
+- Der stündliche Wetter-Forecast wird nun wirklich dauerhaft im vorgesehenen 15-Minuten-Intervall aktualisiert. Zuvor hatte der `DataUpdateCoordinator` keinen Listener; dadurch lief nach dem Start nur der erste Forecast und alterte anschließend weg, bis beispielsweise nur noch eine zukünftige Stunde übrig war.
+- Vor einer Empfehlung wird ein veralteter oder zeitlich unplausibler Forecast zusätzlich defensiv aktualisiert. Damit kann eine bewusst geöffnete Beratung nicht auf einem alten Cache trainieren.
+- Die Forecast-Abdeckung wird gegen den beabsichtigten Horizont geprüft. Ein einzelner verbleibender +1-h-Punkt gilt daher nicht mehr fälschlich als vollständige Abdeckung des normalen 9-h-Zeitraums.
+- Providerpunkte werden erst normalisiert und sortiert und danach auf 24 Punkte begrenzt, damit ungewöhnliche Reihenfolgen keine späteren Stunden abschneiden.
+
+### Wandtablet-Feedback pro Profil
+
+- Das bewusste Aufklappen bleibt unverändert der Moment, in dem auf einem Shared-/Wandtablet eine neue Session für das ausgewählte Profil entsteht. Eine bloß sichtbare Karte erzeugt weiterhin keine Session.
+- Reifes, angefordertes Feedback ist nun an das ausgewählte Profil gebunden statt an das HA-Login, auf dem die ursprüngliche Session geöffnet wurde. Damit kann z. B. eine am Handy entstandene Sven-Session später am Wandtablet beantwortet werden, sobald dort Sven ausgewählt ist.
+- Freiwilliges Sofort-Feedback und Profilwartung bleiben auf nicht-administrativen Shared-Konten weiterhin gesperrt.
+
 ## v0.1.3
 
 ### Wandtablet-Sessions und Feedback

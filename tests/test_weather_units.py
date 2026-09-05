@@ -35,6 +35,10 @@ sys.modules[helpers.__name__] = helpers
 coordinator = types.ModuleType("homeassistant.helpers.update_coordinator")
 
 class DummyCoordinator:
+    def __init__(self, hass, *args, **kwargs):
+        self.hass = hass
+        self.config_entry = kwargs.get("config_entry")
+
     @classmethod
     def __class_getitem__(cls, item):
         return cls
@@ -128,3 +132,65 @@ def test_non_finite_and_implausible_weather_values_are_rejected():
     assert weather._wind_to_kmh(-1, "km/h") is None
     assert weather._wind_to_kmh(13, "Beaufort") is None
     assert weather._precipitation_to_mm(-1, "mm") is None
+
+
+def test_normalize_forecast_sorts_before_24_point_limit():
+    entity_id = "weather.test"
+    state = types.SimpleNamespace(attributes={
+        "temperature_unit": "°C",
+        "wind_speed_unit": "km/h",
+        "precipitation_unit": "mm",
+    })
+    hass = types.SimpleNamespace(
+        states=types.SimpleNamespace(get=lambda requested: state if requested == entity_id else None),
+        config=types.SimpleNamespace(
+            units=types.SimpleNamespace(
+                temperature_unit="°C", accumulated_precipitation_unit="mm"
+            )
+        ),
+    )
+    raw = [
+        {"datetime": f"2026-09-06T{hour:02d}:00:00+00:00", "temperature": hour}
+        for hour in range(23, -1, -1)
+    ]
+    raw.extend([
+        {"datetime": "2026-09-07T00:00:00+00:00", "temperature": 24},
+        {"datetime": "2026-09-07T01:00:00+00:00", "temperature": 25},
+    ])
+    normalized = weather.normalize_forecast(hass, entity_id, raw)
+    assert len(normalized) == 24
+    assert normalized[0].dt.isoformat() == "2026-09-06T00:00:00+00:00"
+    assert normalized[-1].dt.isoformat() == "2026-09-06T23:00:00+00:00"
+
+
+def test_coordinator_skips_work_forecast_when_work_mode_is_disabled():
+    import asyncio
+
+    calls = []
+    original_fetch = weather._fetch_hourly
+    original_current = weather.current_weather
+
+    async def fetch(_hass, entity_id):
+        calls.append(entity_id)
+        return [types.SimpleNamespace(dt=datetime.now(timezone.utc))]
+
+    weather._fetch_hourly = fetch
+    weather.current_weather = lambda *_args, **_kwargs: None
+    entry = types.SimpleNamespace(
+        entry_id="entry",
+        data={
+            weather.CONF_WEATHER: "weather.home",
+            weather.CONF_WORK_WEATHER: "weather.work",
+            weather.CONF_WORK_MODE: weather.WORK_MODE_NONE,
+        },
+    )
+    coordinator = weather.JackenWeatherCoordinator(types.SimpleNamespace(), entry)
+    try:
+        result = asyncio.run(coordinator._async_update_data())
+    finally:
+        weather._fetch_hourly = original_fetch
+        weather.current_weather = original_current
+    assert coordinator.config_entry is entry
+    assert calls == ["weather.home"]
+    assert result["work_forecast"] == []
+

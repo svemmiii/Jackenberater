@@ -148,7 +148,176 @@ assert.ok(Card, "jackenberater-card must register itself");
   assert.match(calendarWarningCard.innerHTML, /Kontextkalender nicht verfügbar/, "context-calendar outage must be visible");
   assert.match(calendarWarningCard.innerHTML, /Abwesenheitskalender nicht verfügbar/, "vacation-calendar outage must be visible");
 
-  assert.match(source, /Wie aktiv bist du dabei\?/, "evening setup question must measure the activity used by the model");
+  const workWarningCard = new Card();
+  workWarningCard._config = { type: "custom:jackenberater-card" };
+  workWarningCard._hass = { language: "de" };
+  workWarningCard._preview = {
+    recommendation: {
+      display_mode: "hidden", jacket_now: "none", jacket_later: "none",
+      work_forecast_coverage: "missing", work_weather_available: false,
+    },
+    profile: { setup_complete: true }, feedback: [],
+  };
+  workWarningCard._bind = () => {};
+  assert.equal(workWarningCard.getCardSize(), 2, "missing work forecast must keep an otherwise hidden card visible");
+  workWarningCard._render();
+  assert.match(workWarningCard.innerHTML, /Arbeitsforecast fehlt/, "missing work forecast warning must name the missing forecast, not live work weather");
+
+  // Missing work forecast is one warning, even when both details and info are open.
+  workWarningCard._open = true;
+  workWarningCard._infoOpen = true;
+  workWarningCard._render();
+  assert.equal(
+    (workWarningCard.innerHTML.match(/Arbeitsforecast fehlt/g) || []).length,
+    1,
+    "the same work-forecast warning must not be duplicated across card sections",
+  );
+
+  // The internal effective/thermal temperature stays an engine value and must
+  // not leak into the normal user-facing card as a second pseudo-temperature.
+  const thermalCard = new Card();
+  thermalCard._config = { type: "custom:jackenberater-card" };
+  thermalCard._hass = { language: "de" };
+  thermalCard._preview = {
+    recommendation: {
+      display_mode: "full", jacket_now: "light", jacket_later: "light",
+      current_temperature_c: 12, effective_now_c: 123.45,
+      current_wind_kmh: 4, horizon_hours: 9,
+    },
+    profile: { setup_complete: true, learning_progress: 0.4, total_feedback: 2 },
+    feedback: [],
+  };
+  thermalCard._bind = () => {};
+  thermalCard._render();
+  assert.match(thermalCard.innerHTML, /12 °C/, "real air temperature remains visible");
+  assert.doesNotMatch(thermalCard.innerHTML, /123\.45/, "internal effective temperature must stay out of the user card");
+  assert.doesNotMatch(source, /thermisch etwa/, "the old thermal-value label must be removed from the user UI");
+
+  // Info and recommendation details must be mutually exclusive. Opening the
+  // details while Info is visible closes Info before creating/reusing a session.
+  const exclusiveCard = new Card();
+  exclusiveCard._config = { type: "custom:jackenberater-card" };
+  exclusiveCard._hass = { language: "de" };
+  exclusiveCard._preview = {
+    recommendation: { display_mode: "full", simulation_active: false },
+    profile: { setup_complete: true },
+    feedback: [],
+  };
+  exclusiveCard._infoOpen = true;
+  exclusiveCard._open = false;
+  exclusiveCard._render = () => {};
+  exclusiveCard._send = async (type) => {
+    if (type === "jackenberater/open_session") {
+      return { session, recommendation: exclusiveCard._preview.recommendation, feedback: [] };
+    }
+    throw new Error(`unexpected message: ${type}`);
+  };
+  await exclusiveCard._openAdvice();
+  assert.equal(exclusiveCard._open, true, "opening details must open the details panel");
+  assert.equal(exclusiveCard._infoOpen, false, "opening details must close Info");
+
+  exclusiveCard._open = true;
+  exclusiveCard._infoOpen = false;
+  exclusiveCard._phasePending = { fake: true };
+  exclusiveCard._notice = "old notice";
+  exclusiveCard._toggleInfo();
+  assert.equal(exclusiveCard._infoOpen, true, "opening Info must open the Info panel");
+  assert.equal(exclusiveCard._open, false, "opening Info must close the details panel");
+  assert.equal(exclusiveCard._phasePending, null, "switching to Info must close an in-progress details subpanel");
+  assert.equal(exclusiveCard._notice, "", "switching to Info must clear details-only notices");
+
+  // A profile deleted while a wall tablet is open must invalidate the local
+  // selection instead of getting stuck on profile_not_found until reload.
+  const deletedProfileCard = new Card();
+  deletedProfileCard._config = { type: "custom:jackenberater-card" };
+  deletedProfileCard._hass = { language: "de" };
+  deletedProfileCard._autoShared = true;
+  deletedProfileCard._entryId = "entry-deleted";
+  deletedProfileCard._currentUserId = "tablet";
+  deletedProfileCard._selectedProfile = "deleted-user";
+  deletedProfileCard._render = () => {};
+  let deletedPreviewCalls = 0;
+  deletedProfileCard._send = async (type) => {
+    if (type === "jackenberater/profiles") {
+      return { entry_id: "entry-deleted", current_user_id: "tablet", shared_account: true, is_admin: false, profiles: [{ id: "other", name: "Other" }] };
+    }
+    if (type === "jackenberater/preview") deletedPreviewCalls += 1;
+    throw new Error(`unexpected message: ${type}`);
+  };
+  await deletedProfileCard._refresh();
+  assert.equal(deletedProfileCard._selectedProfile, null, "deleted shared profile selection must be cleared live");
+  assert.equal(deletedPreviewCalls, 0, "no preview may be sent with a deleted profile id");
+
+  // Runtime normal -> shared reconfigure must switch into profile-selection mode.
+  const becameSharedCard = new Card();
+  becameSharedCard._config = { type: "custom:jackenberater-card" };
+  becameSharedCard._hass = { language: "de" };
+  becameSharedCard._autoShared = false;
+  becameSharedCard._render = () => {};
+  let becameSharedPreviewCalls = 0;
+  becameSharedCard._send = async (type) => {
+    if (type === "jackenberater/profiles") {
+      return { entry_id: "entry", current_user_id: "tablet", shared_account: true, is_admin: false, profiles: [{ id: "sven", name: "Sven" }] };
+    }
+    if (type === "jackenberater/preview") becameSharedPreviewCalls += 1;
+    throw new Error(`unexpected message: ${type}`);
+  };
+  await becameSharedCard._refresh();
+  assert.equal(becameSharedCard._autoShared, true, "live normal-to-shared reconfigure must be detected");
+  assert.equal(becameSharedPreviewCalls, 0, "newly shared account must wait for explicit profile selection");
+
+  // Runtime shared -> normal must discard the foreign profile and use own preview.
+  const becameNormalCard = new Card();
+  becameNormalCard._config = { type: "custom:jackenberater-card" };
+  becameNormalCard._hass = { language: "de" };
+  becameNormalCard._autoShared = true;
+  becameNormalCard._selectedProfile = "sven";
+  becameNormalCard._render = () => {};
+  becameNormalCard._send = async (type) => {
+    if (type === "jackenberater/profiles") {
+      return { entry_id: "entry", current_user_id: "tablet", shared_account: false, is_admin: false, profiles: [{ id: "tablet", name: "Tablet" }] };
+    }
+    if (type === "jackenberater/preview") return { recommendation: { display_mode: "full" }, profile: { id: "tablet", setup_complete: true }, feedback: [] };
+    throw new Error(`unexpected message: ${type}`);
+  };
+  await becameNormalCard._refresh();
+  assert.equal(becameNormalCard._autoShared, false, "live shared-to-normal reconfigure must be detected");
+  assert.equal(becameNormalCard._selectedProfile, null, "foreign shared selection must be cleared when account becomes normal");
+  assert.equal(becameNormalCard._preview.profile.id, "tablet", "normal account must resume its own preview without reload");
+
+  const legacySharedCard = new Card();
+  legacySharedCard._config = { type: "custom:jackenberater-card", shared: true };
+  legacySharedCard._autoShared = false;
+  assert.equal(legacySharedCard._sharedMode(), false, "Lovelace shared:true must not create shared-device permissions or behaviour");
+
+  const retryCard = new Card();
+  retryCard._config = { type: "custom:jackenberater-card" };
+  retryCard._hass = { language: "de" };
+  retryCard._profileMetaLoaded = true;
+  retryCard._render = () => {};
+  retryCard._send = async () => { throw new Error("offline"); };
+  await retryCard._refresh();
+  assert.equal(retryCard._refreshFailures, 1, "failed refresh must be tracked");
+  assert.equal(retryCard._retryIntervalMs(), 60 * 1000, "first retry should be rate-limited to one minute");
+  await retryCard._refresh();
+  assert.equal(retryCard._refreshFailures, 2, "repeated failures must increase backoff");
+  assert.equal(retryCard._retryIntervalMs(), 120 * 1000, "repeated failures should back off instead of retrying on every HA state update");
+
+
+  const timerCard = new Card();
+  timerCard._config = { type: "custom:jackenberater-card" };
+  timerCard._hass = { language: "de" };
+  timerCard._render = () => {};
+  timerCard._stateRefreshTimer = setTimeout(() => {}, 60 * 1000);
+  timerCard._send = async (type) => {
+    if (type === "jackenberater/profiles") return { current_user_id: "user", shared_account: false, is_admin: false, profiles: [] };
+    if (type === "jackenberater/preview") return { recommendation: {}, profile: { setup_complete: true }, feedback: [] };
+    throw new Error(`unexpected message: ${type}`);
+  };
+  await timerCard._refresh();
+  assert.equal(timerCard._stateRefreshTimer, null, "an already pending state timer must be cancelled by any real refresh");
+
+  assert.match(source, /Wie aktiv bist du abends typischerweise draußen\?/, "evening setup question must match the broad evening activity correction");
 
   const textCard = new Card();
   textCard._hass = { language: "de" };
@@ -158,8 +327,30 @@ assert.ok(Card, "jackenberater-card must register itself");
     later_at: "2026-09-01T18:00:00+00:00",
   });
   const expectedLaterTime = new Intl.DateTimeFormat("de-DE", { hour: "2-digit", minute: "2-digit" }).format(new Date("2026-09-01T18:00:00+00:00"));
-  assert.match(laterText, /Wenn du länger unterwegs bist/, "later-warmer advice must transparently state its unknown-stay assumption");
-  assert.match(laterText, new RegExp(`ab etwa ${expectedLaterTime.replace(".", "\\.")}`), "later-warmer advice should use the browser's local time");
+  assert.match(laterText, /Wenn du dann noch unterwegs bist/, "later-warmer advice must transparently state its unknown-stay assumption");
+  assert.match(laterText, /jetzt mitnehmen/, "later-warmer advice must explicitly say to take the warmer jacket now");
+  assert.match(laterText, new RegExp(`ab etwa ${expectedLaterTime.replace(".", "\.")}`), "later-warmer advice should use the browser's local time");
+
+  const workBufferText = textCard._laterText({
+    jacket_now: "light",
+    jacket_later: "warm",
+    later_at: "2026-09-01T15:15:00+00:00",
+    later_context: "work",
+    work_start: "2026-09-01T13:00:00+00:00",
+    work_end: "2026-09-01T15:00:00+00:00",
+  });
+  assert.match(workBufferText, /Rund um deine Arbeit/, "work-buffer advice after the real shift must not call that time Arbeitszeit");
+  assert.doesNotMatch(workBufferText, /Für deine Arbeitszeit/, "post-shift buffer must not be described as actual work time");
+
+  const actualWorkText = textCard._laterText({
+    jacket_now: "light",
+    jacket_later: "warm",
+    later_at: "2026-09-01T14:15:00+00:00",
+    later_context: "work",
+    work_start: "2026-09-01T13:00:00+00:00",
+    work_end: "2026-09-01T15:00:00+00:00",
+  });
+  assert.match(actualWorkText, /Für deine Arbeitszeit/, "advice inside the real shift should still name the work period");
 
 
   // Shared wall-tablet selection is local to this browser/account and survives
@@ -268,7 +459,7 @@ assert.ok(Card, "jackenberater-card must register itself");
     { confidence: 0.5, total_feedback: 0 },
     [],
   );
-  assert.match(partialWorkDetails, /Arbeitsforecast nur teilweise abgedeckt/, "partial work coverage must be visible in normal details");
+  assert.doesNotMatch(partialWorkDetails, /Arbeitsforecast nur teilweise abgedeckt/, "work-forecast coverage warning is rendered once at card level, not duplicated in details");
   assert.match(textCard._errorText(new Error("work_weather_unavailable")), /Arbeitswetter/, "work-weather outage should be explained instead of showing a raw backend code");
 
   console.log("frontend session contract OK");

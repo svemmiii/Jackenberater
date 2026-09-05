@@ -151,6 +151,23 @@ def test_flatten_keeps_selected_sections_and_omits_empty_values():
     assert const.CONF_INDOOR_TEMP not in result
 
 
+
+
+def test_switching_from_shift_to_weekday_drops_stale_shift_fields():
+    stale = {
+        const.CONF_WORK_MODE: const.WORK_MODE_WEEKDAY,
+        const.CONF_SHIFT_PATTERN: "F,S,N,X",
+        const.CONF_SHIFT_ANCHOR_DATE: "2026-09-01",
+        const.CONF_SHIFT_EARLY_START: "06:00",
+        const.CONF_SHIFT_EARLY_END: "14:00",
+        const.CONF_WORKDAY_START: "08:00",
+        const.CONF_WORKDAY_END: "17:00",
+    }
+    normalized = config_flow._normalize_mode_data(stale)
+    assert const.CONF_SHIFT_PATTERN not in normalized
+    assert const.CONF_SHIFT_ANCHOR_DATE not in normalized
+    assert config_flow._validate(normalized) == {}
+
 def test_work_mode_labels_are_localized():
     de = config_flow._work_mode_options("de-DE")
     en = config_flow._work_mode_options("en-GB")

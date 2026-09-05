@@ -8,7 +8,7 @@ const JB_I18N = {
     cold: "Wie schnell frierst du?",
     warm: "Wie schnell wird dir zu warm?",
     wind: "Wie empfindlich bist du bei Wind?",
-    evening: "Wenn du abends länger draußen bist: Wie aktiv bist du dabei?",
+    evening: "Wie aktiv bist du abends typischerweise draußen?",
     scale: ["Sehr wenig", "Eher wenig", "Neutral", "Eher stark", "Sehr stark"],
     frequency: ["Meist ruhig/stehend", "Eher ruhig", "Gemischt", "Eher aktiv", "Meist aktiv in Bewegung"],
     save: "Profil starten",
@@ -16,7 +16,7 @@ const JB_I18N = {
     light: "Leichte Jacke",
     warmJacket: "Warme Jacke",
     winter: "Winterjacke",
-    takeLater: "mitnehmen",
+    takeLater: "jetzt mitnehmen",
     now: "jetzt",
     later: "später",
     current: "Aktuell",
@@ -58,13 +58,11 @@ const JB_I18N = {
     phaseAll: "Durchgehend",
     cancel: "Abbrechen",
     submitted: "Danke – Bewertung übernommen.",
-    effective: "thermisch etwa",
     work: "Arbeit",
     gusts: "Böen",
     nowOnly: "nur jetzt",
     workWeatherUnavailable: "Arbeitswetter ist aktuell nicht verfügbar. Lieber keine Schätzung als Wetter vom falschen Ort.",
     editorTitle: "Titel",
-    editorShared: "Gemeinsames Wandtablet",
     selectProfile: "Profil auswählen",
     selectProfileText: "Wähle zuerst aus, für wen diese Beratung gedacht ist.",
     unusualDay: "Heute war ungewöhnlich – schwächer gewichten",
@@ -94,7 +92,7 @@ const JB_I18N = {
     profileExported: "Lernprofil exportiert.",
     profileImported: "Lernprofil wiederhergestellt.",
     profileImportError: "Profil-Backup konnte nicht importiert werden.",
-    workWeatherIncomplete: "Arbeitswetter derzeit nicht verfügbar – Empfehlung für die Arbeit unvollständig.",
+    workWeatherIncomplete: "Arbeitsforecast fehlt – Empfehlung für die Arbeit unvollständig.",
     workWeatherPartial: "Arbeitsforecast nur teilweise abgedeckt – Empfehlung für die Arbeit unvollständig.",
     contextCalendarUnavailable: "Kontextkalender nicht verfügbar – längere Termine können aktuell fehlen.",
     vacationCalendarUnavailable: "Abwesenheitskalender nicht verfügbar – die Arbeitsortplanung wird vorsichtshalber nicht verwendet.",
@@ -115,7 +113,7 @@ const JB_I18N = {
     cold: "How quickly do you feel cold?",
     warm: "How quickly do you feel too warm?",
     wind: "How sensitive are you to wind?",
-    evening: "When you spend longer outside in the evening, how active are you?",
+    evening: "How active are you typically when you are outside in the evening?",
     scale: ["Very little", "Rather little", "Neutral", "Rather strong", "Very strong"],
     frequency: ["Mostly standing/quiet", "Rather quiet", "Mixed", "Rather active", "Mostly active movement"],
     save: "Start profile",
@@ -123,7 +121,7 @@ const JB_I18N = {
     light: "Light jacket",
     warmJacket: "Warm jacket",
     winter: "Winter jacket",
-    takeLater: "take it with you",
+    takeLater: "take it with you now",
     now: "now",
     later: "later",
     current: "Current",
@@ -144,7 +142,7 @@ const JB_I18N = {
     oldRecommendation: "previous recommendation",
     currentRecommendation: "current recommendation",
     profile: "Profile",
-    confidence: "Confidence",
+    confidence: "Learning progress",
     feedbackCount: "Ratings",
     windReason: "Wind makes the conditions feel colder.",
     transitionReason: "The indoor-to-outdoor change feels cooler during the first minutes.",
@@ -165,13 +163,11 @@ const JB_I18N = {
     phaseAll: "Throughout",
     cancel: "Cancel",
     submitted: "Thanks – rating saved.",
-    effective: "thermally about",
     work: "Work",
     gusts: "Gusts",
     nowOnly: "now only",
     workWeatherUnavailable: "Work-location weather is currently unavailable. No estimate is shown rather than using weather from the wrong location.",
     editorTitle: "Title",
-    editorShared: "Shared wall tablet",
     selectProfile: "Select profile",
     selectProfileText: "First choose who this recommendation is for.",
     unusualDay: "Today was unusual — give this rating less weight",
@@ -201,7 +197,7 @@ const JB_I18N = {
     profileExported: "Learning profile exported.",
     profileImported: "Learning profile restored.",
     profileImportError: "The profile backup could not be imported.",
-    workWeatherIncomplete: "Work weather is currently unavailable — the advice for work is incomplete.",
+    workWeatherIncomplete: "The work forecast is missing — the advice for work is incomplete.",
     workWeatherPartial: "The work forecast is only partially covered — the advice for work is incomplete.",
     contextCalendarUnavailable: "The context calendar is unavailable — longer appointments may currently be missing.",
     vacationCalendarUnavailable: "The absence calendar is unavailable — work-location planning is conservatively not used.",
@@ -245,6 +241,8 @@ class JackenBeraterCard extends HTMLElement {
     this._phasePending = null;
     this._notice = "";
     this._lastRefreshAt = 0;
+    this._lastRefreshAttemptAt = 0;
+    this._refreshFailures = 0;
     this._stateRefreshTimer = null;
     this._render();
   }
@@ -272,10 +270,16 @@ class JackenBeraterCard extends HTMLElement {
     this._stateRefreshTimer = null;
   }
 
+  _retryIntervalMs() {
+    if (!this._refreshFailures) return 60 * 1000;
+    return Math.min(5 * 60 * 1000, 60 * 1000 * (2 ** Math.min(3, this._refreshFailures - 1)));
+  }
+
   _scheduleStateRefresh() {
     if (!this._hass || this._loading) return;
-    const elapsed = Date.now() - (this._lastRefreshAt || 0);
-    if (elapsed >= 60 * 1000) {
+    const interval = this._retryIntervalMs();
+    const elapsed = Date.now() - (this._lastRefreshAttemptAt || 0);
+    if (elapsed >= interval) {
       this._refresh();
       return;
     }
@@ -283,7 +287,7 @@ class JackenBeraterCard extends HTMLElement {
       this._stateRefreshTimer = setTimeout(() => {
         this._stateRefreshTimer = null;
         this._refresh();
-      }, Math.max(1000, 60 * 1000 - elapsed));
+      }, Math.max(1000, interval - elapsed));
     }
   }
 
@@ -323,7 +327,10 @@ class JackenBeraterCard extends HTMLElement {
   }
 
   _sharedMode() {
-    return Boolean(this._config?.shared || this._autoShared);
+    // Shared-device rights come only from the integration's server-side
+    // shared_user_ids setting. A Lovelace `shared: true` flag must never
+    // manufacture shared behaviour or imply permissions.
+    return Boolean(this._autoShared);
   }
 
   _profileStorageKey() {
@@ -333,10 +340,16 @@ class JackenBeraterCard extends HTMLElement {
   }
 
   _restoreSharedProfile(profiles) {
-    if (this._profileFixed || this._selectedProfile) return;
+    if (this._profileFixed) return;
+    const valid = new Set((profiles || []).map(profile => profile.id));
+    if (this._selectedProfile && !valid.has(this._selectedProfile)) {
+      this._selectedProfile = null;
+      try { window.localStorage?.removeItem(this._profileStorageKey()); } catch (_err) {}
+    }
+    if (this._selectedProfile) return;
     try {
       const stored = window.localStorage?.getItem(this._profileStorageKey());
-      if (stored && (profiles || []).some(profile => profile.id === stored)) {
+      if (stored && valid.has(stored)) {
         this._selectedProfile = stored;
       } else if (stored) {
         window.localStorage?.removeItem(this._profileStorageKey());
@@ -372,28 +385,42 @@ class JackenBeraterCard extends HTMLElement {
 
   async _refresh() {
     if (!this._hass || this._loading) return;
+    if (this._stateRefreshTimer) {
+      clearTimeout(this._stateRefreshTimer);
+      this._stateRefreshTimer = null;
+    }
     this._loading = true;
+    this._lastRefreshAttemptAt = Date.now();
     try {
-      if (!this._profileMetaLoaded || this._sharedMode()) {
-        const profiles = await this._send("jackenberater/profiles");
-        this._profiles = profiles?.profiles || [];
-        this._entryId = profiles?.entry_id || this._entryId;
-        this._currentUserId = profiles?.current_user_id || this._currentUserId;
-        this._isAdmin = Boolean(profiles?.is_admin);
-        this._autoShared = Boolean(profiles?.shared_account);
-        this._profileMetaLoaded = true;
-        if (this._sharedMode()) this._restoreSharedProfile(this._profiles);
-        if (this._sharedMode() && !this._selectedProfile) {
-          this._preview = null;
-          this._error = "";
-          this._lastRefreshAt = Date.now();
-          return;
-        }
+      const wasShared = this._autoShared;
+      const profiles = await this._send("jackenberater/profiles");
+      this._profiles = profiles?.profiles || [];
+      this._entryId = profiles?.entry_id || this._entryId;
+      this._currentUserId = profiles?.current_user_id || this._currentUserId;
+      this._isAdmin = Boolean(profiles?.is_admin);
+      this._autoShared = Boolean(profiles?.shared_account);
+      this._profileMetaLoaded = true;
+
+      if (this._sharedMode()) {
+        this._restoreSharedProfile(this._profiles);
+      } else if (!this._profileFixed && (wasShared || this._selectedProfile)) {
+        this._selectedProfile = null;
+        try { window.localStorage?.removeItem(this._profileStorageKey()); } catch (_err) {}
+      }
+
+      if (this._sharedMode() && !this._selectedProfile) {
+        this._preview = null;
+        this._error = "";
+        this._lastRefreshAt = Date.now();
+        this._refreshFailures = 0;
+        return;
       }
       this._preview = await this._send("jackenberater/preview");
       this._error = "";
       this._lastRefreshAt = Date.now();
+      this._refreshFailures = 0;
     } catch (err) {
+      this._refreshFailures = Math.min(8, (this._refreshFailures || 0) + 1);
       this._error = this._errorText(err);
     } finally {
       this._loading = false;
@@ -402,11 +429,25 @@ class JackenBeraterCard extends HTMLElement {
   }
 
 
+  _toggleInfo() {
+    const openingInfo = !this._infoOpen;
+    this._infoOpen = openingInfo;
+    if (openingInfo) {
+      this._open = false;
+      this._phasePending = null;
+      this._notice = "";
+    }
+    this._render();
+  }
+
   async _openAdvice() {
     if (this._sharedMode() && !this._selectedProfile) {
       this._render();
       return;
     }
+    // Details and the information panel are mutually exclusive. Opening the
+    // recommendation details always closes Info first.
+    if (!this._open) this._infoOpen = false;
     // Simulated profile values may affect display only. Never create a session.
     if (this._preview?.recommendation?.simulation_active) {
       this._open = !this._open;
@@ -595,9 +636,18 @@ class JackenBeraterCard extends HTMLElement {
     if (this._lang() === "de") {
       if (warmer) {
         const prefix = this._currentFitSentence(rec.jacket_now);
-        return rec.later_context === "work"
-          ? `${prefix} Für deine Arbeitszeit wird ab etwa ${when} ${this._jacketArticle(rec.jacket_later)} sinnvoll.`
-          : `${prefix} Wenn du länger unterwegs bist, wird ab etwa ${when} ${this._jacketArticle(rec.jacket_later)} sinnvoll.`;
+        const jacket = this._jacketArticle(rec.jacket_later);
+        if (rec.later_context === "work") {
+          const later = Date.parse(rec.later_at);
+          const start = Date.parse(rec.work_start || "");
+          const end = Date.parse(rec.work_end || "");
+          const duringWork = Number.isFinite(later) && Number.isFinite(start) && Number.isFinite(end)
+            && later >= start && later <= end;
+          return duringWork
+            ? `${prefix} Für deine Arbeitszeit wird ab etwa ${when} ${jacket} sinnvoll. Wenn du vorher nicht mehr nach Hause kommst: ${jacket} ${this._t("takeLater")}.`
+            : `${prefix} Rund um deine Arbeit wird ab etwa ${when} ${jacket} sinnvoll. Wenn du bis dahin unterwegs bist: ${jacket} ${this._t("takeLater")}.`;
+        }
+        return `${prefix} Wenn du dann noch unterwegs bist: ${jacket} ${this._t("takeLater")}; ab etwa ${when} wird sie sinnvoll.`;
       }
       return rec.jacket_later === "none"
         ? `Ab etwa ${when} brauchst du voraussichtlich keine Jacke mehr.`
@@ -605,9 +655,18 @@ class JackenBeraterCard extends HTMLElement {
     }
     if (warmer) {
       const prefix = this._currentFitSentence(rec.jacket_now);
-      return rec.later_context === "work"
-        ? `${prefix} During your work period, ${this._jacketArticle(rec.jacket_later)} becomes useful from about ${when}.`
-        : `${prefix} If you stay out longer, ${this._jacketArticle(rec.jacket_later)} becomes useful from about ${when}.`;
+      const jacket = this._jacketArticle(rec.jacket_later);
+      if (rec.later_context === "work") {
+        const later = Date.parse(rec.later_at);
+        const start = Date.parse(rec.work_start || "");
+        const end = Date.parse(rec.work_end || "");
+        const duringWork = Number.isFinite(later) && Number.isFinite(start) && Number.isFinite(end)
+          && later >= start && later <= end;
+        return duringWork
+          ? `${prefix} For your work period, ${jacket} becomes useful from about ${when}. If you will not be home again beforehand, ${jacket}: ${this._t("takeLater")}.`
+          : `${prefix} Around your work period, ${jacket} becomes useful from about ${when}. If you will still be out then, ${jacket}: ${this._t("takeLater")}.`;
+      }
+      return `${prefix} If you will still be out then, ${jacket}: ${this._t("takeLater")}; it becomes useful from about ${when}.`;
     }
     return rec.jacket_later === "none"
       ? `From about ${when}, you probably won't need a jacket anymore.`
@@ -667,13 +726,18 @@ class JackenBeraterCard extends HTMLElement {
   _calendarWarnings(rec) {
     const warnings = [];
     if (rec?.context_calendar_status === "unavailable") {
-      warnings.push(this._t("contextCalendarUnavailable"));
+      warnings.push({ icon: "mdi:calendar-alert", text: this._t("contextCalendarUnavailable") });
     }
     if (rec?.vacation_calendar_status === "unavailable") {
-      warnings.push(this._t("vacationCalendarUnavailable"));
+      warnings.push({ icon: "mdi:calendar-alert", text: this._t("vacationCalendarUnavailable") });
+    }
+    if (rec?.work_forecast_coverage === "partial") {
+      warnings.push({ icon: "mdi:weather-cloudy-alert", text: this._t("workWeatherPartial") });
+    } else if (rec?.work_forecast_coverage === "missing") {
+      warnings.push({ icon: "mdi:weather-cloudy-alert", text: this._t("workWeatherIncomplete") });
     }
     if (!warnings.length) return "";
-    return `<div class="jb-calendar-warnings">${warnings.map(text => `<div class="jb-info-note jb-warning"><ha-icon icon="mdi:calendar-alert"></ha-icon>${jbEscape(text)}</div>`).join("")}</div>`;
+    return `<div class="jb-calendar-warnings">${warnings.map(item => `<div class="jb-info-note jb-warning"><ha-icon icon="${item.icon}"></ha-icon>${jbEscape(item.text)}</div>`).join("")}</div>`;
   }
 
   _infoPanel(rec, profile, diagnostics) {
@@ -693,11 +757,6 @@ class JackenBeraterCard extends HTMLElement {
       : "";
     const canImport = this._canImportProfile(profile);
     const canManage = this._canManageProfile(profile);
-    const workWarning = rec.work_forecast_coverage === "partial"
-      ? `<div class="jb-info-note jb-warning"><ha-icon icon="mdi:weather-cloudy-alert"></ha-icon>${jbEscape(this._t("workWeatherPartial"))}</div>`
-      : (rec.work_forecast_coverage === "missing" || rec.work_weather_available === false)
-        ? `<div class="jb-info-note jb-warning"><ha-icon icon="mdi:weather-cloudy-alert"></ha-icon>${jbEscape(this._t("workWeatherIncomplete"))}</div>`
-        : "";
     const simulationWarning = rec.simulation_active
       ? `<div class="jb-info-note jb-warning"><ha-icon icon="mdi:flask-outline"></ha-icon>${jbEscape(this._t("simulationWarning"))}</div>`
       : "";
@@ -710,7 +769,7 @@ class JackenBeraterCard extends HTMLElement {
         <div><span>${this._t("infoForecast")}</span><strong>${jbEscape(rec.forecast_coverage_complete ? this._t("forecastComplete") : this._t("forecastPartial"))}</strong></div>
         <div><span>${this._t("infoPersonal")}</span><strong>${Math.round((rec.confidence || profile.confidence || 0) * 100)} %</strong></div>
       </div>
-      ${simulationWarning}${workWarning}${transient}${seasonal}
+      ${simulationWarning}${transient}${seasonal}
       ${this._diagnosticsPanel(diagnostics)}
       ${canManage && JB_PROFILE_BACKUP_ENABLED ? `<div class="jb-info-backup"><div class="jb-section-title">${this._t("backupTitle")}</div><div class="jb-info-actions">
         <button data-action="profile-export"><ha-icon icon="mdi:tray-arrow-down"></ha-icon>${this._t("exportProfile")}</button>
@@ -823,7 +882,7 @@ class JackenBeraterCard extends HTMLElement {
       content = `
         <div class="jb-main compact" data-action="open">
           <div class="jb-icon ${rec.jacket_now}"><ha-icon icon="${this._jacketIcon(rec.jacket_now)}"></ha-icon></div>
-          <div class="jb-copy"><div class="jb-kicker">${jbEscape(title)}</div><div class="jb-headline">${jbEscape(this._jacketLabel(rec.jacket_now))}</div><div class="jb-sub">${Math.round(rec.current_temperature_c * 10) / 10} °C · ${this._t("effective")} ${Math.round(rec.effective_now_c * 10) / 10} °C</div></div>
+          <div class="jb-copy"><div class="jb-kicker">${jbEscape(title)}</div><div class="jb-headline">${jbEscape(this._jacketLabel(rec.jacket_now))}</div><div class="jb-sub">${Math.round(rec.current_temperature_c * 10) / 10} °C</div></div>
           ${feedbackBadge}${infoButton}<ha-icon class="jb-chevron" icon="mdi:chevron-right"></ha-icon>
         </div>${calendarWarnings}${this._infoOpen ? this._infoPanel(rec, profile, this._preview?.diagnostics) : ""}`;
     } else {
@@ -831,7 +890,7 @@ class JackenBeraterCard extends HTMLElement {
         <div class="jb-main" data-action="open">
           <div class="jb-icon ${rec.jacket_now}"><ha-icon icon="${this._jacketIcon(rec.jacket_now)}"></ha-icon></div>
           <div class="jb-copy"><div class="jb-kicker">${jbEscape(title)}</div><div class="jb-headline">${jbEscape(this._jacketLabel(rec.jacket_now))}</div>
-            <div class="jb-sub">${jbEscape(this._laterText(rec) || `${rec.current_temperature_c ?? "–"} °C · ${this._t("effective")} ${rec.effective_now_c ?? "–"} °C`)}</div>
+            <div class="jb-sub">${jbEscape(this._laterText(rec) || `${rec.current_temperature_c ?? "–"} °C`)}</div>
           </div>
           ${feedbackBadge}${infoButton}<ha-icon class="jb-chevron" icon="mdi:${this._open ? "chevron-up" : "chevron-right"}"></ha-icon>
         </div>${calendarWarnings}
@@ -861,11 +920,6 @@ class JackenBeraterCard extends HTMLElement {
       : rec.rain_status === "take"
         ? `<div class="jb-rain"><ha-icon icon="mdi:weather-partly-rainy"></ha-icon>${this._t("rainTake")}</div>`
         : "";
-    const workWarning = rec.work_forecast_coverage === "partial"
-      ? `<div class="jb-info-note jb-warning"><ha-icon icon="mdi:weather-cloudy-alert"></ha-icon>${jbEscape(this._t("workWeatherPartial"))}</div>`
-      : (rec.work_forecast_coverage === "missing" || rec.work_weather_available === false)
-        ? `<div class="jb-info-note jb-warning"><ha-icon icon="mdi:weather-cloudy-alert"></ha-icon>${jbEscape(this._t("workWeatherIncomplete"))}</div>`
-        : "";
     const pendingHtml = pending.length ? `<div class="jb-divider"></div><div class="jb-section-title">${this._t("feedbackFor")} ${jbEscape(profile.name || "")} · ${pending.length} ${pending.length === 1 ? this._t("feedbackOpen") : this._t("feedbackPlural")}</div>${pending.map(session => this._feedbackCard(session, true)).join("")}` : "";
     const pendingIds = new Set(pending.map(session => session.id));
     const latest = this._preview?.latest_session;
@@ -882,12 +936,11 @@ class JackenBeraterCard extends HTMLElement {
     const phase = this._phasePending ? this._phasePanel() : "";
     return `<div class="jb-panel">
       ${rec.simulation_active ? `<div class="jb-info-note jb-warning"><ha-icon icon="mdi:flask-outline"></ha-icon>${jbEscape(this._t("simulationWarning"))}</div>` : ""}
-      ${workWarning}
       ${rain}
       <div class="jb-metrics"><span>${rec.current_temperature_c ?? "–"} °C</span><span>${rec.current_wind_kmh != null ? `${rec.current_wind_kmh} km/h${rec.current_gust_kmh != null && rec.current_gust_kmh > rec.current_wind_kmh ? ` · ${this._t("gusts")} ${rec.current_gust_kmh} km/h` : ""}` : (rec.current_gust_kmh != null ? `${this._t("gusts")} ${rec.current_gust_kmh} km/h` : "–")}</span><span>${rec.horizon_hours > 0 ? `${rec.horizon_hours} h` : this._t("nowOnly")}</span></div>
       ${rec.work_context && rec.work_jacket ? `<div class="jb-context"><ha-icon icon="mdi:briefcase-outline"></ha-icon>${jbEscape(rec.work_name || this._t("work"))}: ${this._jacketLabel(rec.work_jacket)}</div>` : ""}
       ${reasons.length ? `<div class="jb-section-title">${this._t("why")}</div><ul class="jb-reasons">${reasons.map(x => `<li>${jbEscape(x)}</li>`).join("")}</ul>` : ""}
-      ${!this._autoShared || this._isAdmin ? `<div class="jb-learning"><span>${this._t("confidence")}: ${Math.round((profile.confidence || 0) * 100)} %</span><span>${this._t("feedbackCount")}: ${profile.total_feedback || 0}</span></div>` : ""}
+      ${!this._autoShared || this._isAdmin ? `<div class="jb-learning"><span>${this._t("confidence")}: ${Math.round((profile.learning_progress ?? profile.confidence ?? 0) * 100)} %</span><span>${this._t("feedbackCount")}: ${profile.total_feedback || 0}</span></div>` : ""}
       ${pendingHtml}
       ${manualHtml}
       ${phase}
@@ -921,8 +974,7 @@ class JackenBeraterCard extends HTMLElement {
     this.querySelector("[data-action='open']")?.addEventListener("click", () => this._openAdvice());
     this.querySelector("[data-action='info']")?.addEventListener("click", ev => {
       ev.stopPropagation();
-      this._infoOpen = !this._infoOpen;
-      this._render();
+      this._toggleInfo();
     });
     this.querySelector("[data-action='profile-export']")?.addEventListener("click", ev => {
       ev.stopPropagation();

@@ -407,7 +407,7 @@ def test_shared_user_opens_own_profile_scoped_session_but_not_other_writes():
     assert len(errors) == 4
 
 
-def test_shared_feedback_requires_a_mature_session_opened_by_same_login():
+def test_shared_feedback_accepts_any_mature_session_for_selected_profile():
     errors = []
     results = []
     feedback_calls = []
@@ -423,7 +423,7 @@ def test_shared_feedback_requires_a_mature_session_opened_by_same_login():
     manager = types.SimpleNamespace(
         profile_ids={"person"}, get_model=lambda profile_id: model,
         is_feedback_candidate=lambda profile_id, session_id, **kwargs: (
-            session_id == "due-owned" and kwargs["opened_by_user_id"] == "tablet"
+            session_id == "due-owned" and not kwargs
         ),
         async_feedback=accept_feedback,
         get_profile_summary=lambda profile_id: {
@@ -667,7 +667,33 @@ def test_missing_planned_work_forecast_is_reported_as_incomplete():
     api._cached_calendar_horizon = no_calendar
     api._cached_work_window_sets = future_work
     rec = asyncio.run(api._recommendation(types.SimpleNamespace(states=types.SimpleNamespace(get=lambda *_: None)), entry, runtime, model))
-    assert rec.work_weather_available is False
+    assert rec.work_weather_available is True
+    assert rec.work_forecast_coverage == "missing"
+
+
+def test_forecast_freshness_guard_rejects_retained_stale_data_after_failed_refresh():
+    class Coordinator:
+        def __init__(self):
+            self.data = {
+                "updated": NOW - const.FORECAST_REFRESH - timedelta(seconds=1),
+                "home_forecast": [point(3, dt=NOW + timedelta(hours=1))],
+            }
+            self.last_update_success = True
+
+        async def async_refresh(self):
+            # Match DataUpdateCoordinator behaviour on provider failure: the old
+            # data can remain while success is marked false.
+            self.last_update_success = False
+
+    original_now = api.dt_util.now
+    api.dt_util.now = lambda: NOW
+    coordinator = Coordinator()
+    try:
+        fresh = asyncio.run(api._ensure_forecast_fresh(coordinator))
+    finally:
+        api.dt_util.now = original_now
+    assert fresh is False
+    assert coordinator.data["home_forecast"]  # retained by coordinator, but rejected by API
 
 
 def test_calendar_unavailable_status_reaches_recommendation_response():
@@ -701,3 +727,214 @@ def test_calendar_unavailable_status_reaches_recommendation_response():
         api._cached_calendar_horizon = original
     assert rec.context_calendar_status == const.CALENDAR_STATUS_UNAVAILABLE
     assert rec.as_dict()["context_calendar_status"] == "unavailable"
+
+
+def test_forecast_freshness_guard_refreshes_stale_coordinator():
+    calls = []
+
+    class Coordinator:
+        def __init__(self):
+            self.data = {"updated": NOW - const.FORECAST_REFRESH - timedelta(seconds=1)}
+
+        async def async_refresh(self):
+            calls.append("refresh")
+            self.data["updated"] = NOW
+
+    original_now = api.dt_util.now
+    api.dt_util.now = lambda: NOW
+    try:
+        asyncio.run(api._ensure_forecast_fresh(Coordinator()))
+    finally:
+        api.dt_util.now = original_now
+    assert calls == ["refresh"]
+
+
+
+
+def test_recommendation_does_not_use_stale_forecast_after_failed_refresh():
+    current = point(18)
+
+    class Coordinator:
+        def __init__(self):
+            self.data = {
+                "updated": NOW - const.FORECAST_REFRESH - timedelta(seconds=1),
+                "home_forecast": [point(-8, dt=NOW + timedelta(hours=1))],
+                "work_forecast": [],
+            }
+            self.last_update_success = True
+
+        async def async_refresh(self):
+            self.last_update_success = False
+
+    entry = types.SimpleNamespace(data={
+        const.CONF_WEATHER: "weather.home",
+        const.CONF_FALLBACK_INDOOR_TEMP: 21.5,
+        const.CONF_RAIN_ADVICE: True,
+    })
+    runtime = {"coordinator": Coordinator(), "context_cache": {}}
+    model = learning.PersonalModel.from_answers(3, 3, 3, 3)
+    original_current = api.current_weather
+    original_indoor = api.indoor_temperature_c
+    original_calendar = api._cached_calendar_horizon
+    original_now = api.dt_util.now
+    api.current_weather = lambda *args, **kwargs: current
+    api.indoor_temperature_c = lambda *args, **kwargs: 21.5
+    api.dt_util.now = lambda: NOW
+
+    async def no_calendar(*args, **kwargs):
+        return None, const.CALENDAR_STATUS_NOT_CONFIGURED
+
+    api._cached_calendar_horizon = no_calendar
+    try:
+        rec = asyncio.run(api._recommendation(types.SimpleNamespace(states=None), entry, runtime, model))
+    finally:
+        api.current_weather = original_current
+        api.indoor_temperature_c = original_indoor
+        api._cached_calendar_horizon = original_calendar
+        api.dt_util.now = original_now
+    assert rec.horizon_hours == 0
+    assert rec.jacket_later == rec.jacket_now
+
+def test_forecast_freshness_guard_keeps_recent_coordinator():
+    calls = []
+
+    class Coordinator:
+        def __init__(self):
+            self.data = {"updated": NOW - timedelta(minutes=5)}
+
+        async def async_refresh(self):
+            calls.append("refresh")
+
+    original_now = api.dt_util.now
+    api.dt_util.now = lambda: NOW
+    try:
+        asyncio.run(api._ensure_forecast_fresh(Coordinator()))
+    finally:
+        api.dt_util.now = original_now
+    assert calls == []
+
+
+def test_active_work_weather_is_used_even_when_home_weather_is_unavailable():
+    work = point(6)
+    entry = types.SimpleNamespace(
+        data={
+            const.CONF_WEATHER: "weather.home",
+            const.CONF_WORK_WEATHER: "weather.work",
+            const.CONF_FALLBACK_INDOOR_TEMP: 21.5,
+            const.CONF_RAIN_ADVICE: True,
+        }
+    )
+    runtime = {
+        "coordinator": types.SimpleNamespace(data={"home_forecast": [], "work_forecast": []}),
+        "context_cache": {},
+    }
+    model = learning.PersonalModel.from_answers(3, 3, 3, 3)
+
+    original_current = api.current_weather
+    original_indoor = api.indoor_temperature_c
+    original_calendar = api._cached_calendar_horizon
+    original_work_sets = api._cached_work_window_sets
+    api.current_weather = lambda hass, entity_id: work if entity_id == "weather.work" else None
+    api.indoor_temperature_c = lambda *args, **kwargs: 21.5
+
+    async def no_calendar(*args, **kwargs):
+        return None, const.CALENDAR_STATUS_NOT_CONFIGURED
+
+    async def work_sets(*args, **kwargs):
+        return (
+            [(NOW - timedelta(hours=1), NOW + timedelta(hours=2))],
+            [(NOW - timedelta(hours=1, minutes=30), NOW + timedelta(hours=2, minutes=30))],
+            const.CALENDAR_STATUS_NOT_CONFIGURED,
+        )
+
+    api._cached_calendar_horizon = no_calendar
+    api._cached_work_window_sets = work_sets
+    hass = types.SimpleNamespace(states=types.SimpleNamespace(get=lambda entity_id: None))
+    try:
+        rec = asyncio.run(api._recommendation(hass, entry, runtime, model))
+    finally:
+        api.current_weather = original_current
+        api.indoor_temperature_c = original_indoor
+        api._cached_calendar_horizon = original_calendar
+        api._cached_work_window_sets = original_work_sets
+
+    assert rec.source == "work"
+    assert rec.current_temperature_c == 6.0
+
+
+def test_multiple_work_windows_display_the_window_that_drives_later_advice():
+    home = point(20)
+    first = (NOW + timedelta(hours=1), NOW + timedelta(hours=3))
+    second = (NOW + timedelta(hours=10), NOW + timedelta(hours=14))
+    later_at = NOW + timedelta(hours=12)
+    work_forecast = [point(5, dt=later_at)]
+    entry = types.SimpleNamespace(
+        data={
+            const.CONF_WEATHER: "weather.home",
+            const.CONF_WORK_WEATHER: "weather.work",
+            const.CONF_FALLBACK_INDOOR_TEMP: 21.5,
+            const.CONF_RAIN_ADVICE: True,
+        }
+    )
+    runtime = {
+        "coordinator": types.SimpleNamespace(data={"home_forecast": [], "work_forecast": work_forecast}),
+        "context_cache": {},
+    }
+    model = learning.PersonalModel.from_answers(3, 3, 3, 3)
+
+    original_current = api.current_weather
+    original_indoor = api.indoor_temperature_c
+    original_calendar = api._cached_calendar_horizon
+    original_work_sets = api._cached_work_window_sets
+    original_build = api.build_recommendation
+    api.current_weather = lambda hass, entity_id: home
+    api.indoor_temperature_c = lambda *args, **kwargs: 21.5
+
+    async def no_calendar(*args, **kwargs):
+        return None, const.CALENDAR_STATUS_NOT_CONFIGURED
+
+    async def work_sets(*args, **kwargs):
+        planning = [
+            (first[0] - timedelta(minutes=30), first[1] + timedelta(minutes=30)),
+            (second[0] - timedelta(minutes=30), second[1] + timedelta(minutes=30)),
+        ]
+        return [first, second], planning, const.CALENDAR_STATUS_NOT_CONFIGURED
+
+    def fixed_build(*args, **kwargs):
+        return models.Recommendation(
+            jacket_now=const.JACKET_NONE,
+            jacket_later=const.JACKET_WARM,
+            later_at=later_at,
+            rain_status=const.RAIN_NONE,
+            display_mode=const.DISPLAY_FULL,
+            horizon_hours=12,
+            effective_now_c=20.0,
+            min_effective_c=5.0,
+            max_effective_c=20.0,
+            confidence=0.5,
+            reasons=["forecast_change", "work_location"],
+            current_temperature_c=20.0,
+            current_wind_kmh=0.0,
+            current_gust_kmh=0.0,
+            current_condition="sunny",
+            transition_penalty_c=0.0,
+            later_context="work",
+            work_context=True,
+            work_jacket=const.JACKET_WARM,
+        )
+
+    api._cached_calendar_horizon = no_calendar
+    api._cached_work_window_sets = work_sets
+    api.build_recommendation = fixed_build
+    hass = types.SimpleNamespace(states=types.SimpleNamespace(get=lambda entity_id: None))
+    try:
+        rec = asyncio.run(api._recommendation(hass, entry, runtime, model))
+    finally:
+        api.current_weather = original_current
+        api.indoor_temperature_c = original_indoor
+        api._cached_calendar_horizon = original_calendar
+        api._cached_work_window_sets = original_work_sets
+        api.build_recommendation = original_build
+
+    assert rec.work_start == second[0]
+    assert rec.work_end == second[1]

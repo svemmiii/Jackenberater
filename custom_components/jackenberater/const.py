@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import timedelta
 
 DOMAIN = "jackenberater"
-INTEGRATION_VERSION = "0.1.3"
+INTEGRATION_VERSION = "0.1.5"
 PLATFORMS = ["sensor"]
 PROFILE_BACKUP_ENABLED = False
 
@@ -97,3 +97,4 @@ PHASE_VALUES = {PHASE_START, PHASE_LATER, PHASE_ALL}
 
 SIGNAL_PROFILE_CREATED = f"{DOMAIN}_profile_created_{{entry_id}}"
 SIGNAL_PROFILE_UPDATED = f"{DOMAIN}_profile_updated_{{entry_id}}"
+SIGNAL_PROFILE_DELETED = f"{DOMAIN}_profile_deleted_{{entry_id}}"

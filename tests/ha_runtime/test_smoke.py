@@ -1,10 +1,12 @@
 """Real Home Assistant runtime smoke test for the integration lifecycle."""
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant
+from homeassistant.util import dt as dt_util
 from pytest_homeassistant_custom_component.common import MockConfigEntry, MockUser
 from pytest_homeassistant_custom_component.typing import WebSocketGenerator
 
@@ -21,7 +23,9 @@ async def _coordinator_first_refresh(coordinator) -> None:
     coordinator.data = {
         "home_forecast": [],
         "work_forecast": [],
+        "updated": dt_util.now(),
     }
+    coordinator.last_update_success = True
 
 
 async def test_setup_preview_session_feedback_reload_and_unload(
@@ -71,7 +75,7 @@ async def test_setup_preview_session_feedback_reload_and_unload(
         await hass.async_block_till_done()
         assert entry.state is ConfigEntryState.LOADED
 
-        manager = hass.data[DOMAIN][entry.entry_id]["profiles"]
+        manager = entry.runtime_data["profiles"]
         await manager.async_ensure_profile(hass_admin_user.id, "Admin")
         await manager.async_setup_profile(
             hass_admin_user.id, cold=3, warm=3, wind=3, evening=3
@@ -127,9 +131,20 @@ async def test_setup_preview_session_feedback_reload_and_unload(
         assert shared_preview["success"]
         assert "diagnostics" not in shared_preview["result"]
 
+        # Reload immediately after feedback: the delayed profile write must be
+        # flushed before the replacement manager loads its state.
         assert await hass.config_entries.async_reload(entry.entry_id)
         await hass.async_block_till_done()
         assert entry.state is ConfigEntryState.LOADED
+        manager = entry.runtime_data["profiles"]
+        assert manager.get_model(hass_admin_user.id).total_feedback == 1
+
         assert await hass.config_entries.async_unload(entry.entry_id)
         await hass.async_block_till_done()
         assert entry.state is ConfigEntryState.NOT_LOADED
+
+        store_path = Path(hass.config.path(".storage", f"jackenberater.{entry.entry_id}"))
+        assert store_path.exists()
+        await hass.config_entries.async_remove(entry.entry_id)
+        await hass.async_block_till_done()
+        assert not store_path.exists()

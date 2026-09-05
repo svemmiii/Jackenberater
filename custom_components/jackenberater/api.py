@@ -27,9 +27,12 @@ from .const import (
     CONF_WORK_WEATHER,
     CONF_WORK_ZONE,
     DEFAULT_FALLBACK_INDOOR_TEMP,
+    DEFAULT_FORECAST_HOURS,
     DOMAIN,
+    FORECAST_REFRESH,
     FEEDBACK_VALUES,
     MAX_FORECAST_HOURS,
+    WORK_BUFFER,
     PHASE_VALUES,
     PROFILE_BACKUP_ENABLED,
 )
@@ -38,7 +41,7 @@ from .diagnostics import model_diagnostics
 from .engine import build_recommendation, merge_location_timeline
 from .models import Recommendation, WeatherPoint
 from .profiles import ProfileManager
-from .time_utils import elapsed, instant_key, is_after, is_between
+from .time_utils import elapsed, instant_key, is_after, is_between, real_add
 from .weather import current_weather, indoor_temperature_c
 
 _LOGGER = logging.getLogger(__name__)
@@ -71,7 +74,11 @@ def _runtime(hass: HomeAssistant, entry_id: str | None) -> tuple[ConfigEntry, di
         entry = None
     if entry is None:
         raise ValueError("JackenBerater config entry not found")
-    runtime = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+    runtime = getattr(entry, "runtime_data", None)
+    # Compatibility fallback for tests or an in-flight reload from older code;
+    # normal v0.1.5 setup stores per-entry runtime state on ConfigEntry itself.
+    if not isinstance(runtime, dict):
+        runtime = hass.data.get(DOMAIN, {}).get(entry.entry_id)
     if not isinstance(runtime, dict):
         raise ValueError("JackenBerater is not loaded")
     return entry, runtime
@@ -137,6 +144,45 @@ async def _profile(
     return own_id, manager.get_model(own_id)
 
 
+async def _ensure_forecast_fresh(coordinator) -> bool:
+    """Refresh a stale coordinator before using it for a deliberate lookup.
+
+    Normal operation is kept fresh by the coordinator listener registered at
+    setup. This guard also protects recommendations when polling was disabled,
+    interrupted, or the clock moved unexpectedly.
+    """
+    refresh = getattr(coordinator, "async_refresh", None)
+    if not callable(refresh):
+        return True
+    data = coordinator.data if isinstance(getattr(coordinator, "data", None), dict) else {}
+    updated = data.get("updated")
+    now = dt_util.now()
+    if isinstance(updated, datetime):
+        age = elapsed(updated, now)
+        if timedelta(0) <= age < FORECAST_REFRESH:
+            return True
+    try:
+        await refresh()
+    except Exception as err:
+        _LOGGER.debug("Forced forecast refresh failed: %s", err)
+        return False
+
+    # A DataUpdateCoordinator can swallow provider failures and retain its old
+    # data object. A finished refresh call therefore is not proof of fresh data.
+    if getattr(coordinator, "last_update_success", True) is False:
+        return False
+    refreshed = (
+        coordinator.data
+        if isinstance(getattr(coordinator, "data", None), dict)
+        else {}
+    )
+    refreshed_at = refreshed.get("updated")
+    if not isinstance(refreshed_at, datetime):
+        return False
+    age = elapsed(refreshed_at, dt_util.now())
+    return timedelta(0) <= age < FORECAST_REFRESH
+
+
 async def _recommendation(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -144,22 +190,27 @@ async def _recommendation(
     model,
 ) -> Recommendation:
     coordinator = runtime["coordinator"]
+    forecast_fresh = await _ensure_forecast_fresh(coordinator)
+    now = dt_util.now()
     weather_entity = str(entry.data[CONF_WEATHER])
-    current = current_weather(hass, weather_entity)
-    if current is None:
-        raise ValueError("weather_unavailable")
+    home_current = current_weather(hass, weather_entity)
 
     indoor = indoor_temperature_c(
         hass,
         entry.data.get(CONF_INDOOR_TEMP),
         float(entry.data.get(CONF_FALLBACK_INDOOR_TEMP, DEFAULT_FALLBACK_INDOOR_TEMP)),
     )
-    forecast = list((coordinator.data or {}).get("home_forecast", []))
-    activity = activity_context_c(dt_util.now(), model.evening_answer)
+    forecast_data = (
+        coordinator.data
+        if forecast_fresh and isinstance(getattr(coordinator, "data", None), dict)
+        else {}
+    )
+    forecast = list(forecast_data.get("home_forecast", []))
+    activity = activity_context_c(now, model.evening_answer)
     context_horizon, context_calendar_status = await _cached_calendar_horizon(
         hass, entry, runtime
     )
-    base_horizon = max(9, context_horizon or 0)
+    base_horizon = max(DEFAULT_FORECAST_HOURS, context_horizon or 0)
     max_horizon = max(MAX_FORECAST_HOURS, min(CALENDAR_MAX_HOURS, context_horizon or 0))
 
     work_points: list[WeatherPoint] = []
@@ -168,21 +219,50 @@ async def _recommendation(
     work_end: datetime | None = None
     active_work_context = False
     vacation_calendar_status = CALENDAR_STATUS_NOT_APPLICABLE
+    actual_windows: list[tuple[datetime, datetime]] = []
+    planning_windows: list[tuple[datetime, datetime]] = []
     work_entity = entry.data.get(CONF_WORK_WEATHER)
+
+    # Resolve the actual location before requiring the home weather source. A
+    # broken home entity must not block advice while the configured work model
+    # says the user is actually at work and that source is healthy.
     if isinstance(work_entity, str) and work_entity:
         (
             actual_windows,
             planning_windows,
             vacation_calendar_status,
-        ) = await _cached_work_window_sets(
-            hass, entry, runtime
+        ) = await _cached_work_window_sets(hass, entry, runtime)
+        active_window = next(
+            (window for window in actual_windows if is_between(now, window[0], window[1])),
+            None,
         )
-        work_forecast = list((coordinator.data or {}).get("work_forecast", []))
-        now = dt_util.now()
+        if active_window is not None:
+            work_current = current_weather(hass, work_entity)
+            if work_current is None:
+                raise ValueError("work_weather_unavailable")
+            current = work_current
+            active_work_context = True
+            work_start, work_end = active_window
+            # A living-room sensor is not representative at work.
+            indoor = float(
+                entry.data.get(CONF_FALLBACK_INDOOR_TEMP, DEFAULT_FALLBACK_INDOOR_TEMP)
+            )
+        else:
+            if home_current is None:
+                raise ValueError("weather_unavailable")
+            current = home_current
+    else:
+        if home_current is None:
+            raise ValueError("weather_unavailable")
+        current = home_current
+
+    if isinstance(work_entity, str) and work_entity:
+        work_forecast = list(forecast_data.get("work_forecast", []))
         if planning_windows:
-            chosen_window = (actual_windows or planning_windows)[0]
-            work_start = chosen_window[0]
-            work_end = chosen_window[1] if actual_windows else None
+            if work_start is None:
+                chosen_window = (actual_windows or planning_windows)[0]
+                work_start = chosen_window[0]
+                work_end = chosen_window[1] if actual_windows else None
             work_points = [
                 point
                 for point in work_forecast
@@ -195,37 +275,15 @@ async def _recommendation(
             work_forecast_coverage = _work_forecast_coverage(
                 current.dt, work_forecast, planning_windows
             )
-            # Planning relevance starts 30 minutes around the work period, but the
-            # current location does not. Home forecast points are replaced only for
-            # the planning timeline; current weather switches below using the actual
-            # unbuffered work window.
+            # Work forecast replaces home forecast only inside the planned work
+            # windows. Missing work points stay missing instead of silently using
+            # the wrong location.
             forecast = merge_location_timeline(
                 forecast, work_forecast, planning_windows
             )
 
-        # Only the unbuffered actual work window may replace the *current* weather.
-        # The ±30 minute planning buffer is for “take it with you”, not a location
-        # claim about where the user already is.
-        if actual_windows and any(
-            is_between(now, start, end) for start, end in actual_windows
-        ):
-            work_current = current_weather(hass, work_entity)
-            if work_current is None:
-                # During an actual work window, silently falling back to home
-                # weather would claim conditions for the wrong location. Prefer
-                # an explicit temporary gap until the work source is usable.
-                raise ValueError("work_weather_unavailable")
-            current = work_current
-            active_work_context = True
-            # A selected living-room sensor is not representative at work.
-            indoor = float(
-                entry.data.get(CONF_FALLBACK_INDOOR_TEMP, DEFAULT_FALLBACK_INDOOR_TEMP)
-            )
-
     # If work planning extends the recommendation beyond the ordinary 12-hour
-    # weather window, the home timeline must be evaluated to the same claimed
-    # end time. Otherwise a home cold/rain event at e.g. +13 h could be skipped
-    # while a work point at +14 h makes the card claim a 14-hour horizon.
+    # weather window, evaluate the complete claimed period.
     if work_points:
         latest_work = max((point.dt for point in work_points), key=instant_key)
         work_horizon = math.ceil(
@@ -259,18 +317,48 @@ async def _recommendation(
         activity_context_c=activity,
         activity_context_fn=lambda when: activity_context_c(when, model.evening_answer),
     )
+
+    # With multiple work windows, show the window that actually contains the
+    # work forecast point which drove the later recommendation, not blindly the
+    # first window in the 16-hour planning range.
+    if recommendation.later_context == "work" and recommendation.later_at is not None:
+        target = recommendation.later_at
+        matching_actual = next(
+            (
+                window
+                for window in actual_windows
+                if is_between(
+                    target,
+                    real_add(window[0], -WORK_BUFFER),
+                    real_add(window[1], WORK_BUFFER),
+                )
+            ),
+            None,
+        )
+        if matching_actual is not None:
+            recommendation.work_start, recommendation.work_end = matching_actual
+        else:
+            matching_planning = next(
+                (window for window in planning_windows if is_between(target, window[0], window[1])),
+                None,
+            )
+            if matching_planning is not None:
+                recommendation.work_start = matching_planning[0]
+                recommendation.work_end = matching_planning[1]
+
     recommendation.source = "work" if active_work_context else "home"
     recommendation.work_forecast_coverage = work_forecast_coverage
     recommendation.context_calendar_status = context_calendar_status
     recommendation.vacation_calendar_status = vacation_calendar_status
-    recommendation.work_weather_available = work_forecast_coverage not in {
-        "missing",
-        "partial",
-    }
+    # Live work weather and future work-forecast coverage are distinct. Missing
+    # future points must not be described as if the current work entity failed.
+    recommendation.work_weather_available = True
     if active_work_context and not recommendation.work_context:
         recommendation.work_context = True
         recommendation.work_jacket = recommendation.jacket_now
         recommendation.work_name = work_name
+        recommendation.work_start = work_start
+        recommendation.work_end = work_end
     return recommendation
 
 
@@ -444,13 +532,7 @@ async def ws_preview(hass, connection, msg) -> None:
         summary = _profile_summary_for_connection(
             connection, entry, manager.get_profile_summary(profile_id)
         )
-        feedback = (
-            manager.feedback_candidates(
-                profile_id, opened_by_user_id=str(connection.user.id)
-            )
-            if read_only_shared
-            else manager.feedback_candidates(profile_id)
-        )
+        feedback = manager.feedback_candidates(profile_id)
         result = {
             "entry_id": entry.entry_id,
             "profile": summary,
@@ -511,14 +593,7 @@ async def ws_open_session(hass, connection, msg) -> None:
                 ),
                 "recommendation": rec.as_dict(),
                 "session": None if shared_account else session,
-                "feedback": manager.feedback_candidates(
-                    profile_id,
-                    **(
-                        {"opened_by_user_id": str(connection.user.id)}
-                        if shared_account
-                        else {}
-                    ),
-                ),
+                "feedback": manager.feedback_candidates(profile_id),
             },
         )
     except ValueError as err:
@@ -584,11 +659,7 @@ async def ws_feedback(hass, connection, msg) -> None:
         shared_account = _is_shared_account(connection, entry) and not connection.user.is_admin
         if shared_account and (
             msg.get("voluntary", False)
-            or not manager.is_feedback_candidate(
-                profile_id,
-                msg["session_id"],
-                opened_by_user_id=str(connection.user.id),
-            )
+            or not manager.is_feedback_candidate(profile_id, msg["session_id"])
         ):
             raise ValueError("shared_feedback_not_allowed")
         session = await manager.async_feedback(
@@ -613,6 +684,14 @@ async def ws_feedback(hass, connection, msg) -> None:
         connection.send_error(msg["id"], "invalid_feedback", str(err))
 
 
+async def _sync_profile_directory(hass: HomeAssistant, manager: ProfileManager) -> None:
+    """Refresh names and prune profiles for HA users that no longer exist."""
+    auth = getattr(hass, "auth", None)
+    get_users = getattr(auth, "async_get_users", None)
+    if callable(get_users):
+        manager.sync_user_directory(await get_users())
+
+
 @websocket_api.websocket_command(
     {
         vol.Required("type"): "jackenberater/profiles",
@@ -620,14 +699,15 @@ async def ws_feedback(hass, connection, msg) -> None:
         vol.Optional("profile_id"): str,
     }
 )
-@callback
-def ws_profiles(hass, connection, msg) -> None:
+@websocket_api.async_response
+async def ws_profiles(hass, connection, msg) -> None:
     try:
         entry, runtime = _runtime(hass, msg.get("entry_id"))
     except ValueError as err:
         connection.send_error(msg["id"], "unavailable", str(err))
         return
     manager: ProfileManager = runtime["profiles"]
+    await _sync_profile_directory(hass, manager)
     own_id = str(connection.user.id)
     shared_account = _is_shared_account(connection, entry)
     if _can_use_shared_profiles(connection, entry):

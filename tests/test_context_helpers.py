@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 import asyncio
 import importlib.util
@@ -372,3 +372,24 @@ def test_horizon_is_sixteen_real_hours_across_dst_changes():
     ):
         end = context._absolute_horizon_end(now, 16)
         assert end.astimezone(timezone.utc) - now.astimezone(timezone.utc) == timedelta(hours=16)
+
+
+def test_nonexistent_spring_shift_time_moves_to_first_valid_local_minute():
+    berlin = ZoneInfo("Europe/Berlin")
+    resolved = context._resolve_local_wall_datetime(
+        date(2026, 3, 29), time(2, 30), berlin, boundary="start"
+    )
+    assert resolved is not None
+    assert (resolved.hour, resolved.minute) == (3, 0)
+
+
+def test_ambiguous_autumn_shift_boundaries_keep_the_repeated_hour():
+    berlin = ZoneInfo("Europe/Berlin")
+    first = context._resolve_local_wall_datetime(
+        date(2026, 10, 25), time(2, 30), berlin, boundary="start"
+    )
+    second = context._resolve_local_wall_datetime(
+        date(2026, 10, 25), time(2, 30), berlin, boundary="end"
+    )
+    assert first is not None and second is not None
+    assert context.elapsed(first, second) == timedelta(hours=1)

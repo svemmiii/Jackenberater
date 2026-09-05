@@ -26,6 +26,7 @@ from .const import (
     PHASE_VALUES,
     SESSION_EXPIRY,
     SIGNAL_PROFILE_CREATED,
+    SIGNAL_PROFILE_DELETED,
     SIGNAL_PROFILE_UPDATED,
     STORAGE_KEY_PREFIX,
     STORAGE_VERSION,
@@ -91,10 +92,33 @@ class ProfileManager:
             "learning_enabled": model.learning_enabled,
             "total_feedback": model.total_feedback,
             "confidence": round(model.confidence(), 3),
+            "learning_progress": round(model.learning_progress(), 3),
         }
 
     def summaries(self) -> list[dict[str, Any]]:
         return [self.get_profile_summary(pid) for pid in self.profile_ids]
+
+    def sync_user_directory(self, users: list[Any]) -> bool:
+        """Prune deleted HA users and refresh stored display names."""
+        directory = {str(user.id): str(user.name or user.id) for user in users}
+        changed = False
+        for profile_id in list(self._profiles):
+            if profile_id not in directory:
+                del self._profiles[profile_id]
+                changed = True
+                async_dispatcher_send(
+                    self.hass,
+                    SIGNAL_PROFILE_DELETED.format(entry_id=self.entry.entry_id),
+                    profile_id,
+                )
+                continue
+            if self._profiles[profile_id].get("name") != directory[profile_id]:
+                self._profiles[profile_id]["name"] = directory[profile_id]
+                changed = True
+                self._updated(profile_id)
+        if changed:
+            self._schedule_save()
+        return changed
 
     async def async_ensure_profile(self, profile_id: str, name: str) -> PersonalModel:
         created = profile_id not in self._profiles
@@ -218,7 +242,6 @@ class ProfileManager:
                 break
             if (
                 session.get("feedback") is None
-                and session.get("opened_by_user_id") == opened_by_user_id
                 and _session_context_matches(
                     session, recommendation, weather_context, learning_contexts
                 )
@@ -305,9 +328,19 @@ class ProfileManager:
         return candidates
 
     def is_feedback_candidate(
-        self, profile_id: str, session_id: str, *, opened_by_user_id: str
+        self,
+        profile_id: str,
+        session_id: str,
+        *,
+        opened_by_user_id: str | None = None,
     ) -> bool:
-        """Verify that a shared login may answer this mature, owned session."""
+        """Verify that a mature feedback session is currently due for a profile.
+
+        ``opened_by_user_id`` remains available for callers that deliberately need
+        device/login scoping, but shared-profile feedback normally validates the
+        selected profile itself so a wall tablet can answer a session opened on a
+        phone.
+        """
         return any(
             candidate.get("id") == session_id
             for candidate in self.feedback_candidates(
@@ -335,9 +368,14 @@ class ProfileManager:
             raise KeyError("session not found")
         if session.get("feedback") is not None:
             raise ValueError("feedback already submitted")
+        now = dt_util.now()
         expires = _parse_dt(session.get("expires_at"))
-        if expires is not None and is_at_or_after(dt_util.now(), expires):
+        if expires is not None and is_at_or_after(now, expires):
             raise ValueError("feedback expired")
+        if not voluntary:
+            ready = _parse_dt(session.get("ready_at"))
+            if not session.get("request_feedback") or ready is None or is_before(now, ready):
+                raise ValueError("feedback_not_ready")
 
         model = self.get_model(profile_id)
         # Only feedback that can actually change the learning model becomes the
@@ -501,6 +539,14 @@ class ProfileManager:
         self._profiles[profile_id]["sessions"] = _bounded_sessions(
             self._sessions(profile_id)
         )
+
+    async def async_flush(self) -> None:
+        """Persist the current profile state before a config-entry reload/unload."""
+        await self.store.async_save({"profiles": self._profiles})
+
+    async def async_remove_storage(self) -> None:
+        """Remove persisted profile/session data when the config entry is deleted."""
+        await self.store.async_remove()
 
     @callback
     def _schedule_save(self) -> None:

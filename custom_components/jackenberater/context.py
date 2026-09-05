@@ -152,7 +152,7 @@ def activity_context_c(now: datetime, evening_answer: int) -> float:
     """Return a weak correction for the user's typical evening activity.
 
     The setup question now measures the thing this value actually represents:
-    quiet/standing versus active movement while spending longer outside. This is
+    quiet/standing versus active movement during a typical evening. This is
     deliberately small and applies only in the evening, so it can refine close
     calls without overpowering weather or personal feedback.
     """
@@ -269,10 +269,12 @@ def _weekday_windows(
     last_day = end.date() + timedelta(days=1)
     while day <= last_day:
         if day.weekday() < 5:
-            a = datetime.combine(day, start_time, tzinfo=start.tzinfo)
-            b = datetime.combine(day, end_time, tzinfo=start.tzinfo)
-            if b <= a:
-                b += timedelta(days=1)
+            end_day = day if end_time > start_time else day + timedelta(days=1)
+            a = _resolve_local_wall_datetime(day, start_time, start.tzinfo, boundary="start")
+            b = _resolve_local_wall_datetime(end_day, end_time, start.tzinfo, boundary="end")
+            if a is None or b is None or not is_after(b, a):
+                day += timedelta(days=1)
+                continue
             if is_at_or_after(b, start) and is_at_or_before(a, end):
                 windows.append(
                     (real_add(a, -WORK_BUFFER), real_add(b, WORK_BUFFER))
@@ -342,11 +344,55 @@ def _shift_bounds(
     end_time = _parse_time(str(entry.data.get(end_key, default_end)))
     if start_time is None or end_time is None or start_time == end_time:
         return None
-    a = datetime.combine(day, start_time, tzinfo=tzinfo)
-    b = datetime.combine(day, end_time, tzinfo=tzinfo)
-    if b <= a:
-        b += timedelta(days=1)
+    end_day = day if end_time > start_time else day + timedelta(days=1)
+    a = _resolve_local_wall_datetime(day, start_time, tzinfo, boundary="start")
+    b = _resolve_local_wall_datetime(end_day, end_time, tzinfo, boundary="end")
+    if a is None or b is None or not is_after(b, a):
+        return None
     return a, b
+
+
+def _resolve_local_wall_datetime(
+    day: date,
+    wall_time: time,
+    tzinfo,
+    *,
+    boundary: str,
+) -> datetime | None:
+    """Resolve ambiguous/non-existent local shift times deterministically.
+
+    For an autumn fold, starts use the first occurrence and ends use the second
+    occurrence so a configured shift never silently loses the repeated hour.
+    For a spring gap, a non-existent wall time is advanced to the first valid
+    local minute (for example 02:30 -> 03:00 in Europe/Berlin).
+    """
+    if tzinfo is None:
+        tzinfo = dt_util.UTC
+
+    naive = datetime.combine(day, wall_time)
+
+    def candidates(value: datetime) -> list[datetime]:
+        result: dict[datetime, datetime] = {}
+        for fold in (0, 1):
+            aware = value.replace(tzinfo=tzinfo, fold=fold)
+            try:
+                roundtrip = aware.astimezone(dt_util.UTC).astimezone(tzinfo)
+            except (ValueError, OverflowError):
+                continue
+            if roundtrip.replace(tzinfo=None) != value:
+                continue
+            result[instant_key(aware)] = aware
+        return [result[key] for key in sorted(result)]
+
+    options = candidates(naive)
+    if not options:
+        for minute in range(1, 181):
+            options = candidates(naive + timedelta(minutes=minute))
+            if options:
+                break
+    if not options:
+        return None
+    return options[0] if boundary == "start" else options[-1]
 
 
 def _parse_time(value: str) -> time | None:

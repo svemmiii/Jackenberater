@@ -120,7 +120,7 @@ def test_open_session_persists_and_accepts_feedback():
             phase=None,
             recommendation_used=True,
             unusual_day=False,
-            voluntary=False,
+            voluntary=True,
         )
         assert result["feedback"]["rating"] == const.FEEDBACK_PERFECT
         assert manager.get_model("user").total_feedback == 1
@@ -167,7 +167,7 @@ def test_phase_all_learns_start_and_later_without_double_counting_global_feedbac
             phase=const.PHASE_ALL,
             recommendation_used=True,
             unusual_day=False,
-            voluntary=False,
+            voluntary=True,
         )
         learned = manager.get_model("user")
         assert learned.total_feedback == before + 1
@@ -227,6 +227,45 @@ def test_async_load_persists_cleanup_only_when_storage_changes():
 
     asyncio.run(run())
 
+
+
+def test_async_flush_persists_current_profile_state_immediately():
+    class RecordingStore:
+        def __init__(self):
+            self.saved = None
+
+        async def async_save(self, data):
+            self.saved = data
+
+    async def run():
+        manager = make_manager()
+        store = RecordingStore()
+        manager.store = store
+        model = manager.get_model("user")
+        model.total_feedback = 7
+        manager._profiles["user"]["model"] = model.to_dict()
+        await manager.async_flush()
+        assert store.saved["profiles"]["user"]["model"]["total_feedback"] == 7
+
+    asyncio.run(run())
+
+
+def test_async_remove_storage_deletes_profile_store():
+    class RecordingStore:
+        def __init__(self):
+            self.removed = False
+
+        async def async_remove(self):
+            self.removed = True
+
+    async def run():
+        manager = make_manager()
+        store = RecordingStore()
+        manager.store = store
+        await manager.async_remove_storage()
+        assert store.removed is True
+
+    asyncio.run(run())
 
 def test_feedback_is_not_ready_immediately_for_current_advice():
     async def run():
@@ -299,7 +338,7 @@ def test_perfect_class_change_confirms_start_and_later_boundaries():
             phase=None,
             recommendation_used=True,
             unusual_day=False,
-            voluntary=False,
+            voluntary=True,
         )
         learned = manager.get_model("user")
         assert result["feedback"]["phase"] == const.PHASE_ALL
@@ -386,7 +425,7 @@ def test_recent_session_reuses_nearly_identical_learning_context():
     asyncio.run(run())
 
 
-def test_recent_sessions_are_scoped_to_the_login_that_opened_them():
+def test_recent_identical_sessions_are_deduplicated_across_logins_for_same_profile():
     async def run():
         manager = make_manager()
         rec = recommendation()
@@ -396,23 +435,17 @@ def test_recent_sessions_are_scoped_to_the_login_that_opened_them():
         }
         first = await manager.async_open_session(
             "user", rec, weather_context={"condition": "cloudy"},
-            learning_contexts=context, opened_by_user_id="tablet-a",
-        )
-        same_login = await manager.async_open_session(
-            "user", rec, weather_context={"condition": "cloudy"},
-            learning_contexts=context, opened_by_user_id="tablet-a",
+            learning_contexts=context, opened_by_user_id="phone",
         )
         other_login = await manager.async_open_session(
             "user", rec, weather_context={"condition": "cloudy"},
-            learning_contexts=context, opened_by_user_id="tablet-b",
+            learning_contexts=context, opened_by_user_id="wall-tablet",
         )
-        assert same_login["id"] == first["id"]
-        assert other_login["id"] != first["id"]
+        assert other_login["id"] == first["id"]
+        assert manager.get_model("user").feedback_opportunities == 1
         assert "opened_by_user_id" not in first
-        assert "opened_by_user_id" not in other_login
 
     asyncio.run(run())
-
 
 def test_session_feedback_delay_and_expiry_use_real_time_across_dst():
     async def run():
@@ -592,3 +625,64 @@ def test_profile_import_sanitizes_values_and_rejects_wrong_format():
             raise AssertionError("invalid profile backup must be rejected")
 
     asyncio.run(run())
+
+
+def test_nonvoluntary_feedback_is_rejected_until_ready_but_voluntary_is_immediate():
+    async def run():
+        manager = make_manager()
+        session = await manager.async_open_session(
+            "user", recommendation(), weather_context={"temperature_c": 15.0},
+            learning_contexts={
+                "start": {"jacket": const.JACKET_LIGHT, "effective_c": 15.0},
+                "later": {"jacket": const.JACKET_LIGHT, "effective_c": 15.0},
+            },
+        )
+        try:
+            await manager.async_feedback(
+                "user", session["id"], rating=const.FEEDBACK_PERFECT, phase=None,
+                recommendation_used=True, unusual_day=False, voluntary=False,
+            )
+        except ValueError as err:
+            assert str(err) == "feedback_not_ready"
+        else:
+            raise AssertionError("automatic feedback must respect ready_at")
+
+        # A fresh session can still be rated explicitly as voluntary feedback.
+        result = await manager.async_feedback(
+            "user", session["id"], rating=const.FEEDBACK_PERFECT, phase=None,
+            recommendation_used=True, unusual_day=False, voluntary=True,
+        )
+        assert result["feedback"]["rating"] == const.FEEDBACK_PERFECT
+
+    asyncio.run(run())
+
+
+def test_learning_progress_never_drops_after_first_feedback():
+    model = learning.PersonalModel.from_answers(3, 3, 3, 3)
+    start = model.learning_progress()
+    learning.apply_feedback(
+        model, rating=const.FEEDBACK_PERFECT, jacket=const.JACKET_LIGHT,
+        effective_c=15.0, recommendation_used=True, observed_at=datetime(2026, 9, 1, tzinfo=timezone.utc),
+    )
+    assert start == 0.18
+    assert model.learning_progress() >= start
+
+
+def test_sync_user_directory_prunes_deleted_users_refreshes_names_and_signals_delete():
+    manager = make_manager()
+    extra = learning.PersonalModel.from_answers(3, 3, 3, 3)
+    manager._profiles["deleted"] = {"name": "Deleted", "model": extra.to_dict(), "sessions": []}
+    calls = []
+    original_send = profiles.async_dispatcher_send
+    profiles.async_dispatcher_send = lambda hass, signal, profile_id: calls.append((signal, profile_id))
+    try:
+        changed = manager.sync_user_directory([types.SimpleNamespace(id="user", name="Renamed")])
+    finally:
+        profiles.async_dispatcher_send = original_send
+    assert changed is True
+    assert manager.profile_ids == ["user"]
+    assert manager.profile_name("user") == "Renamed"
+    assert (
+        const.SIGNAL_PROFILE_DELETED.format(entry_id=manager.entry.entry_id),
+        "deleted",
+    ) in calls

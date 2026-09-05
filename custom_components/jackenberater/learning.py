@@ -184,6 +184,39 @@ class PersonalModel:
             return 0.18 if self.setup_complete else 0.08
         return max(0.08, min(0.98, self.general_stat.confidence))
 
+    def learning_progress(self) -> float:
+        """User-facing breadth of learned evidence during normal forward use.
+
+        The value starts with the setup prior and grows from a blend of general,
+        garment-boundary and specialist evidence. Using a blend instead of the
+        single largest statistic prevents one heavily trained niche (for example
+        short-transition tolerance) from making the whole profile look mature.
+        Reset and undo intentionally may move this value backwards.
+        """
+        if not self.setup_complete:
+            return 0.08
+        boundary_evidence = (
+            self.light_stat.weight_sum
+            + self.warm_stat.weight_sum
+            + self.winter_stat.weight_sum
+        ) / 3.0
+        specialist_evidence = (
+            self.wind_stat.weight_sum
+            + self.transition_stat.weight_sum
+            + self.transient_stat.weight_sum
+            + self.winter_season_stat.weight_sum
+            + self.spring_season_stat.weight_sum
+            + self.summer_season_stat.weight_sum
+            + self.autumn_season_stat.weight_sum
+        ) / 7.0
+        evidence = (
+            0.55 * self.general_stat.weight_sum
+            + 0.35 * boundary_evidence
+            + 0.10 * specialist_evidence
+        )
+        learned = 0.18 + 0.80 * (1.0 - math.exp(-evidence / 12.0))
+        return max(0.18, min(0.98, learned))
+
     def jacket_confidence(self, jacket: str) -> float:
         """Confidence of the boundary/boundaries that define one jacket class."""
         if jacket == JACKET_NONE:

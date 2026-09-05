@@ -83,3 +83,69 @@ def test_ha_runtime_job_imports_repository_package_reliably():
     )
     assert "pythonpath = ." in pytest_config
     assert "python -m pytest -q tests/ha_runtime" in workflow
+
+
+def test_forecast_coordinator_has_keepalive_listener_for_periodic_refresh():
+    init_source = (INTEGRATION / "__init__.py").read_text(encoding="utf-8")
+    assert "coordinator.async_add_listener" in init_source
+    assert "entry.async_on_unload" in init_source
+
+
+def test_manifest_declares_single_config_entry_without_duplicate_flow_guard():
+    manifest = json.loads((INTEGRATION / "manifest.json").read_text(encoding="utf-8"))
+    config_flow = (INTEGRATION / "config_flow.py").read_text(encoding="utf-8")
+    assert manifest["single_config_entry"] is True
+    assert "_abort_if_unique_id_configured" not in config_flow
+    assert 'async_set_unique_id("main")' not in config_flow
+
+
+def test_frontend_registration_does_not_hide_unexpected_runtime_errors():
+    init_source = (INTEGRATION / "__init__.py").read_text(encoding="utf-8")
+    assert 'domain_data["frontend_path_registered"] = True' in init_source
+    assert "except RuntimeError" not in init_source
+
+
+def test_frontend_only_fix_has_cache_revision_without_release_version_bump():
+    init_source = (INTEGRATION / "__init__.py").read_text(encoding="utf-8")
+    const_source = (INTEGRATION / "const.py").read_text(encoding="utf-8")
+    assert 'INTEGRATION_VERSION = "0.1.5"' in const_source
+    assert 'FRONTEND_CACHE_REVISION = "3"' in init_source
+    assert 'wanted = f"{base}?v={INTEGRATION_VERSION}&ui={FRONTEND_CACHE_REVISION}"' in init_source
+
+
+def test_release_hardening_uses_runtime_data_and_removes_owned_frontend_resource():
+    init_source = (INTEGRATION / "__init__.py").read_text(encoding="utf-8")
+    api_source = (INTEGRATION / "api.py").read_text(encoding="utf-8")
+    weather_source = (INTEGRATION / "weather.py").read_text(encoding="utf-8")
+    assert "entry.runtime_data =" in init_source
+    assert 'getattr(entry, "runtime_data", None)' in api_source
+    assert "config_entry=entry" in weather_source
+    assert "async def async_remove_entry" in init_source
+    assert "await manager.async_flush()" in init_source
+    assert "await manager.async_remove_storage()" in init_source
+    assert "async_delete_item" in init_source
+
+
+def test_profile_deletion_has_runtime_and_registry_cleanup_contract():
+    const_source = (INTEGRATION / "const.py").read_text(encoding="utf-8")
+    profiles_source = (INTEGRATION / "profiles.py").read_text(encoding="utf-8")
+    sensor_source = (INTEGRATION / "sensor.py").read_text(encoding="utf-8")
+    assert "SIGNAL_PROFILE_DELETED" in const_source
+    assert "SIGNAL_PROFILE_DELETED.format" in profiles_source
+    assert 'runtime.setdefault("simulations", {}).pop(profile_id, None)' in sensor_source
+    assert "registry.async_remove(entity_id)" in sensor_source
+    init_source = (INTEGRATION / "__init__.py").read_text(encoding="utf-8")
+    assert "_async_remove_orphan_profile_diagnostics" in init_source
+    assert "manager.sync_user_directory" in init_source
+
+
+def test_user_card_does_not_expose_internal_effective_temperature():
+    frontend = (INTEGRATION / "frontend" / "jackenberater-card.js").read_text(encoding="utf-8")
+    assert "thermisch etwa" not in frontend
+    assert "effective_now_c" not in frontend
+
+
+def test_bug_report_template_targets_current_release():
+    bug = (ROOT / ".github" / "ISSUE_TEMPLATE" / "bug_report.yml").read_text(encoding="utf-8")
+    assert 'value: "0.1.5"' in bug
+

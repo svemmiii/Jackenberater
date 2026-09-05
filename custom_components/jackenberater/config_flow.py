@@ -185,6 +185,27 @@ def _flatten(user_input: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+_SHIFT_ONLY_KEYS = (
+    CONF_SHIFT_PATTERN,
+    CONF_SHIFT_ANCHOR_DATE,
+    CONF_SHIFT_EARLY_START,
+    CONF_SHIFT_EARLY_END,
+    CONF_SHIFT_LATE_START,
+    CONF_SHIFT_LATE_END,
+    CONF_SHIFT_NIGHT_START,
+    CONF_SHIFT_NIGHT_END,
+)
+
+
+def _normalize_mode_data(data: dict[str, Any]) -> dict[str, Any]:
+    """Drop stale mode-specific values before validation and persistence."""
+    normalized = dict(data)
+    if normalized.get(CONF_WORK_MODE, WORK_MODE_WEEKDAY) != WORK_MODE_SHIFT:
+        for key in _SHIFT_ONLY_KEYS:
+            normalized.pop(key, None)
+    return normalized
+
+
 def _section_defaults(data: dict[str, Any]) -> dict[str, Any]:
     basic = {
         CONF_WEATHER: data.get(CONF_WEATHER),
@@ -283,9 +304,10 @@ def _validate(data: dict[str, Any]) -> dict[str, str]:
         errors["base"] = "invalid_work_time"
 
     work_weather = data.get(CONF_WORK_WEATHER)
-    work_context_present = any(
-        data.get(key)
-        for key in (CONF_WORK_ZONE, CONF_VACATION_CALENDAR, CONF_SHIFT_PATTERN)
+    work_context_present = bool(
+        data.get(CONF_WORK_ZONE)
+        or data.get(CONF_VACATION_CALENDAR)
+        or (mode == WORK_MODE_SHIFT and data.get(CONF_SHIFT_PATTERN))
     )
     if work_context_present and mode != WORK_MODE_NONE and not work_weather:
         errors.setdefault("base", "work_weather_required")
@@ -308,11 +330,9 @@ class JackenBeraterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     MINOR_VERSION = 1
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None):
-        await self.async_set_unique_id("main")
         shared_options = await _shared_user_options(self.hass)
-        self._abort_if_unique_id_configured()
         if user_input is not None:
-            data = _flatten(user_input)
+            data = _normalize_mode_data(_flatten(user_input))
             errors = _validate(data)
             if not errors:
                 return self.async_create_entry(title="JackenBerater", data=data)
@@ -327,7 +347,7 @@ class JackenBeraterConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         entry = self._get_reconfigure_entry()
         shared_options = await _shared_user_options(self.hass)
         if user_input is not None:
-            data = _flatten(user_input)
+            data = _normalize_mode_data(_flatten(user_input))
             errors = _validate(data)
             if not errors:
                 # The update listener registered by the integration performs the

@@ -34,7 +34,7 @@
           },
           "work": {
             "name": "Arbeitskontext (optional)",
-            "description": "Optionaler Arbeitsort. Der Arbeitskontext wird nur aktiv, wenn eine Wetterquelle am Arbeitsort gewählt ist. Dann wird standardmäßig Montag bis Freitag 08:00–17:00 Uhr angenommen; Schichtarbeiter können stattdessen unten einen rotierenden Zyklus verwenden.",
+            "description": "Optionaler Arbeitsort. Der Arbeitskontext wird nur aktiv, wenn eine Wetterquelle am Arbeitsort gewählt ist. Dann wird das gewählte Arbeitsmodell für Zeitfenster und Arbeitswetter verwendet; die Arbeitszone dient nur als Anzeigename und nicht zur Anwesenheits- oder Standorterkennung.",
             "data": {
               "work_zone": "Arbeitszone",
               "work_weather_entity": "Wetter am Arbeitsort",
@@ -44,8 +44,8 @@
               "vacation_calendar_entity": "Urlaubs-/Abwesenheitskalender"
             },
             "data_description": {
-              "work_zone": "Vorhandene Home-Assistant-Zone für Zuordnung und Anzeige. Die Wetterdaten kommen aus der separaten Wetterquelle.",
-              "work_weather_entity": "Optionale Wetterquelle für einen Arbeitsort mit deutlich anderen Bedingungen. Erst mit dieser Wetterquelle wird das gewählte Arbeitsmodell tatsächlich verwendet.",
+              "work_zone": "Optionaler Anzeigename aus einer vorhandenen Home-Assistant-Zone. Koordinaten, Zonenstatus und Anwesenheit werden nicht ausgewertet; Wetter und Arbeitszeitlogik kommen aus den separat gewählten Einstellungen.",
+              "work_weather_entity": "Wetterquelle für den Arbeitsort. Erst mit dieser Wetterquelle wird das gewählte Arbeitsmodell tatsächlich für Jackenempfehlungen verwendet.",
               "work_mode": "Normale 5-Tage-Woche nutzt Montag bis Freitag. Rotierendes Schichtsystem verwendet den unten hinterlegten Zyklus. „Nicht berücksichtigen“ deaktiviert die automatische Arbeitsannahme.",
               "workday_start": "Standard 08:00 Uhr. Der 30-Minuten-Puffer davor dient nur der Planung; als aktueller Arbeitsort gilt die tatsächliche Arbeitszeit.",
               "workday_end": "Standard 17:00 Uhr. Der 30-Minuten-Puffer danach dient nur der Planung; als aktueller Arbeitsort gilt die tatsächliche Arbeitszeit.",
@@ -72,7 +72,7 @@
           },
           "shared": {
             "name": "Gemeinsames Wandtablet",
-            "description": "Freigegebene HA-Konten werden von der Karte automatisch als gemeinsames Bediengerät erkannt und bekommen kein eigenes Wärmeprofil.",
+            "description": "Freigegebene HA-Konten werden von der Karte automatisch als gemeinsames Bediengerät erkannt. Solange sie freigegeben sind, legen oder verwenden sie kein eigenes Wärmeprofil für Beratungen; ein bereits früher gelerntes persönliches Profil wird jedoch nicht automatisch gelöscht.",
             "data": {
               "shared_user_ids": "Freigegebene Tablet-/Gemeinschaftskonten"
             },
@@ -122,10 +122,10 @@
               "workday_end": "Normales Arbeitsende",
               "vacation_calendar_entity": "Urlaubs-/Abwesenheitskalender"
             },
-            "description": "Optionaler Arbeitsort. Standardmäßig wird Montag bis Freitag 08:00–17:00 Uhr angenommen; Schichtarbeiter können stattdessen unten einen rotierenden Zyklus verwenden.",
+            "description": "Optionaler Arbeitsort. Der Arbeitskontext wird nur aktiv, wenn eine Wetterquelle am Arbeitsort gewählt ist. Dann wird das gewählte Arbeitsmodell für Zeitfenster und Arbeitswetter verwendet; die Arbeitszone dient nur als Anzeigename und nicht zur Anwesenheits- oder Standorterkennung.",
             "data_description": {
-              "work_zone": "Vorhandene Home-Assistant-Zone für Zuordnung und Anzeige. Die Wetterdaten kommen aus der separaten Wetterquelle.",
-              "work_weather_entity": "Optionale Wetterquelle für einen Arbeitsort mit deutlich anderen Bedingungen.",
+              "work_zone": "Optionaler Anzeigename aus einer vorhandenen Home-Assistant-Zone. Koordinaten, Zonenstatus und Anwesenheit werden nicht ausgewertet; Wetter und Arbeitszeitlogik kommen aus den separat gewählten Einstellungen.",
+              "work_weather_entity": "Wetterquelle für den Arbeitsort. Erst mit dieser Wetterquelle wird das gewählte Arbeitsmodell tatsächlich für Jackenempfehlungen verwendet.",
               "work_mode": "Normale 5-Tage-Woche nutzt Montag bis Freitag. Rotierendes Schichtsystem verwendet den unten hinterlegten Zyklus. „Nicht berücksichtigen“ deaktiviert die automatische Arbeitsannahme.",
               "workday_start": "Standard 08:00 Uhr. Der 30-Minuten-Puffer davor dient nur der Planung; als aktueller Arbeitsort gilt die tatsächliche Arbeitszeit.",
               "workday_end": "Standard 17:00 Uhr. Der 30-Minuten-Puffer danach dient nur der Planung; als aktueller Arbeitsort gilt die tatsächliche Arbeitszeit.",
@@ -152,7 +152,7 @@
           },
           "shared": {
             "name": "Gemeinsames Wandtablet",
-            "description": "Freigegebene HA-Konten werden von der Karte automatisch als gemeinsames Bediengerät erkannt und bekommen kein eigenes Wärmeprofil.",
+            "description": "Freigegebene HA-Konten werden von der Karte automatisch als gemeinsames Bediengerät erkannt. Solange sie freigegeben sind, legen oder verwenden sie kein eigenes Wärmeprofil für Beratungen; ein bereits früher gelerntes persönliches Profil wird jedoch nicht automatisch gelöscht.",
             "data": {
               "shared_user_ids": "Freigegebene Tablet-/Gemeinschaftskonten"
             },

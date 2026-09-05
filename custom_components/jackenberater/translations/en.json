@@ -34,7 +34,7 @@
           },
           "work": {
             "name": "Work context (optional)",
-            "description": "Optional work location. Work context becomes active only when a weather source for work is selected. Then Monday-Friday 08:00–17:00 is assumed by default; shift workers can use the rotating cycle below instead.",
+            "description": "Optional work location. Work context becomes active only when a work weather source is selected. The chosen work model then supplies the time windows and work weather; the work zone is only used as a display name and never for presence or location tracking.",
             "data": {
               "work_zone": "Work zone",
               "work_weather_entity": "Weather at work",
@@ -44,8 +44,8 @@
               "vacation_calendar_entity": "Vacation/absence calendar"
             },
             "data_description": {
-              "work_zone": "Existing Home Assistant zone for context and display. Weather itself comes from the separate weather entity.",
-              "work_weather_entity": "Optional weather source for a work location with significantly different conditions. The selected work model is only applied when this weather source is configured.",
+              "work_zone": "Optional display name from an existing Home Assistant zone. Coordinates, zone state and presence are not evaluated; weather and work timing come from the separately selected settings.",
+              "work_weather_entity": "Weather source for the work location. The selected work model affects jacket advice only when this weather source is configured.",
               "work_mode": "Normal 5-day week uses Monday-Friday. Rotating shift system uses the cycle configured below. “Do not consider work” disables automatic work assumptions.",
               "workday_start": "Default 08:00. The 30-minute buffer before this time is only for planning; current work weather starts at the actual work time.",
               "workday_end": "Default 17:00. The 30-minute buffer after this time is only for planning; current work weather ends at the actual work time.",
@@ -72,7 +72,7 @@
           },
           "shared": {
             "name": "Shared wall tablet",
-            "description": "Allowed HA accounts are automatically recognized by the card as shared control devices and do not get their own thermal profile.",
+            "description": "Allowed HA accounts are automatically recognized by the card as shared control devices. While shared, they do not create or use their own thermal profile for advice; a personal profile learned before the account became shared is retained rather than deleted automatically.",
             "data": {
               "shared_user_ids": "Allowed tablet/shared accounts"
             },
@@ -123,14 +123,14 @@
               "vacation_calendar_entity": "Vacation/absence calendar"
             },
             "data_description": {
-              "work_zone": "Existing Home Assistant zone for context and display. Weather itself comes from the separate weather entity.",
-              "work_weather_entity": "Optional weather source for a work location with significantly different conditions.",
+              "work_zone": "Optional display name from an existing Home Assistant zone. Coordinates, zone state and presence are not evaluated; weather and work timing come from the separately selected settings.",
+              "work_weather_entity": "Weather source for the work location. The selected work model affects jacket advice only when this weather source is configured.",
               "work_mode": "Normal 5-day week uses Monday-Friday. Rotating shift system uses the cycle configured below. “Do not consider work” disables automatic work assumptions.",
               "workday_start": "Default 08:00. The 30-minute buffer before this time is only for planning; current work weather starts at the actual work time.",
               "workday_end": "Default 17:00. The 30-minute buffer after this time is only for planning; current work weather ends at the actual work time.",
               "vacation_calendar_entity": "Optional. Calendar contents are not interpreted; overlapping periods only suppress otherwise probable work."
             },
-            "description": "Optional work location. By default Monday-Friday 08:00–17:00 is assumed; shift workers can use the rotating cycle below instead."
+            "description": "Optional work location. Work context becomes active only when a work weather source is selected. The chosen work model then supplies the time windows and work weather; the work zone is only used as a display name and never for presence or location tracking."
           },
           "shift": {
             "name": "Rotating shift system (only if needed)",
@@ -152,7 +152,7 @@
           },
           "shared": {
             "name": "Shared wall tablet",
-            "description": "Allowed HA accounts are automatically recognized by the card as shared control devices and do not get their own thermal profile.",
+            "description": "Allowed HA accounts are automatically recognized by the card as shared control devices. While shared, they do not create or use their own thermal profile for advice; a personal profile learned before the account became shared is retained rather than deleted automatically.",
             "data": {
               "shared_user_ids": "Allowed tablet/shared accounts"
             },
