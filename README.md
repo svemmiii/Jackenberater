@@ -1,4 +1,4 @@
-# JackenBerater v0.1.5
+# JackenBerater v0.2.0
 
 JackenBerater ist eine Home-Assistant-Integration für persönliche Jackenempfehlungen. Sie verwendet aktuelle Wetterdaten, den Forecast und optional persönliche Rückmeldungen.
 
@@ -83,7 +83,7 @@ title: Jacke heute
 
 Bei vollständig YAML-verwaltetem Lovelace muss die Ressource manuell eingetragen werden:
 
-`/jackenberater/frontend/jackenberater-card.js?v=0.1.5&ui=4`
+`/jackenberater/frontend/jackenberater-card.js?v=0.2.0&ui=1`
 
 Die beiden aufklappbaren Bereiche der Karte sind gegenseitig exklusiv: Entweder sind die Empfehlungsdetails oder das Infofeld geöffnet, nicht beide gleichzeitig.
 

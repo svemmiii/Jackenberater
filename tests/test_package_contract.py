@@ -105,13 +105,25 @@ def test_frontend_registration_does_not_hide_unexpected_runtime_errors():
     assert "except RuntimeError" not in init_source
 
 
-def test_frontend_only_fix_has_cache_revision_without_release_version_bump():
-    init_source = (INTEGRATION / "__init__.py").read_text(encoding="utf-8")
+def test_release_version_is_consistent_across_current_release_files():
+    version = "0.2.0"
+    manifest = json.loads((INTEGRATION / "manifest.json").read_text(encoding="utf-8"))
     const_source = (INTEGRATION / "const.py").read_text(encoding="utf-8")
-    assert 'INTEGRATION_VERSION = "0.1.5"' in const_source
-    assert 'FRONTEND_CACHE_REVISION = "4"' in init_source
-    assert 'wanted = f"{base}?v={INTEGRATION_VERSION}&ui={FRONTEND_CACHE_REVISION}"' in init_source
+    init_source = (INTEGRATION / "__init__.py").read_text(encoding="utf-8")
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    context = (ROOT / "PROJECT_CONTEXT.md").read_text(encoding="utf-8")
+    changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    bug = (ROOT / ".github" / "ISSUE_TEMPLATE" / "bug_report.yml").read_text(encoding="utf-8")
 
+    assert manifest["version"] == version
+    assert f'INTEGRATION_VERSION = "{version}"' in const_source
+    assert f"# JackenBerater v{version}" in readme
+    assert f"?v={version}&ui=1" in readme
+    assert f"JackenBerater v{version}" in context
+    assert changelog.startswith(f"# Changelog\n\n## v{version}\n")
+    assert f'value: "{version}"' in bug
+    assert 'FRONTEND_CACHE_REVISION = "1"' in init_source
+    assert 'wanted = f"{base}?v={INTEGRATION_VERSION}&ui={FRONTEND_CACHE_REVISION}"' in init_source
 
 
 def test_frontend_narrow_layout_uses_card_width_not_only_viewport():
@@ -152,7 +164,9 @@ def test_user_card_does_not_expose_internal_effective_temperature():
     assert "effective_now_c" not in frontend
 
 
+
+
+
 def test_bug_report_template_targets_current_release():
     bug = (ROOT / ".github" / "ISSUE_TEMPLATE" / "bug_report.yml").read_text(encoding="utf-8")
-    assert 'value: "0.1.5"' in bug
-
+    assert 'value: "0.2.0"' in bug

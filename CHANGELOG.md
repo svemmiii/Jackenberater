@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.2.0
+
+- Versionsstand projektweit auf **0.2.0** vereinheitlicht: Manifest, Integrationskonstante, README, Bugreport-Vorbelegung, Tests und Lovelace-Ressourcenpfad.
+- Enthält den vollständigen v0.1.5-Hardening-Stand einschließlich Forecast-/Lern-/Arbeitskontext-Fixes, Storage-/Lifecycle-Härtung und Shared-Tablet-Logik.
+- Responsive Tablet-Karte reagiert auf die tatsächliche Kartenbreite, damit Empfehlungstext in schmalen Dashboard-Spalten nicht mehr zusammengedrückt wird.
+- Die letzten CI-Korrekturen für hassfest-Manifestreihenfolge und HA-Runtime-Smoke-Test sind enthalten.
+- Lokaler Prüfstand für v0.2.0: **175 Python-Tests** plus Frontend-Vertragstest.
+
 ## v0.1.5
 
 ### Audit- und Konsistenzrelease

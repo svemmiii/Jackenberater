@@ -35,9 +35,9 @@ _LOGGER = logging.getLogger(__name__)
 
 FRONTEND_URL = "/jackenberater/frontend"
 FRONTEND_FILE = "jackenberater-card.js"
-# UI-only cache revision. The integration release stays 0.1.5 while Lovelace
-# still receives a new resource URL for frontend-only fixes.
-FRONTEND_CACHE_REVISION = "4"
+# Frontend cache revision. The release version already busts the resource URL;
+# keep a small independent revision for frontend-only fixes within the same release.
+FRONTEND_CACHE_REVISION = "1"
 LEGACY_PROFILE_ENTITY_SUFFIXES = (
     "_learning_enabled",
     "_reset_learning",

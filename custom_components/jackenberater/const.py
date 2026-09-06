@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import timedelta
 
 DOMAIN = "jackenberater"
-INTEGRATION_VERSION = "0.1.5"
+INTEGRATION_VERSION = "0.2.0"
 PLATFORMS = ["sensor"]
 PROFILE_BACKUP_ENABLED = False
 

@@ -4,7 +4,7 @@ Dieses lokale Projekt wurde ursprünglich am 2. September 2026 aus dem ChatGPT-P
 
 - Quellprojekt: https://chatgpt.com/g/g-p-6a983d3dc0288191b241cbfcd430cacf-jackenberater/project
 - Übernommener Chat: „Kältegefühl Tracken“
-- Aktueller Entwicklungsstand: **JackenBerater v0.1.5**
+- Aktueller Entwicklungsstand: **JackenBerater v0.2.0**
 - Zielumgebung der CI: Home Assistant 2026.9, Runtime-Smoke-Test unter Python 3.14
 
 ## Zweck
@@ -28,13 +28,13 @@ JackenBerater erzeugt aus aktuellem Wetter, stündlichem Forecast, persönlichem
 ## Wartungs- und Datenschutzregeln
 
 - Profile sind an Home-Assistant-User-IDs gebunden. Gelöschte HA-Nutzer werden aus dem JackenBerater-Store entfernt; umbenannte Nutzer werden beim Profilabruf synchronisiert.
-- Profil-Export/-Import ist im Code vorhanden, aber in v0.1.5 weiterhin deaktiviert.
+- Profil-Export/-Import ist im Code vorhanden, aber in v0.2.0 weiterhin deaktiviert.
 - Diagnose-Sensoren sind standardmäßig deaktiviert und ihre Modellattribute von der Recorder-Historie ausgeschlossen.
 - Der Test-/Simulationsmodus darf weder Sessions noch Feedback-Gelegenheiten, Lernen oder Undo-Zustand verändern.
 
 ## Letzter lokal verifizierter Prüfstand
 
-- **172 / 172 Python-Tests bestanden** (`pytest -q tests --ignore=tests/ha_runtime`)
+- **175 / 175 Python-Tests bestanden** (`pytest -q tests --ignore=tests/ha_runtime`)
 - funktionaler JavaScript-/Frontend-Vertragstest bestanden
 - Python-Dateien kompilierbar
 - JavaScript-Syntaxprüfung bestanden
