@@ -109,9 +109,16 @@ def test_frontend_only_fix_has_cache_revision_without_release_version_bump():
     init_source = (INTEGRATION / "__init__.py").read_text(encoding="utf-8")
     const_source = (INTEGRATION / "const.py").read_text(encoding="utf-8")
     assert 'INTEGRATION_VERSION = "0.1.5"' in const_source
-    assert 'FRONTEND_CACHE_REVISION = "3"' in init_source
+    assert 'FRONTEND_CACHE_REVISION = "4"' in init_source
     assert 'wanted = f"{base}?v={INTEGRATION_VERSION}&ui={FRONTEND_CACHE_REVISION}"' in init_source
 
+
+
+def test_frontend_narrow_layout_uses_card_width_not_only_viewport():
+    frontend = (INTEGRATION / "frontend/jackenberater-card.js").read_text(encoding="utf-8")
+    assert "container-type:inline-size" in frontend
+    assert "@container (max-width:520px)" in frontend
+    assert ".jb-badge{display:none}" in frontend
 
 def test_release_hardening_uses_runtime_data_and_removes_owned_frontend_resource():
     init_source = (INTEGRATION / "__init__.py").read_text(encoding="utf-8")

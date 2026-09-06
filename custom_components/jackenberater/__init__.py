@@ -37,7 +37,7 @@ FRONTEND_URL = "/jackenberater/frontend"
 FRONTEND_FILE = "jackenberater-card.js"
 # UI-only cache revision. The integration release stays 0.1.5 while Lovelace
 # still receives a new resource URL for frontend-only fixes.
-FRONTEND_CACHE_REVISION = "3"
+FRONTEND_CACHE_REVISION = "4"
 LEGACY_PROFILE_ENTITY_SUFFIXES = (
     "_learning_enabled",
     "_reset_learning",
