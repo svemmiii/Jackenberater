@@ -15,14 +15,12 @@ from homeassistant.util import dt as dt_util
 
 from .const import (
     FEEDBACK_MIN_DELAY,
-    FEEDBACK_NOT_USED,
     FEEDBACK_PERFECT,
     FEEDBACK_TOO_COLD,
     FEEDBACK_TOO_WARM,
     FEEDBACK_VALUES,
     MAX_OPEN_FEEDBACK,
     MAX_RECENT_SESSIONS,
-    JACKET_NONE,
     JACKET_RANK,
     PHASE_ALL,
     PHASE_LATER,
