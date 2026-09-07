@@ -462,6 +462,32 @@ assert.ok(Card, "jackenberater-card must register itself");
   assert.doesNotMatch(partialWorkDetails, /Arbeitsforecast nur teilweise abgedeckt/, "work-forecast coverage warning is rendered once at card level, not duplicated in details");
   assert.match(textCard._errorText(new Error("work_weather_unavailable")), /Arbeitswetter/, "work-weather outage should be explained instead of showing a raw backend code");
 
+  const feedbackUxCard = new Card();
+  feedbackUxCard._hass = { language: "de" };
+  feedbackUxCard._t = (key) => ({
+    phaseAsk: "Was hat nicht gepasst?", cancel: "Abbrechen",
+    light: "Leichte Jacke", none: "Keine Jacke nötig", warmJacket: "Warme Jacke", winter: "Winterjacke",
+    oldRecommendation: "frühere Empfehlung", unusualDay: "Heute war ungewöhnlich",
+    tooCold: "Zu kalt", perfect: "Perfekt", tooWarm: "Zu warm", notUsed: "Nicht genutzt",
+  }[key] || key);
+  const warmMorningSession = {
+    id: "ux1",
+    created_at: "2026-09-07T06:00:00+02:00",
+    recommendation: {
+      jacket_now: "light",
+      jacket_later: "none",
+      later_at: "2026-09-07T10:00:00+02:00",
+    },
+    weather: { temperature_c: 12 },
+  };
+  const feedbackHtml = feedbackUxCard._feedbackCard(warmMorningSession, true);
+  assert.match(feedbackHtml, /Leichte Jacke.*→.*Keine Jacke nötig/, "feedback must show the full original jacket transition");
+  feedbackUxCard._phasePending = { session: warmMorningSession, rating: "too_warm" };
+  const warmPhase = feedbackUxCard._phasePanel();
+  assert.match(warmPhase, /Jacke früher ausziehen/, "later warm feedback should describe an earlier transition");
+  assert.match(warmPhase, /Schon am Anfang war mir zu warm/, "start feedback should use normal user language");
+  assert.match(warmPhase, /über längere Zeit zu warm/, "long-duration feedback should use normal user language");
+
   console.log("frontend session contract OK");
 })().catch((err) => {
   console.error(err);

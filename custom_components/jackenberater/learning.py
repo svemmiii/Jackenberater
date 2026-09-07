@@ -7,7 +7,7 @@ dataset.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import date, datetime, timedelta
 import math
 from typing import Any
 
@@ -94,9 +94,11 @@ class PersonalModel:
     # tightly bounded so transient learning can refine, not dominate, the model.
     transient_tolerance: float = 1.0
 
-    # Small fixed-size seasonal corrections. Positive means a little more warmth
-    # is preferred in that season. They learn slowly and never replace the global
-    # profile.
+    # Seasonal values are relative deviations from the personal year-round
+    # baseline. Their four-value mean is kept near zero so a tendency that is
+    # common to every season is carried by ``general_offset_c`` instead of being
+    # learned twice.
+    seasonal_model_version: int = 3
     winter_bias_c: float = 0.0
     spring_bias_c: float = 0.0
     summer_bias_c: float = 0.0
@@ -152,16 +154,22 @@ class PersonalModel:
         return model
 
     def seasonal_bias_for(self, when: datetime | None) -> float:
-        """Return the small learned seasonal comfort adjustment."""
-        if when is None:
-            return 0.0
-        name = _season_name(when)
-        return float(getattr(self, f"{name}_bias_c", 0.0))
+        """Return the smoothly blended deviation from the year-round baseline."""
+        weights = _season_weights(when)
+        return sum(
+            weight * float(getattr(self, f"{name}_bias_c", 0.0))
+            for name, weight in weights.items()
+        )
 
     def seasonal_stat_for(self, when: datetime | None) -> RunningStat | None:
-        if when is None:
+        """Return the dominant seasonal statistic for compatibility helpers.
+
+        Learning itself uses all active seasonal weights during overlap periods.
+        """
+        weights = _season_weights(when)
+        if not weights:
             return None
-        name = _season_name(when)
+        name = max(weights, key=weights.get)
         value = getattr(self, f"{name}_season_stat", None)
         return value if isinstance(value, RunningStat) else None
 
@@ -180,7 +188,12 @@ class PersonalModel:
                 setattr(self, key, value)
 
     def confidence(self) -> float:
-        if self.total_feedback == 0:
+        # Keep the setup prior until there is actual general learning evidence.
+        # Some valid feedback is intentionally non-general (for example
+        # transition-boundary timing, or "no jacket + too warm"). Counting such
+        # feedback must not make decision confidence fall merely because
+        # total_feedback became non-zero.
+        if self.general_stat.weight_sum <= 0.0:
             return 0.18 if self.setup_complete else 0.08
         return max(0.08, min(0.98, self.general_stat.confidence))
 
@@ -258,13 +271,14 @@ class PersonalModel:
         model.evening_answer = _choice(raw.get("evening_answer", 3))
 
         model.general_offset_c = _safe_number(raw.get("general_offset_c"), 0.0, -5.0, 5.0)
+        model.seasonal_model_version = _safe_int(raw.get("seasonal_model_version"), 1) or 1
         model.wind_bias_c = _safe_number(raw.get("wind_bias_c"), 0.0, -2.0, 3.0)
         model.transition_bias_c = _safe_number(raw.get("transition_bias_c"), 0.0, -1.5, 2.5)
         model.transient_tolerance = _safe_number(raw.get("transient_tolerance"), 1.0, 0.5, 1.5)
-        model.winter_bias_c = _safe_number(raw.get("winter_bias_c"), 0.0, -1.2, 1.2)
-        model.spring_bias_c = _safe_number(raw.get("spring_bias_c"), 0.0, -1.2, 1.2)
-        model.summer_bias_c = _safe_number(raw.get("summer_bias_c"), 0.0, -1.2, 1.2)
-        model.autumn_bias_c = _safe_number(raw.get("autumn_bias_c"), 0.0, -1.2, 1.2)
+        model.winter_bias_c = _safe_number(raw.get("winter_bias_c"), 0.0, -1.8, 1.8)
+        model.spring_bias_c = _safe_number(raw.get("spring_bias_c"), 0.0, -1.8, 1.8)
+        model.summer_bias_c = _safe_number(raw.get("summer_bias_c"), 0.0, -1.8, 1.8)
+        model.autumn_bias_c = _safe_number(raw.get("autumn_bias_c"), 0.0, -1.8, 1.8)
         model.light_threshold_delta_c = _safe_number(raw.get("light_threshold_delta_c"), 0.0, -3.0, 4.0)
         model.warm_threshold_delta_c = _safe_number(raw.get("warm_threshold_delta_c"), 0.0, -3.0, 4.0)
         model.winter_threshold_delta_c = _safe_number(raw.get("winter_threshold_delta_c"), 0.0, -3.0, 4.0)
@@ -277,6 +291,19 @@ class PersonalModel:
             setattr(model, name, _safe_stat(raw.get(name)))
         model.total_feedback = _safe_int(raw.get("total_feedback"), 0)
         model.feedback_opportunities = _safe_int(raw.get("feedback_opportunities"), 0)
+
+        # v0.3.0 migration: older profiles stored four additive seasonal nudges
+        # without enforcing a common baseline. Re-centering moves their common
+        # mean into ``general_offset_c`` and subtracts the same amount from every
+        # season. Therefore ``general + season`` stays identical for all four
+        # seasons while the new representation becomes mathematically identifiable.
+        if model.seasonal_model_version < 2:
+            _recenter_seasonal_biases(model)
+        # v0.3.0 overlap model: storage still consists of the same four seasonal
+        # anchors. Version 3 only records that their runtime effect is blended
+        # smoothly around the four meteorological boundaries.
+        if model.seasonal_model_version < 3:
+            model.seasonal_model_version = 3
         return model
 
 
@@ -343,6 +370,184 @@ def _learning_step(samples: float) -> float:
     if samples < 201:
         return 0.11
     return 0.065
+
+
+def _season_bias_attributes() -> tuple[str, str, str, str]:
+    return (
+        "winter_bias_c",
+        "spring_bias_c",
+        "summer_bias_c",
+        "autumn_bias_c",
+    )
+
+
+_SEASON_TRANSITION_HALF_DAYS = 15
+_SEASON_TRANSITIONS: tuple[tuple[int, int, str, str], ...] = (
+    (3, 1, "winter", "spring"),
+    (6, 1, "spring", "summer"),
+    (9, 1, "summer", "autumn"),
+    (12, 1, "autumn", "winter"),
+)
+
+
+def _smoothstep(value: float) -> float:
+    """Cubic 0..1 blend with zero slope at both ends."""
+    value = _clamp(value, 0.0, 1.0)
+    return value * value * (3.0 - 2.0 * value)
+
+
+def _season_weights(when: datetime | None) -> dict[str, float]:
+    """Return one or two season-anchor weights that always sum to one.
+
+    Each meteorological boundary is surrounded by one month of smooth overlap:
+    15 days before through 15 days after. Outside these windows exactly one
+    season anchor is active. No transition value is stored or learned.
+    """
+    if not isinstance(when, datetime):
+        return {}
+    current = when.date()
+    half = timedelta(days=_SEASON_TRANSITION_HALF_DAYS)
+    for year in (current.year - 1, current.year, current.year + 1):
+        for month, day, previous_name, next_name in _SEASON_TRANSITIONS:
+            boundary = date(year, month, day)
+            start = boundary - half
+            end = boundary + half
+            if not (start < current < end):
+                continue
+            progress = (current - start).days / float((end - start).days)
+            next_weight = _smoothstep(progress)
+            previous_weight = 1.0 - next_weight
+            # Avoid tiny floating tails so pure-anchor logic remains exact close
+            # to the transition edges.
+            if previous_weight <= 1e-12:
+                return {next_name: 1.0}
+            if next_weight <= 1e-12:
+                return {previous_name: 1.0}
+            return {previous_name: previous_weight, next_name: next_weight}
+    return {_season_name(when): 1.0}
+
+
+def _season_stat(model: PersonalModel, name: str) -> RunningStat:
+    value = getattr(model, f"{name}_season_stat")
+    if not isinstance(value, RunningStat):  # defensive for hand-built objects
+        value = RunningStat()
+        setattr(model, f"{name}_season_stat", value)
+    return value
+
+
+def _recenter_seasonal_biases(model: PersonalModel) -> None:
+    """Center seasonal deviations while preserving all effective anchor totals.
+
+    The shared mean is moved into ``general_offset_c``. The transfer amount is
+    constrained so neither the general safety bound nor any seasonal bound has
+    to be clipped afterwards; therefore every ``general + season`` total stays
+    exactly unchanged whenever a transfer is possible.
+    """
+    attrs = _season_bias_attributes()
+    values = [float(getattr(model, attr)) for attr in attrs]
+    mean = sum(values) / len(values)
+    if abs(mean) <= 1e-12:
+        return
+
+    lower = -5.0 - model.general_offset_c
+    upper = 5.0 - model.general_offset_c
+    for value in values:
+        lower = max(lower, value - 1.8)
+        upper = min(upper, value + 1.8)
+    if lower > upper:
+        return
+    shift = _clamp(mean, lower, upper)
+    if abs(shift) <= 1e-12:
+        return
+    model.general_offset_c += shift
+    for attr in attrs:
+        setattr(model, attr, float(getattr(model, attr)) - shift)
+
+
+def _season_learning_share(model: PersonalModel, observed_at: datetime | None) -> float:
+    """Return the part of one correction assigned to seasonal deviation.
+
+    The current situation always receives one fixed correction budget. Early on,
+    almost all of it goes into the year-round baseline so a new profile becomes
+    useful quickly. During overlap periods evidence from both active anchors is
+    combined using the same date weights as the runtime seasonal adjustment.
+    """
+    weights = _season_weights(observed_at)
+    if not weights:
+        return 0.0
+
+    all_evidence = {
+        name: max(0.0, _season_stat(model, name).weight_sum)
+        for name in ("winter", "spring", "summer", "autumn")
+    }
+    total = sum(all_evidence.values())
+    own = sum(weight * all_evidence[name] for name, weight in weights.items())
+    # For every currently possible anchor, ask how much evidence exists outside
+    # that anchor, then blend those answers by the current overlap weights. This
+    # lets an already-known winter help distinguish a nascent spring near March
+    # without pretending that one winter observation is two observations.
+    other = sum(
+        weight * max(0.0, total - all_evidence[name])
+        for name, weight in weights.items()
+    )
+    own_conf = 1.0 - math.exp(-own / 6.0)
+    cross_conf = 1.0 - math.exp(-other / 10.0)
+    max_share = 0.15 + 0.55 * cross_conf
+    return _clamp(own_conf * max_share, 0.0, 0.70)
+
+
+def _apply_weighted_seasonal_move(
+    model: PersonalModel,
+    weights: dict[str, float],
+    desired_effective_move: float,
+) -> float:
+    """Move active seasonal anchors while preserving the effective date move.
+
+    The minimal-norm update is proportional to ``w / sum(w^2)``. Consequently
+    a 50/50 transition does *not* halve learning: moving both anchors by +0.12 C
+    changes their 50/50 blend by exactly +0.12 C. If an anchor hits its safety
+    bound, the remaining effective move is redistributed to the other active
+    anchor. Any residual returned to the caller can fall back to the general
+    baseline, so a correction is not silently discarded at a seasonal limit.
+    """
+    remaining = float(desired_effective_move)
+    if abs(remaining) <= 1e-12:
+        return 0.0
+
+    active = {name: float(weight) for name, weight in weights.items() if weight > 1e-12}
+    free = set(active)
+    current = {name: float(getattr(model, f"{name}_bias_c")) for name in active}
+    delta = {name: 0.0 for name in active}
+
+    while free and abs(remaining) > 1e-12:
+        denom = sum(active[name] ** 2 for name in free)
+        if denom <= 1e-12:
+            break
+
+        saturated: list[str] = []
+        proposals = {name: remaining * active[name] / denom for name in free}
+        for name, proposal in proposals.items():
+            before = current[name] + delta[name]
+            candidate = before + proposal
+            clipped = _clamp(candidate, -1.8, 1.8)
+            if abs(clipped - candidate) > 1e-12:
+                actual = clipped - before
+                delta[name] += actual
+                remaining -= active[name] * actual
+                saturated.append(name)
+
+        if saturated:
+            free.difference_update(saturated)
+            continue
+
+        for name, proposal in proposals.items():
+            delta[name] += proposal
+        remaining = 0.0
+
+    for name, change in delta.items():
+        setattr(model, f"{name}_bias_c", current[name] + change)
+    return remaining
+
 
 
 def _threshold_stats_for_observation(
@@ -412,10 +617,12 @@ def apply_feedback(
     observed_at: datetime | None = None,
     transient_override: bool = False,
     transient_direction: str | None = None,
-) -> None:
-    """Fold one rating into the compact profile."""
+    boundary_only: bool = False,
+    boundary_attribute: str | None = None,
+) -> bool:
+    """Fold one rating into the compact profile and report real learning change."""
     if rating == FEEDBACK_NOT_USED or recommendation_used is False:
-        return
+        return False
     if rating == FEEDBACK_PERFECT:
         error = 0.0
     elif rating == FEEDBACK_TOO_COLD:
@@ -423,13 +630,27 @@ def apply_feedback(
     elif rating == FEEDBACK_TOO_WARM:
         error = -1.0
     else:
-        return
+        return False
 
     # A paused model must remain mathematically frozen. Ratings can still be
     # accepted by the UI, but they must not advance learning counters or alter
     # future learning/feedback cadence.
     if not model.learning_enabled:
-        return
+        return False
+
+    # ``total_feedback`` is an interaction counter, not learning evidence.  Keep
+    # it out of the change check so a deliberately non-learnable rating can be
+    # recorded without consuming the previous meaningful undo point.
+    before_learning = model.to_dict()
+    before_learning.pop("total_feedback", None)
+    before_learning.pop("feedback_opportunities", None)
+
+    def _learned() -> bool:
+        after = model.to_dict()
+        after.pop("total_feedback", None)
+        after.pop("feedback_opportunities", None)
+        return after != before_learning
+
     if count_feedback:
         model.total_feedback += 1
 
@@ -453,40 +674,84 @@ def apply_feedback(
             model.transient_tolerance = _clamp(
                 model.transient_tolerance + signal * transient_step, 0.5, 1.5
             )
-        return
+        return _learned()
+
+    # There is no lighter class than "no jacket". A plain "too warm" rating
+    # in that state can describe the weather/person, but it cannot identify a
+    # correctable jacket decision and therefore must not drag the whole profile
+    # colder. Transition-timing feedback avoids this branch by targeting the
+    # actual boundary that was crossed.
+    if jacket == JACKET_NONE and error < 0.0 and not boundary_only:
+        return _learned()
+
+    if boundary_only:
+        explicit_targets = {
+            "light_threshold_delta_c": model.light_stat,
+            "warm_threshold_delta_c": model.warm_stat,
+            "winter_threshold_delta_c": model.winter_stat,
+        }
+        explicit_stat = explicit_targets.get(boundary_attribute or "")
+        if explicit_stat is not None:
+            threshold_stats = [explicit_stat]
+            explicit_target = (str(boundary_attribute), explicit_stat)
+        else:
+            threshold_stats = _threshold_stats_for_observation(model, jacket, error, effective_c)
+            explicit_target = None
+        previous_threshold_weights = {id(stat): stat.weight_sum for stat in threshold_stats}
+        for stat in threshold_stats:
+            stat.add(error, weight=weight)
+        if error != 0.0:
+            target = explicit_target or _threshold_target(model, jacket, error)
+            if target is not None:
+                attribute, stat = target
+                previous = previous_threshold_weights.get(id(stat), max(0.0, stat.weight_sum - weight))
+                threshold_step = _learning_step(previous) * 0.35 * weight
+                setattr(
+                    model,
+                    attribute,
+                    _clamp(float(getattr(model, attribute)) + error * threshold_step, -3.0, 4.0),
+                )
+        return _learned()
 
     if apply_general:
         previous_general_samples = model.general_stat.weight_sum
+        season_weights = _season_weights(observed_at)
+        season_share = _season_learning_share(model, observed_at)
         model.general_stat.add(error, weight=weight)
+        for name, season_weight in season_weights.items():
+            # One real experience contributes one unit of seasonal evidence in
+            # total. During a 50/50 overlap each neighbouring anchor receives 0.5.
+            _season_stat(model, name).add(error, weight=weight * season_weight)
         general_step = _learning_step(previous_general_samples)
 
-        # The first ten ratings deliberately learn fast and mostly adjust one
-        # global parameter. Later ratings increasingly refine context-specific
-        # parameters.
+        # Keep one fixed correction budget for this rating. Season learning does
+        # not add a second correction on top: it only decides how much of the
+        # same budget belongs to the year-round baseline versus the date-weighted
+        # seasonal deviation.
         global_factor = 1.0 if model.general_stat.weight_sum <= 10.0 else 0.60
+        total_move = error * general_step * global_factor * weight
+        seasonal_move = total_move * season_share if season_weights else 0.0
+        general_move = total_move - seasonal_move
+
+        if season_weights and error != 0.0:
+            # The helper normalizes the anchor deltas so the blended seasonal
+            # change at this exact date equals ``seasonal_move``. If a seasonal
+            # safety limit prevents that, keep the unused part in General rather
+            # than silently dropping learning signal.
+            general_move += _apply_weighted_seasonal_move(
+                model, season_weights, seasonal_move
+            )
+
         model.general_offset_c = _clamp(
-            model.general_offset_c + error * general_step * global_factor * weight,
+            model.general_offset_c + general_move,
             -5.0,
             5.0,
         )
-
-        # Season-specific learning is intentionally much slower than the global
-        # profile. It lets winter/summer experience nudge the same user in
-        # different directions without storing a growing history or forgetting the
-        # long-term baseline.
-        season_stat = model.seasonal_stat_for(observed_at)
-        if season_stat is not None and model.general_stat.weight_sum >= 6.0:
-            previous_season = season_stat.weight_sum
-            season_stat.add(error, weight=weight)
-            if error != 0.0:
-                season = _season_name(observed_at)
-                attr = f"{season}_bias_c"
-                season_step = _learning_step(previous_season) * 0.12 * weight
-                setattr(
-                    model,
-                    attr,
-                    _clamp(getattr(model, attr) + error * season_step, -1.2, 1.2),
-                )
+        if season_weights and error != 0.0:
+            # Any component common to all four anchors is a general tendency.
+            # Re-centering preserves every anchor's total and therefore also any
+            # weighted transition blend because the weights sum to one.
+            _recenter_seasonal_biases(model)
 
     # Boundary confidence should still grow during early learning. A perfect
     # rating is especially valuable here because it confirms that the current
@@ -497,7 +762,7 @@ def apply_feedback(
         stat.add(error, weight=weight)
 
     if model.general_stat.weight_sum <= 10.0:
-        return
+        return _learned()
 
     # Only train the wind model when wind actually changed the thermal decision.
     # Raw gusts can be high while the engine deliberately applies no wind penalty
@@ -534,6 +799,8 @@ def apply_feedback(
                 attribute,
                 _clamp(getattr(model, attribute) + error * threshold_step, -3.0, 4.0),
             )
+
+    return _learned()
 
 
 def should_request_feedback(

@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.3.0
+
+- Lernmodell trennt das schnelle persönliche Grundprofil sauber von saisonalen Abweichungen. Ein Feedback erhält nur noch ein gemeinsames Korrekturbudget; Saisonlernen verstärkt denselben Fehler nicht zusätzlich.
+- Saisonale Abweichungen werden um den persönlichen Jahresdurchschnitt zentriert. Vorhandene v0.2.x-Profile werden beim Laden so umgerechnet, dass `general + saison` für jede Jahreszeit erhalten bleibt.
+- Saisonale Evidenz wird ab dem ersten Feedback gesammelt. Mit mehr Erfahrung in der aktuellen und anderen Jahreszeiten darf ein größerer Teil künftiger Korrekturen saisonspezifisch werden, ohne die schnelle Anfangsanpassung zu bremsen.
+- Die vier Saisonwerte bleiben die einzigen gelernten Saisonanker. Rund um März, Juni, September und Dezember werden sie über jeweils einen Monat weich miteinander überblendet, statt am Monatsanfang hart umzuschalten.
+- Feedback in einer Übergangsphase wird anteilig auf beide benachbarten Saisonstatistiken verteilt. Der saisonale Lernschritt wird dabei normiert, sodass die wirksame Korrektur weder halbiert noch doppelt gezählt wird; stößt ein Anker an sein Limit, wird der verbleibende Anteil weiterverteilt.
+- Feedback zu Empfehlungen mit späterem Jackenwechsel zeigt die ursprüngliche Empfehlung samt Wechselzeit und verwendet konkrete Rückfragen statt abstrakter Phasenbezeichnungen.
+- Feedback, dass ein vorhergesagter Wechsel früher oder später hätte erfolgen sollen, trainiert gezielt die betroffene Jackengrenze und verändert nicht zusätzlich Grundprofil oder Saison.
+- Ein normales `Keine Jacke` + `zu warm` verändert das persönliche Wärmeprofil nicht, weil keine leichtere Jackenentscheidung existiert. Die Lern-/Undo-Entscheidung stammt jetzt direkt aus dem tatsächlichen Lernpfad: transiente Empfehlungen können weiterhin gezielt `transient_tolerance` lernen und erhalten dafür einen eigenen Undo-Punkt; echte No-op-Bewertungen verbrauchen keinen alten sinnvollen Undo-Punkt.
+- Feedback-Undo restauriert nur noch die von der rückgängig gemachten Bewertung trainierbaren Lernfelder. Späteres Pausieren des Lernens, Feedback-Gelegenheiten und spätere No-op-Bewertungen bleiben erhalten; `total_feedback` wird vom aktuellen Stand genau um die rückgängig gemachte Bewertung reduziert.
+- Ein erneutes vollständiges Profil-Setup verwirft jetzt alle alten Feedbacksessions samt Undo-, Wetter- und Learning-Context. Dadurch kann weder eine alte Bewertung das neu initialisierte Profil trainieren noch ein alter Undo-Punkt dessen Startparameter zurückdrehen.
+- Legacy-v0.2.x-Undo-Snapshots werden beim Laden über die aktuelle `PersonalModel`-Migration normalisiert und anschließend ins kompakte v0.3-Undo-Format überführt. Ein Undo nach einem Upgrade kann damit keine unzentrierten alten Saisonanker mehr in ein v0.3-Modell zurückbringen.
+- Aktive Transient-Kompromisse werden nicht mehr vollständig ausgeblendet. Auch bei einem reifen Profil bleibt die Karte mindestens kompakt sichtbar, damit die bewusst geglättete Entscheidung nachvollziehbar und lernbar bleibt.
+- Frontend-Cache-Revision auf `ui=2`; Versionsstand projektweit auf **0.3.0**.
+
 ## v0.2.0
 
 - Versionsstand projektweit auf **0.2.0** vereinheitlicht: Manifest, Integrationskonstante, README, Bugreport-Vorbelegung, Tests und Lovelace-Ressourcenpfad.

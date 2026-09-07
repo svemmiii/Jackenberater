@@ -385,6 +385,7 @@ def build_recommendation(
             model.total_feedback >= 10
             and decision_confidence >= 0.65
             and forecast_coverage_complete
+            and transient is None
         ),
     )
 

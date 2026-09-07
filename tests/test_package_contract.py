@@ -106,7 +106,7 @@ def test_frontend_registration_does_not_hide_unexpected_runtime_errors():
 
 
 def test_release_version_is_consistent_across_current_release_files():
-    version = "0.2.0"
+    version = "0.3.0"
     manifest = json.loads((INTEGRATION / "manifest.json").read_text(encoding="utf-8"))
     const_source = (INTEGRATION / "const.py").read_text(encoding="utf-8")
     init_source = (INTEGRATION / "__init__.py").read_text(encoding="utf-8")
@@ -118,11 +118,11 @@ def test_release_version_is_consistent_across_current_release_files():
     assert manifest["version"] == version
     assert f'INTEGRATION_VERSION = "{version}"' in const_source
     assert f"# JackenBerater v{version}" in readme
-    assert f"?v={version}&ui=1" in readme
+    assert f"?v={version}&ui=2" in readme
     assert f"JackenBerater v{version}" in context
     assert changelog.startswith(f"# Changelog\n\n## v{version}\n")
     assert f'value: "{version}"' in bug
-    assert 'FRONTEND_CACHE_REVISION = "1"' in init_source
+    assert 'FRONTEND_CACHE_REVISION = "2"' in init_source
     assert 'wanted = f"{base}?v={INTEGRATION_VERSION}&ui={FRONTEND_CACHE_REVISION}"' in init_source
 
 
@@ -169,4 +169,4 @@ def test_user_card_does_not_expose_internal_effective_temperature():
 
 def test_bug_report_template_targets_current_release():
     bug = (ROOT / ".github" / "ISSUE_TEMPLATE" / "bug_report.yml").read_text(encoding="utf-8")
-    assert 'value: "0.2.0"' in bug
+    assert 'value: "0.3.0"' in bug

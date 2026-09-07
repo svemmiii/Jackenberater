@@ -17,9 +17,13 @@ from .const import (
     FEEDBACK_MIN_DELAY,
     FEEDBACK_NOT_USED,
     FEEDBACK_PERFECT,
+    FEEDBACK_TOO_COLD,
+    FEEDBACK_TOO_WARM,
     FEEDBACK_VALUES,
     MAX_OPEN_FEEDBACK,
     MAX_RECENT_SESSIONS,
+    JACKET_NONE,
+    JACKET_RANK,
     PHASE_ALL,
     PHASE_LATER,
     PHASE_START,
@@ -42,6 +46,73 @@ from .time_utils import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+
+# Feedback undo must only touch state that one rating can actually train.
+# User/configuration state and session/cadence counters deliberately stay current.
+_FEEDBACK_UNDO_FIELDS = (
+    "general_offset_c",
+    "wind_bias_c",
+    "transition_bias_c",
+    "transient_tolerance",
+    "winter_bias_c",
+    "spring_bias_c",
+    "summer_bias_c",
+    "autumn_bias_c",
+    "light_threshold_delta_c",
+    "warm_threshold_delta_c",
+    "winter_threshold_delta_c",
+    "general_stat",
+    "wind_stat",
+    "transition_stat",
+    "transient_stat",
+    "winter_season_stat",
+    "spring_season_stat",
+    "summer_season_stat",
+    "autumn_season_stat",
+    "light_stat",
+    "warm_stat",
+    "winter_stat",
+)
+
+
+def _feedback_learning_snapshot(model: PersonalModel) -> dict[str, Any]:
+    """Return only fields a feedback rating is allowed to train."""
+    raw = model.to_dict()
+    return {name: deepcopy(raw[name]) for name in _FEEDBACK_UNDO_FIELDS}
+
+
+def _normalize_feedback_learning_snapshot(raw: Any) -> dict[str, Any] | None:
+    """Normalize legacy full-model undo snapshots to the compact v0.3 format.
+
+    v0.2.x stored ``PersonalModel.to_dict()`` as ``learning_before``.  Running
+    that full snapshot through ``PersonalModel.from_dict`` applies every current
+    storage migration (notably the v0.3 seasonal re-centering) before we select
+    the feedback-only undo fields.  Current compact snapshots deliberately lack
+    model/configuration markers and are only filtered defensively.
+    """
+    if not isinstance(raw, dict):
+        return None
+
+    legacy_full_markers = (
+        "setup_complete",
+        "learning_enabled",
+        "cold_answer",
+        "warm_answer",
+        "wind_answer",
+        "evening_answer",
+        "seasonal_model_version",
+        "total_feedback",
+        "feedback_opportunities",
+    )
+    if any(name in raw for name in legacy_full_markers):
+        return _feedback_learning_snapshot(PersonalModel.from_dict(raw))
+
+    return {
+        name: deepcopy(raw[name])
+        for name in _FEEDBACK_UNDO_FIELDS
+        if name in raw
+    }
 
 
 class ProfileManager:
@@ -162,6 +233,10 @@ class ProfileManager:
         fresh = PersonalModel.from_answers(cold, warm, wind, evening)
         fresh.learning_enabled = old.learning_enabled
         raw["model"] = fresh.to_dict()
+        # A full setup replaces the personal model.  Feedback sessions contain
+        # recommendation/weather/learning context from the previous model and
+        # must not be answerable or undoable against the newly initialized one.
+        raw["sessions"] = []
         self._schedule_save()
         self._updated(profile_id)
         return fresh
@@ -378,30 +453,25 @@ class ProfileManager:
                 raise ValueError("feedback_not_ready")
 
         model = self.get_model(profile_id)
-        # Only feedback that can actually change the learning model becomes the
-        # new undo point. "Not used" (or feedback while learning is paused) must
-        # not consume the previous meaningful undo snapshot.
-        will_learn = (
-            model.learning_enabled
-            and rating != FEEDBACK_NOT_USED
-            and recommendation_used is not False
-        )
-        if will_learn:
-            for old_session in self._sessions(profile_id):
-                old_session["learning_before"] = None
-            session["learning_before"] = model.to_dict()
-        else:
-            session["learning_before"] = None
         recommendation = session.get("recommendation", {})
         # “Perfect” on a recommendation that deliberately changed jacket class is
         # confirmation of the whole recommendation. Do not ask an extra question;
         # use the existing PHASE_ALL path so both relevant boundaries are learned.
-        if (
-            rating == FEEDBACK_PERFECT
-            and phase is None
-            and recommendation.get("jacket_now") != recommendation.get("jacket_later")
-        ):
+        class_change = recommendation.get("jacket_now") != recommendation.get("jacket_later")
+        if rating == FEEDBACK_PERFECT and phase is None and class_change:
             phase = PHASE_ALL
+        elif rating in {FEEDBACK_TOO_COLD, FEEDBACK_TOO_WARM} and phase is None and class_change:
+            # A changing recommendation is ambiguous without the small follow-up
+            # question. Refuse to guess which part of the day the user meant.
+            raise ValueError("feedback_phase_required")
+
+        # Take the candidate snapshot before learning, but only make it the new
+        # undo point after ``apply_feedback`` confirms that learning state really
+        # changed. This keeps learnability defined in one place and covers
+        # transient/boundary paths without duplicating their rules here.
+        learning_before = _feedback_learning_snapshot(model)
+        learned_any = False
+        session["learning_before"] = None
         contexts = session.get("learning_contexts", {})
         start_context = contexts.get("start") if isinstance(contexts, dict) else None
         later_context = contexts.get("later") if isinstance(contexts, dict) else None
@@ -427,8 +497,11 @@ class ProfileManager:
             count_feedback: bool,
             apply_general: bool,
             target_phase: str | None,
+            boundary_only: bool = False,
+            boundary_attribute: str | None = None,
         ) -> None:
-            apply_feedback(
+            nonlocal learned_any
+            learned_here = apply_feedback(
                 model,
                 rating=rating,
                 jacket=str(target.get("jacket") or recommendation.get("jacket_now") or "none"),
@@ -449,7 +522,10 @@ class ProfileManager:
                     if target.get("transient_direction") in {"warming", "cooling"}
                     else None
                 ),
+                boundary_only=boundary_only,
+                boundary_attribute=boundary_attribute,
             )
+            learned_any = learned_any or learned_here
 
         if phase == PHASE_ALL and isinstance(later_context, dict):
             # "Throughout" carries one global signal, but can inform the
@@ -457,9 +533,50 @@ class ProfileManager:
             _learn_context(start_context, count_feedback=True, apply_general=True, target_phase=PHASE_START)
             if later_context != start_context:
                 _learn_context(later_context, count_feedback=False, apply_general=False, target_phase=PHASE_LATER)
+        elif phase == PHASE_LATER and class_change:
+            # The UI deliberately phrases the later choice as a timing problem
+            # ("I should have switched earlier/later"). That is direct evidence
+            # about the crossed jacket boundary, not about the user's whole-year
+            # body warmth or the current season. Use the weather at the predicted
+            # transition, but choose the side of the boundary that maps the rating
+            # onto exactly that transition.
+            now_jacket = str(recommendation.get("jacket_now") or "none")
+            later_jacket = str(recommendation.get("jacket_later") or "none")
+            now_rank = JACKET_RANK.get(now_jacket, 0)
+            later_rank = JACKET_RANK.get(later_jacket, 0)
+            if rating == FEEDBACK_TOO_COLD:
+                boundary_jacket = now_jacket if later_rank > now_rank else later_jacket
+            else:  # FEEDBACK_TOO_WARM
+                boundary_jacket = later_jacket if later_rank > now_rank else now_jacket
+            # If the forecast jumps over more than one jacket class, target the
+            # actual boundary that controls entry into the later class rather than
+            # whichever adjacent boundary the synthetic jacket/rating pair happens
+            # to imply.
+            boundary_rank = later_rank if later_rank > now_rank else later_rank + 1
+            boundary_attribute = {
+                1: "light_threshold_delta_c",
+                2: "warm_threshold_delta_c",
+                3: "winter_threshold_delta_c",
+            }.get(boundary_rank)
+            transition_target = dict(later_context)
+            transition_target["jacket"] = boundary_jacket
+            _learn_context(
+                transition_target,
+                count_feedback=True,
+                apply_general=False,
+                target_phase=PHASE_LATER,
+                boundary_only=True,
+                boundary_attribute=boundary_attribute,
+            )
         else:
             target = later_context if phase == PHASE_LATER else start_context
             _learn_context(target, count_feedback=True, apply_general=True, target_phase=phase)
+
+        if learned_any:
+            for old_session in self._sessions(profile_id):
+                old_session["learning_before"] = None
+            session["learning_before"] = learning_before
+
         self._profiles[profile_id]["model"] = model.to_dict()
         session["feedback"] = {
             "rating": rating,
@@ -477,12 +594,32 @@ class ProfileManager:
     async def async_undo_last_feedback(self, profile_id: str) -> bool:
         for session in reversed(self._sessions(profile_id)):
             feedback = session.get("feedback")
-            before = session.get("learning_before")
+            before = _normalize_feedback_learning_snapshot(
+                session.get("learning_before")
+            )
             if not isinstance(feedback, dict) or feedback.get("undone"):
                 continue
             if not isinstance(before, dict):
                 continue
-            self._profiles[profile_id]["model"] = before
+            # Restore only the learning fields affected by that rating.  The
+            # snapshot may come from an older build and therefore contain the
+            # complete model; selecting the explicit allow-list keeps legacy
+            # sessions safe too.  Independent state changed after the rating
+            # (learning pause, setup/config values, feedback opportunities, ...)
+            # must remain exactly as it is now.
+            current = self.get_model(profile_id)
+            restored = current.to_dict()
+            for name in _FEEDBACK_UNDO_FIELDS:
+                if name in before:
+                    restored[name] = deepcopy(before[name])
+            current = PersonalModel.from_dict(restored)
+
+            # One meaningful feedback interaction is being undone.  Use the
+            # current counter instead of the historic snapshot so later no-op
+            # feedback remains counted.  Feedback opportunities are deliberately
+            # untouched because those sessions really happened.
+            current.total_feedback = max(0, current.total_feedback - 1)
+            self._profiles[profile_id]["model"] = current.to_dict()
             feedback["undone"] = True
             self._schedule_save()
             self._updated(profile_id)
@@ -516,6 +653,16 @@ class ProfileManager:
             raw.setdefault("name", "Home-Assistant-Nutzer")
             raw["model"] = PersonalModel.from_dict(raw.get("model")).to_dict()
             raw.setdefault("sessions", [])
+
+            # Migrate v0.2.x full-model undo snapshots at load time as well.
+            # This leaves the persistent store in the current compact format and
+            # prevents a later undo from reintroducing pre-v0.3 seasonal anchors.
+            for session in self._sessions(profile_id):
+                before = session.get("learning_before")
+                normalized = _normalize_feedback_learning_snapshot(before)
+                if normalized is not None and normalized != before:
+                    session["learning_before"] = normalized
+
             self._cleanup_profile(profile_id, now)
 
     def _cleanup_profile(self, profile_id: str, now: datetime) -> None:

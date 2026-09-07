@@ -4,7 +4,7 @@ Dieses lokale Projekt wurde ursprünglich am 2. September 2026 aus dem ChatGPT-P
 
 - Quellprojekt: https://chatgpt.com/g/g-p-6a983d3dc0288191b241cbfcd430cacf-jackenberater/project
 - Übernommener Chat: „Kältegefühl Tracken“
-- Aktueller Entwicklungsstand: **JackenBerater v0.2.0**
+- Aktueller Entwicklungsstand: **JackenBerater v0.3.0**
 - Zielumgebung der CI: Home Assistant 2026.9, Runtime-Smoke-Test unter Python 3.14
 
 ## Zweck
@@ -21,20 +21,25 @@ JackenBerater erzeugt aus aktuellem Wetter, stündlichem Forecast, persönlichem
 - Fälliges Feedback gehört zum Profil und kann deshalb auf einem freigegebenen Wandtablet beantwortet werden, auch wenn die Session am persönlichen Gerät entstand.
 - Nicht-freiwilliges Feedback ist serverseitig an `request_feedback` und `ready_at` gebunden; freiwilliges Feedback darf bewusst sofort erfolgen.
 - Shared-/Wandtablet-Rechte stammen ausschließlich aus `shared_user_ids` der Integration. Lovelace-`shared: true` ist keine Berechtigung und wird nicht als Shared-Modus ausgewertet.
-- Persönliche Kurzzeit-/Trend- und Saisonanpassungen bleiben begrenzt und ergänzen das allgemeine Wärmeprofil, statt es zu ersetzen.
+- Das allgemeine Wärmeprofil lernt sofort. Saisonwerte sind nullzentrierte Abweichungen davon; pro Bewertung wird ein einziges Korrekturbudget evidenzabhängig zwischen allgemein und saisonal verteilt, statt denselben Fehler doppelt zu addieren.
+- Die vier Saisonanker werden um jeden meteorologischen Saisonwechsel über 30 Tage weich gemischt. In Übergangsphasen wird saisonale Evidenz gewichtet auf beide Nachbarsaisons verteilt; es gibt keinen eigenen lernbaren Übergangswert.
+- Bei einem späteren Jackenwechsel wird konkretes Timing-Feedback nur der betroffenen Jackengrenze zugeordnet; Grundprofil und Saison bleiben dabei unverändert.
 - Der sichtbare „Lernstand“ ist ein eigener Fortschrittswert, der im normalen fortlaufenden Lernen nicht durch schwankende Entscheidungs-Confidence zurückfällt; Reset und Undo dürfen ihn bewusst senken. Allgemeine Erfahrung und Jackengrenzen zählen stärker als einzelne Spezialkanäle.
+- Feedback-Undo betrifft ausschließlich die Lernparameter und zugehörigen RunningStats der rückgängig gemachten Bewertung. Spätere unabhängige Zustände wie `learning_enabled`, `feedback_opportunities`, Setup-Antworten und Setup-Status bleiben unverändert; `total_feedback` wird vom aktuellen Stand um genau eine rückgängig gemachte lernwirksame Bewertung reduziert.
+- Ein vollständiges erneutes Profil-Setup ersetzt das Modell vollständig und leert deshalb auch alle alten Feedbacksessions; deren Wetter-, Empfehlungs-, Lern- und Undo-Kontext gehört fachlich zum vorherigen Modell.
+- Beim Laden werden alte v0.2.x-Vollmodell-Snapshots in `learning_before` durch die aktuelle Modellmigration geschickt und ins kompakte v0.3-Undo-Format umgewandelt, bevor sie später für Undo verwendet werden können.
 - Die Arbeitszone dient nur als Anzeigename. Präsenz, Koordinaten oder Zonenstatus werden nicht zur Standortentscheidung verwendet.
 
 ## Wartungs- und Datenschutzregeln
 
 - Profile sind an Home-Assistant-User-IDs gebunden. Gelöschte HA-Nutzer werden aus dem JackenBerater-Store entfernt; umbenannte Nutzer werden beim Profilabruf synchronisiert.
-- Profil-Export/-Import ist im Code vorhanden, aber in v0.2.0 weiterhin deaktiviert.
+- Profil-Export/-Import ist im Code vorhanden, aber in v0.3.0 weiterhin deaktiviert.
 - Diagnose-Sensoren sind standardmäßig deaktiviert und ihre Modellattribute von der Recorder-Historie ausgeschlossen.
 - Der Test-/Simulationsmodus darf weder Sessions noch Feedback-Gelegenheiten, Lernen oder Undo-Zustand verändern.
 
 ## Letzter lokal verifizierter Prüfstand
 
-- **175 / 175 Python-Tests bestanden** (`pytest -q tests --ignore=tests/ha_runtime`)
+- **200 / 200 Python-Tests bestanden** (`pytest -q tests --ignore=tests/ha_runtime`)
 - funktionaler JavaScript-/Frontend-Vertragstest bestanden
 - Python-Dateien kompilierbar
 - JavaScript-Syntaxprüfung bestanden

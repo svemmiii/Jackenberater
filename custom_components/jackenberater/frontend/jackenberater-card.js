@@ -52,10 +52,10 @@ const JB_I18N = {
     setupRequired: "Persönliches Profil einrichten",
     noData: "Aktuell keine zuverlässige Wetterbewertung möglich.",
     profileFor: "Empfehlung für",
-    phaseAsk: "Wann hat es hauptsächlich nicht gepasst?",
+    phaseAsk: "Was hat nicht gepasst?",
     phaseStart: "Am Anfang",
-    phaseLater: "Später",
-    phaseAll: "Durchgehend",
+    phaseLater: "Beim späteren Wechsel",
+    phaseAll: "Über längere Zeit",
     cancel: "Abbrechen",
     submitted: "Danke – Bewertung übernommen.",
     work: "Arbeit",
@@ -157,10 +157,10 @@ const JB_I18N = {
     setupRequired: "Set up personal profile",
     noData: "No reliable weather assessment is available right now.",
     profileFor: "Advice for",
-    phaseAsk: "When did it mainly not fit?",
+    phaseAsk: "What did not fit?",
     phaseStart: "At the start",
-    phaseLater: "Later",
-    phaseAll: "Throughout",
+    phaseLater: "At the later change",
+    phaseAll: "For a longer period",
     cancel: "Cancel",
     submitted: "Thanks – rating saved.",
     work: "Work",
@@ -948,6 +948,13 @@ class JackenBeraterCard extends HTMLElement {
     </div>`;
   }
 
+  _feedbackRecommendationText(rec) {
+    const now = this._jacketLabel(rec?.jacket_now);
+    if (!rec?.later_at || !rec?.jacket_later || rec.jacket_later === rec.jacket_now) return now;
+    const when = new Intl.DateTimeFormat(this._lang() === "de" ? "de-DE" : "en-GB", { hour: "2-digit", minute: "2-digit" }).format(new Date(rec.later_at));
+    return `${now} → ${when} ${this._jacketLabel(rec.jacket_later)}`;
+  }
+
   _feedbackCard(session, historical, manual = false) {
     const rec = session.recommendation || {};
     const weather = session.weather || {};
@@ -955,7 +962,7 @@ class JackenBeraterCard extends HTMLElement {
     const voluntary = manual ? "true" : "false";
     return `<div class="jb-feedback" data-session="${jbEscape(session.id)}">
       <div class="jb-feedback-time">${jbEscape(title)}</div>
-      <div class="jb-feedback-rec">${jbEscape(this._jacketLabel(rec.jacket_now))}<span>${weather.temperature_c ?? rec.current_temperature_c ?? "–"} °C${weather.wind_kmh != null ? ` · ${weather.wind_kmh} km/h` : ""}</span></div>
+      <div class="jb-feedback-rec">${jbEscape(this._feedbackRecommendationText(rec))}<span>${weather.temperature_c ?? rec.current_temperature_c ?? "–"} °C${weather.wind_kmh != null ? ` · ${weather.wind_kmh} km/h` : ""}</span></div>
       <label class="jb-unusual"><input type="checkbox" data-unusual> ${this._t("unusualDay")}</label>
       <div class="jb-feedback-buttons">
         <button data-feedback="too_cold" data-voluntary="${voluntary}">🥶 ${this._t("tooCold")}</button>
@@ -966,8 +973,54 @@ class JackenBeraterCard extends HTMLElement {
     </div>`;
   }
 
+  _phaseLabels() {
+    const pending = this._phasePending || {};
+    const rec = pending.session?.recommendation || {};
+    const rating = pending.rating;
+    const nowRank = ["none", "light", "warm", "winter"].indexOf(rec.jacket_now);
+    const laterRank = ["none", "light", "warm", "winter"].indexOf(rec.jacket_later);
+    const colder = rating === "too_cold";
+    const lang = this._lang();
+    const laterLabel = this._jacketLabel(rec.jacket_later);
+
+    if (lang === "de") {
+      const start = colder ? "Schon am Anfang war mir zu kalt" : "Schon am Anfang war mir zu warm";
+      const all = colder ? "Es war über längere Zeit zu kalt" : "Es war über längere Zeit zu warm";
+      let later = this._t("phaseLater");
+      if (laterRank > nowRank) {
+        later = colder
+          ? `Ich hätte früher auf ${laterLabel} wechseln sollen`
+          : `${laterLabel} wäre erst später nötig gewesen`;
+      } else if (laterRank < nowRank) {
+        if (!colder && rec.jacket_later === "none") later = "Ich hätte die Jacke früher ausziehen können";
+        else if (colder && rec.jacket_later === "none") later = "Ich hätte die Jacke länger gebraucht";
+        else later = colder
+          ? `Der Wechsel auf ${laterLabel} kam zu früh`
+          : `Ich hätte früher auf ${laterLabel} wechseln können`;
+      }
+      return { start, later, all };
+    }
+
+    const start = colder ? "I was already too cold at the start" : "I was already too warm at the start";
+    const all = colder ? "I was too cold for a longer period" : "I was too warm for a longer period";
+    let later = this._t("phaseLater");
+    if (laterRank > nowRank) {
+      later = colder
+        ? `I should have switched to ${laterLabel} earlier`
+        : `${laterLabel} would only have been needed later`;
+    } else if (laterRank < nowRank) {
+      if (!colder && rec.jacket_later === "none") later = "I could have taken the jacket off earlier";
+      else if (colder && rec.jacket_later === "none") later = "I needed the jacket for longer";
+      else later = colder
+        ? `The switch to ${laterLabel} came too early`
+        : `I could have switched to ${laterLabel} earlier`;
+    }
+    return { start, later, all };
+  }
+
   _phasePanel() {
-    return `<div class="jb-phase"><div>${this._t("phaseAsk")}</div><div class="jb-phase-buttons"><button data-phase="start">${this._t("phaseStart")}</button><button data-phase="later">${this._t("phaseLater")}</button><button data-phase="all">${this._t("phaseAll")}</button><button data-phase="cancel">${this._t("cancel")}</button></div></div>`;
+    const labels = this._phaseLabels();
+    return `<div class="jb-phase"><div>${this._t("phaseAsk")}</div><div class="jb-phase-buttons"><button data-phase="start">${jbEscape(labels.start)}</button><button data-phase="later">${jbEscape(labels.later)}</button><button data-phase="all">${jbEscape(labels.all)}</button><button data-phase="cancel">${this._t("cancel")}</button></div></div>`;
   }
 
   _bind() {

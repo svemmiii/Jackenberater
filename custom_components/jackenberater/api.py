@@ -76,7 +76,7 @@ def _runtime(hass: HomeAssistant, entry_id: str | None) -> tuple[ConfigEntry, di
         raise ValueError("JackenBerater config entry not found")
     runtime = getattr(entry, "runtime_data", None)
     # Compatibility fallback for tests or an in-flight reload from older code;
-    # normal v0.2.0 setup stores per-entry runtime state on ConfigEntry itself.
+    # normal v0.3.0 setup stores per-entry runtime state on ConfigEntry itself.
     if not isinstance(runtime, dict):
         runtime = hass.data.get(DOMAIN, {}).get(entry.entry_id)
     if not isinstance(runtime, dict):

@@ -1,4 +1,4 @@
-# JackenBerater v0.2.0
+# JackenBerater v0.3.0
 
 JackenBerater ist eine Home-Assistant-Integration für persönliche Jackenempfehlungen. Sie verwendet aktuelle Wetterdaten, den Forecast und optional persönliche Rückmeldungen.
 
@@ -48,6 +48,11 @@ Jeder normale Home-Assistant-Benutzer hat sein eigenes Lernprofil. Beim ersten E
 - Zu warm
 - Nicht genutzt
 
+Das Grundprofil lernt von Anfang an schnell. Saisonwerte werden parallel gesammelt und als Abweichung vom persönlichen Grundprofil geführt, damit derselbe Fehler nicht gleichzeitig doppelt als allgemein und saisonal gelernt wird. Bestehende Profile aus v0.2.x werden beim Laden ohne Verlust ihrer bisherigen saisonalen Wirkung umgerechnet.
+Zwischen den vier Saisonankern wird rund um jeden meteorologischen Saisonwechsel über einen Monat weich überblendet; Feedback in dieser Zeit zählt anteilig für beide benachbarten Jahreszeiten.
+
+Wenn sich die Empfehlung im Tagesverlauf ändert, zeigt die Feedbackkarte auch diesen Wechsel. Bei "Zu kalt" oder "Zu warm" fragt sie konkret nach, ob die erste Empfehlung, der spätere Wechsel oder ein längerer Zeitraum nicht gepasst hat. Ein falsch getimter Wechsel korrigiert gezielt die betroffene Jackengrenze statt pauschal das ganze Wärmeprofil.
+
 Eine sichtbare Karte allein erzeugt keine Feedback-Session. Erst das bewusste Öffnen der Empfehlungsdetails zählt als Nutzung. Automatisches Feedback wird normalerweise frühestens nach 30 Minuten freigegeben.
 
 Der interne thermische Rechenwert bleibt Teil der Berechnung, wird aber nicht als Temperaturwert auf der normalen Nutzerkarte angezeigt.
@@ -83,7 +88,7 @@ title: Jacke heute
 
 Bei vollständig YAML-verwaltetem Lovelace muss die Ressource manuell eingetragen werden:
 
-`/jackenberater/frontend/jackenberater-card.js?v=0.2.0&ui=1`
+`/jackenberater/frontend/jackenberater-card.js?v=0.3.0&ui=2`
 
 Die beiden aufklappbaren Bereiche der Karte sind gegenseitig exklusiv: Entweder sind die Empfehlungsdetails oder das Infofeld geöffnet, nicht beide gleichzeitig.
 
