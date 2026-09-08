@@ -22,6 +22,7 @@ jobs:
       - run: node --check custom_components/jackenberater/frontend/jackenberater-card.js
       - run: node tests/frontend-session.test.js
 
+  # Reproducible smoke against the current stable HA runtime used for this release.
   ha-runtime-smoke:
     runs-on: ubuntu-latest
     steps:
@@ -29,7 +30,31 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.14"
-      - run: python -m pip install --upgrade pip pytest-homeassistant-custom-component==0.13.363
+      - run: python -m pip install --upgrade pip pytest-homeassistant-custom-component==0.13.364
+      - run: python -m pytest -q tests/ha_runtime
+
+  # Contract for hacs.json: JackenBerater declares Home Assistant >= 2026.6.0.
+  # pytest-homeassistant-custom-component 0.13.336 is generated against HA 2026.6.0.
+  ha-runtime-minimum:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+      - run: python -m pip install --upgrade pip pytest-homeassistant-custom-component==0.13.336
+      - run: python -m pytest -q tests/ha_runtime
+
+  # Intentionally unpinned: catches upcoming Home Assistant compatibility changes
+  # in addition to the reproducible current/minimum jobs above.
+  ha-runtime-latest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+      - run: python -m pip install --upgrade pip pytest-homeassistant-custom-component
       - run: python -m pytest -q tests/ha_runtime
 
   hassfest:

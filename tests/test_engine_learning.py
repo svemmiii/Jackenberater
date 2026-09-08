@@ -214,6 +214,7 @@ def test_transition_temporarily_lowers_effective_temperature():
 
 def test_first_three_cold_feedbacks_learn_quickly():
     model = PersonalModel.from_answers(3, 3, 3, 3)
+    winter = datetime(2026, 1, 15, 12, tzinfo=timezone.utc)
     for _ in range(3):
         learning.apply_feedback(
             model,
@@ -221,8 +222,10 @@ def test_first_three_cold_feedbacks_learn_quickly():
             jacket=const.JACKET_NONE,
             wind_kmh=5,
             transition_penalty_c=0,
+            observed_at=winter,
         )
-    assert model.general_offset_c >= 2.5
+    assert model.winter_bias_c >= 2.5
+    assert model.general_offset_c == 0.0
 
 
 def test_too_warm_light_jacket_moves_none_light_boundary():
@@ -443,12 +446,15 @@ def test_feedback_policy_periodic_sampling_does_not_freeze():
 
 def test_winter_too_cold_does_not_inflate_winter_boundary_confidence():
     model = PersonalModel.from_answers(3, 3, 3, 3)
+    winter = datetime(2026, 1, 15, 12, tzinfo=timezone.utc)
     for _ in range(12):
         learning.apply_feedback(
-            model, rating=const.FEEDBACK_TOO_COLD, jacket=const.JACKET_WINTER, wind_kmh=5, transition_penalty_c=0
+            model, rating=const.FEEDBACK_TOO_COLD, jacket=const.JACKET_WINTER,
+            wind_kmh=5, transition_penalty_c=0, observed_at=winter,
         )
     assert model.winter_stat.samples == 0
-    assert model.general_offset_c > 0
+    assert model.winter_bias_c > 0
+    assert model.general_offset_c == 0.0
 
 
 def test_activity_context_is_evaluated_per_forecast_timestamp():
@@ -1052,25 +1058,65 @@ def test_transient_feedback_personalizes_short_term_tolerance_without_history():
     assert "history" not in model.to_dict()
 
 
-def test_seasonal_learning_only_nudges_matching_season_slowly():
+def test_v031_winter_feedback_changes_only_winter_offset_and_not_main():
     model = PersonalModel.from_answers(3, 3, 3, 3)
     winter = datetime(2026, 1, 15, 12, tzinfo=timezone.utc)
-    for _ in range(6):
-        learning.apply_feedback(
-            model, rating=const.FEEDBACK_PERFECT, jacket=const.JACKET_LIGHT,
-            effective_c=15.0, observed_at=winter,
-        )
-    learning.apply_feedback(
-        model, rating=const.FEEDBACK_TOO_COLD, jacket=const.JACKET_LIGHT,
-        effective_c=15.0, observed_at=winter,
+    before = (
+        model.general_offset_c,
+        model.spring_bias_c,
+        model.summer_bias_c,
+        model.autumn_bias_c,
     )
+
+    learning.apply_feedback(
+        model,
+        rating=const.FEEDBACK_TOO_COLD,
+        jacket=const.JACKET_LIGHT,
+        effective_c=15.0,
+        observed_at=winter,
+    )
+
     assert model.winter_bias_c > 0.0
-    # v0.3.0 keeps all four seasonal deviations centered around zero. The tiny
-    # opposite adjustment in unobserved seasons exactly cancels the portion moved
-    # into the general baseline; it is not negative learning about summer.
+    assert (
+        model.general_offset_c,
+        model.spring_bias_c,
+        model.summer_bias_c,
+        model.autumn_bias_c,
+    ) == before
+    assert model.winter_season_stat.weight_sum == pytest.approx(1.0)
+    assert model.spring_season_stat.weight_sum == 0.0
+    assert model.summer_season_stat.weight_sum == 0.0
+    assert model.autumn_season_stat.weight_sum == 0.0
+
+
+def test_v031_summer_feedback_changes_only_summer_offset_and_not_main():
+    model = PersonalModel.from_answers(3, 3, 3, 3)
+    summer = datetime(2026, 7, 15, 12, tzinfo=timezone.utc)
+    model.winter_bias_c = 0.4
+    model.spring_bias_c = -0.3
+    model.autumn_bias_c = 0.2
+    before = (
+        model.general_offset_c,
+        model.winter_bias_c,
+        model.spring_bias_c,
+        model.autumn_bias_c,
+    )
+
+    learning.apply_feedback(
+        model,
+        rating=const.FEEDBACK_TOO_WARM,
+        jacket=const.JACKET_LIGHT,
+        effective_c=15.0,
+        observed_at=summer,
+    )
+
     assert model.summer_bias_c < 0.0
-    assert model.winter_bias_c < model.general_offset_c
-    assert model.general_offset_c + model.winter_bias_c > model.general_offset_c + model.summer_bias_c
+    assert (
+        model.general_offset_c,
+        model.winter_bias_c,
+        model.spring_bias_c,
+        model.autumn_bias_c,
+    ) == before
 
 
 def test_matching_season_bias_affects_only_that_seasons_assessment():
@@ -1086,123 +1132,70 @@ def test_matching_season_bias_affects_only_that_seasons_assessment():
     assert winter_result.effective_temperature_c < summer_result.effective_temperature_c
 
 
-def test_v030_seasonal_migration_preserves_effective_offsets_and_recenters():
+def test_v031_migration_with_only_autumn_evidence_neutralizes_synthetic_untrained_seasons():
     raw = PersonalModel.from_answers(3, 3, 3, 3).to_dict()
-    raw.pop("seasonal_model_version", None)
-    raw["general_offset_c"] = 0.6
-    raw["winter_bias_c"] = 0.4
-    raw["spring_bias_c"] = 0.1
+    raw["seasonal_model_version"] = 3
+    raw["general_offset_c"] = 0.3
+    # Representative centered v0.3 state after only autumn had real feedback.
+    raw["winter_bias_c"] = -0.2
+    raw["spring_bias_c"] = -0.2
     raw["summer_bias_c"] = -0.2
-    raw["autumn_bias_c"] = 0.1
-    old_totals = [
-        raw["general_offset_c"] + raw[f"{name}_bias_c"]
-        for name in ("winter", "spring", "summer", "autumn")
-    ]
+    raw["autumn_bias_c"] = 0.6
+    raw["autumn_season_stat"] = {"samples": 5, "weight_sum": 5.0, "mean": 0.2, "m2": 0.0}
+    old_autumn_effective = raw["general_offset_c"] + raw["autumn_bias_c"]
 
     model = PersonalModel.from_dict(raw)
-    new_totals = [
-        model.general_offset_c + getattr(model, f"{name}_bias_c")
-        for name in ("winter", "spring", "summer", "autumn")
-    ]
 
-    assert model.seasonal_model_version == 3
-    assert new_totals == pytest.approx(old_totals)
-    assert sum(
-        getattr(model, f"{name}_bias_c")
-        for name in ("winter", "spring", "summer", "autumn")
-    ) == pytest.approx(0.0)
+    assert model.seasonal_model_version == 4
+    assert model.autumn_season_initialized is True
+    assert model.autumn_season_stat.weight_sum == pytest.approx(5.0)
+    assert model.winter_season_initialized is False
+    assert model.spring_season_initialized is False
+    assert model.summer_season_initialized is False
+    assert model.winter_bias_c == 0.0
+    assert model.spring_bias_c == 0.0
+    assert model.summer_bias_c == 0.0
+    assert model.general_offset_c + model.autumn_bias_c == pytest.approx(old_autumn_effective)
 
 
-def test_v030_seasonal_learning_splits_one_budget_instead_of_double_adding():
+def test_v031_season_learning_rate_uses_own_real_evidence():
+    winter = PersonalModel.from_answers(3, 3, 3, 3)
+    summer = PersonalModel.from_answers(3, 3, 3, 3)
+    summer.summer_season_stat = learning.RunningStat(samples=300, weight_sum=300.0)
+    summer.summer_season_initialized = True
+
+    learning.apply_feedback(
+        winter,
+        rating=const.FEEDBACK_TOO_COLD,
+        jacket=const.JACKET_LIGHT,
+        observed_at=datetime(2026, 1, 15, 12, tzinfo=timezone.utc),
+    )
+    learning.apply_feedback(
+        summer,
+        rating=const.FEEDBACK_TOO_COLD,
+        jacket=const.JACKET_LIGHT,
+        observed_at=datetime(2026, 7, 15, 12, tzinfo=timezone.utc),
+    )
+
+    assert winter.winter_bias_c == pytest.approx(0.9)
+    assert summer.summer_bias_c == pytest.approx(0.065)
+
+
+def test_v031_season_learning_never_freezes_with_old_evidence():
     model = PersonalModel.from_answers(3, 3, 3, 3)
-    winter = datetime(2026, 1, 15, 12, tzinfo=timezone.utc)
-    for _ in range(6):
-        learning.apply_feedback(
-            model,
-            rating=const.FEEDBACK_PERFECT,
-            jacket=const.JACKET_LIGHT,
-            effective_c=15.0,
-            observed_at=winter,
-        )
-
-    before_general = model.general_offset_c
-    before_winter = model.winter_bias_c
-    before_summer_total = model.general_offset_c + model.summer_bias_c
+    model.winter_season_initialized = True
+    model.winter_season_stat = learning.RunningStat(samples=10000, weight_sum=10000.0)
+    before = model.winter_bias_c
     learning.apply_feedback(
         model,
         rating=const.FEEDBACK_TOO_COLD,
         jacket=const.JACKET_LIGHT,
-        effective_c=15.0,
-        observed_at=winter,
+        observed_at=datetime(2026, 1, 15, 12, tzinfo=timezone.utc),
     )
-
-    # At six prior general observations the existing correction budget is 0.48 C.
-    # v0.3.0 divides that budget between global and winter-specific learning; it
-    # must not turn into general + another independent seasonal step.
-    winter_total_delta = (
-        model.general_offset_c + model.winter_bias_c
-        - before_general - before_winter
-    )
-    assert winter_total_delta == pytest.approx(0.48)
-    assert model.general_offset_c > before_general
-    assert model.winter_bias_c > before_winter
-    assert model.general_offset_c + model.summer_bias_c > before_summer_total
-    assert (model.general_offset_c + model.summer_bias_c - before_summer_total) < winter_total_delta
+    assert model.winter_bias_c - before == pytest.approx(0.065)
 
 
-def test_v030_other_season_evidence_increases_relative_seasonal_share():
-    winter = datetime(2026, 1, 15, 12, tzinfo=timezone.utc)
-    summer = datetime(2026, 7, 15, 12, tzinfo=timezone.utc)
-
-    one_season = PersonalModel.from_answers(3, 3, 3, 3)
-    two_seasons = PersonalModel.from_answers(3, 3, 3, 3)
-    for model in (one_season, two_seasons):
-        for _ in range(8):
-            learning.apply_feedback(
-                model,
-                rating=const.FEEDBACK_PERFECT,
-                jacket=const.JACKET_LIGHT,
-                effective_c=15.0,
-                observed_at=winter,
-            )
-    for _ in range(10):
-        learning.apply_feedback(
-            two_seasons,
-            rating=const.FEEDBACK_PERFECT,
-            jacket=const.JACKET_LIGHT,
-            effective_c=15.0,
-            observed_at=summer,
-        )
-
-    assert learning._season_learning_share(two_seasons, winter) > learning._season_learning_share(one_season, winter)
-
-
-def test_v030_repeated_too_warm_reduces_existing_winter_deviation():
-    model = PersonalModel.from_answers(3, 3, 3, 3)
-    winter = datetime(2027, 1, 15, 12, tzinfo=timezone.utc)
-    summer = datetime(2026, 7, 15, 12, tzinfo=timezone.utc)
-    for _ in range(10):
-        learning.apply_feedback(
-            model, rating=const.FEEDBACK_PERFECT, jacket=const.JACKET_LIGHT,
-            effective_c=15.0, observed_at=winter,
-        )
-        learning.apply_feedback(
-            model, rating=const.FEEDBACK_PERFECT, jacket=const.JACKET_LIGHT,
-            effective_c=15.0, observed_at=summer,
-        )
-    model.winter_bias_c = 0.5
-    model.spring_bias_c = model.summer_bias_c = model.autumn_bias_c = -0.5 / 3.0
-    before = model.general_offset_c + model.winter_bias_c
-    learning.apply_feedback(
-        model, rating=const.FEEDBACK_TOO_WARM, jacket=const.JACKET_LIGHT,
-        effective_c=15.0, observed_at=winter,
-    )
-    assert model.general_offset_c + model.winter_bias_c < before
-
-
-
-
-def test_v030_season_overlap_blends_one_month_smoothly_without_extra_anchor():
+def test_v031_season_overlap_blends_one_month_smoothly_without_extra_anchor():
     boundary = datetime(2026, 3, 1, 12, tzinfo=timezone.utc)
     weights = learning._season_weights(boundary)
     assert weights == pytest.approx({"winter": 0.5, "spring": 0.5})
@@ -1216,7 +1209,7 @@ def test_v030_season_overlap_blends_one_month_smoothly_without_extra_anchor():
     assert learning._season_weights(datetime(2026, 3, 16, 12, tzinfo=timezone.utc)) == {"spring": 1.0}
 
 
-def test_v030_season_overlap_blends_runtime_bias_at_boundary():
+def test_v031_season_overlap_blends_runtime_bias_at_boundary():
     model = PersonalModel.from_answers(3, 3, 3, 3)
     model.winter_bias_c = -0.6
     model.spring_bias_c = 1.0
@@ -1224,55 +1217,88 @@ def test_v030_season_overlap_blends_runtime_bias_at_boundary():
     assert model.seasonal_bias_for(boundary) == pytest.approx(0.2)
 
 
-def test_v030_overlap_feedback_counts_one_experience_and_keeps_full_budget():
+def test_v031_overlap_feedback_changes_only_two_neighbouring_seasons():
     model = PersonalModel.from_answers(3, 3, 3, 3)
-    model.general_stat = learning.RunningStat(samples=20, weight_sum=20.0)
-    for name in ("winter", "spring", "summer", "autumn"):
-        setattr(model, f"{name}_season_stat", learning.RunningStat(samples=10, weight_sum=10.0))
-
+    model.summer_bias_c = 0.31
+    model.autumn_bias_c = -0.27
     observed = datetime(2026, 3, 1, 12, tzinfo=timezone.utc)
-    before_effective = model.general_offset_c + model.seasonal_bias_for(observed)
-    before_weights = {
-        name: getattr(model, f"{name}_season_stat").weight_sum
-        for name in ("winter", "spring", "summer", "autumn")
-    }
+    before_main = model.general_offset_c
+    before_summer = model.summer_bias_c
+    before_autumn = model.autumn_bias_c
 
     learning.apply_feedback(
         model,
         rating=const.FEEDBACK_TOO_COLD,
         jacket=const.JACKET_LIGHT,
-        effective_c=15.0,
         observed_at=observed,
     )
 
-    # With 20 prior global observations the step is 0.30 C and the mature-model
-    # global factor is 0.60, so this real rating must change the effective model
-    # at the observation date by exactly 0.18 C -- not half of it and not twice.
-    after_effective = model.general_offset_c + model.seasonal_bias_for(observed)
-    assert after_effective - before_effective == pytest.approx(0.18)
-    assert model.winter_season_stat.weight_sum - before_weights["winter"] == pytest.approx(0.5)
-    assert model.spring_season_stat.weight_sum - before_weights["spring"] == pytest.approx(0.5)
-    assert model.summer_season_stat.weight_sum == pytest.approx(before_weights["summer"])
-    assert model.autumn_season_stat.weight_sum == pytest.approx(before_weights["autumn"])
+    assert model.winter_bias_c > 0.0
+    assert model.spring_bias_c > 0.0
+    assert model.summer_bias_c == before_summer
+    assert model.autumn_bias_c == before_autumn
+    assert model.general_offset_c == before_main
 
 
-def test_v030_weighted_season_move_redistributes_when_one_anchor_is_saturated():
+def test_v031_overlap_evidence_sums_to_exactly_one_real_rating():
     model = PersonalModel.from_answers(3, 3, 3, 3)
-    model.winter_bias_c = 1.8
+    observed = datetime(2026, 2, 20, 12, tzinfo=timezone.utc)
+    weights = learning._season_weights(observed)
+    assert set(weights) == {"winter", "spring"}
+
+    learning.apply_feedback(
+        model,
+        rating=const.FEEDBACK_PERFECT,
+        jacket=const.JACKET_LIGHT,
+        observed_at=observed,
+    )
+
+    assert model.winter_season_stat.weight_sum == pytest.approx(weights["winter"])
+    assert model.spring_season_stat.weight_sum == pytest.approx(weights["spring"])
+    assert (
+        model.winter_season_stat.weight_sum
+        + model.spring_season_stat.weight_sum
+    ) == pytest.approx(1.0)
+
+
+def test_v031_fifty_fifty_overlap_keeps_full_effective_learning_step():
+    model = PersonalModel.from_answers(3, 3, 3, 3)
+    observed = datetime(2026, 3, 1, 12, tzinfo=timezone.utc)
+    before = model.seasonal_bias_for(observed)
+
+    learning.apply_feedback(
+        model,
+        rating=const.FEEDBACK_TOO_COLD,
+        jacket=const.JACKET_LIGHT,
+        observed_at=observed,
+    )
+
+    after = model.seasonal_bias_for(observed)
+    assert after - before == pytest.approx(0.9)
+    assert model.winter_bias_c == pytest.approx(0.9)
+    assert model.spring_bias_c == pytest.approx(0.9)
+
+
+def test_v031_weighted_overlap_move_redistributes_at_four_degree_saturation_without_main_fallback():
+    model = PersonalModel.from_answers(3, 3, 3, 3)
+    model.winter_bias_c = 4.0
     model.spring_bias_c = 0.0
-    weights = {"winter": 0.5, "spring": 0.5}
-    before = 0.5 * model.winter_bias_c + 0.5 * model.spring_bias_c
-    residual = learning._apply_weighted_seasonal_move(model, weights, 0.2)
-    after = 0.5 * model.winter_bias_c + 0.5 * model.spring_bias_c
+    previous = {"winter": 0.0, "spring": 0.0}
+    before_main = model.general_offset_c
+    residual = learning._apply_weighted_seasonal_learning_move(
+        model,
+        {"winter": 0.5, "spring": 0.5},
+        1.0,
+        feedback_weight=1.0,
+        previous_evidence=previous,
+    )
     assert residual == pytest.approx(0.0)
-    assert model.winter_bias_c == pytest.approx(1.8)
-    assert model.spring_bias_c == pytest.approx(0.4)
-    assert after - before == pytest.approx(0.2)
+    assert model.winter_bias_c == pytest.approx(4.0)
+    assert model.spring_bias_c == pytest.approx(1.8)
+    assert model.general_offset_c == before_main
 
 
-
-
-def test_v030_december_overlap_is_cyclic_and_new_year_has_no_season_jump():
+def test_v031_december_overlap_is_cyclic_and_new_year_has_no_season_jump():
     december_boundary = datetime(2026, 12, 1, 12, tzinfo=timezone.utc)
     assert learning._season_weights(december_boundary) == pytest.approx({"autumn": 0.5, "winter": 0.5})
     assert learning._season_weights(datetime(2026, 12, 16, 12, tzinfo=timezone.utc)) == {"winter": 1.0}
@@ -1280,7 +1306,7 @@ def test_v030_december_overlap_is_cyclic_and_new_year_has_no_season_jump():
     assert learning._season_weights(datetime(2027, 1, 1, 12, tzinfo=timezone.utc)) == {"winter": 1.0}
 
 
-def test_v030_boundary_only_feedback_does_not_train_general_or_seasons_in_overlap():
+def test_v031_boundary_only_feedback_does_not_train_main_or_seasons_in_overlap():
     model = PersonalModel.from_answers(3, 3, 3, 3)
     observed = datetime(2026, 3, 1, 12, tzinfo=timezone.utc)
     before = (
@@ -1310,21 +1336,353 @@ def test_v030_boundary_only_feedback_does_not_train_general_or_seasons_in_overla
     assert model.light_threshold_delta_c < 0.0
 
 
-def test_v030_perfect_overlap_feedback_only_adds_weighted_evidence():
+def test_v031_perfect_feedback_confirms_season_without_moving_offset():
     model = PersonalModel.from_answers(3, 3, 3, 3)
-    observed = datetime(2026, 3, 1, 12, tzinfo=timezone.utc)
-    before = (model.general_offset_c, model.winter_bias_c, model.spring_bias_c)
+    winter = datetime(2026, 1, 15, 12, tzinfo=timezone.utc)
+    model.winter_season_initialized = True
+    model.winter_bias_c = 0.7
+    before = model.winter_bias_c
     learning.apply_feedback(
         model,
         rating=const.FEEDBACK_PERFECT,
         jacket=const.JACKET_LIGHT,
-        effective_c=15.0,
-        observed_at=observed,
+        observed_at=winter,
     )
-    assert (model.general_offset_c, model.winter_bias_c, model.spring_bias_c) == pytest.approx(before)
-    assert model.winter_season_stat.weight_sum == pytest.approx(0.5)
-    assert model.spring_season_stat.weight_sum == pytest.approx(0.5)
-    assert model.winter_season_stat.weight_sum + model.spring_season_stat.weight_sum == pytest.approx(1.0)
+    assert model.winter_bias_c == before
+    assert model.winter_season_stat.weight_sum == pytest.approx(1.0)
+
+
+
+
+def test_v031_first_encountered_season_starts_neutral_relative_to_main():
+    model = PersonalModel.from_answers(5, 3, 3, 3)
+    assert model.general_offset_c == pytest.approx(1.8)
+
+    changed = model.prepare_seasons_for(datetime(2026, 10, 1, 12, tzinfo=timezone.utc))
+
+    assert changed is True
+    assert model.autumn_season_initialized is True
+    assert model.autumn_bias_c == 0.0
+    assert model.autumn_seeded_from == ""
+    assert model.autumn_season_stat.weight_sum == 0.0
+
+
+def test_v031_bootstrap_can_chain_seed_new_seasons_without_copying_evidence():
+    model = PersonalModel.from_answers(3, 3, 3, 3)
+    model.prepare_seasons_for(datetime(2026, 10, 1, 12, tzinfo=timezone.utc))
+    model.autumn_bias_c = 0.6
+    model.autumn_season_stat = learning.RunningStat(samples=5, weight_sum=5.0)
+
+    model.prepare_seasons_for(datetime(2026, 11, 20, 12, tzinfo=timezone.utc))
+    assert model.winter_bias_c == pytest.approx(0.6)
+    assert model.winter_season_stat.weight_sum == 0.0
+    model.winter_bias_c = 0.3
+    model.winter_season_stat = learning.RunningStat(samples=4, weight_sum=4.0)
+
+    model.prepare_seasons_for(datetime(2027, 2, 20, 12, tzinfo=timezone.utc))
+    assert model.spring_bias_c == pytest.approx(0.3)
+    assert model.spring_seeded_from == "winter"
+    assert model.spring_season_stat.weight_sum == 0.0
+    model.spring_bias_c = -0.1
+    model.spring_season_stat = learning.RunningStat(samples=3, weight_sum=3.0)
+
+    model.prepare_seasons_for(datetime(2027, 5, 20, 12, tzinfo=timezone.utc))
+    assert model.summer_bias_c == pytest.approx(-0.1)
+    assert model.summer_seeded_from == "spring"
+    assert model.summer_season_stat.weight_sum == 0.0
+
+
+def test_v031_not_used_feedback_adds_no_real_season_evidence():
+    model = PersonalModel.from_answers(3, 3, 3, 3)
+    winter = datetime(2026, 1, 15, 12, tzinfo=timezone.utc)
+    before = model.to_dict()
+
+    learned = learning.apply_feedback(
+        model,
+        rating=const.FEEDBACK_NOT_USED,
+        jacket=const.JACKET_LIGHT,
+        observed_at=winter,
+    )
+
+    assert learned is False
+    assert model.to_dict() == before
+
+
+@pytest.mark.parametrize(
+    ("current", "previous", "when", "previous_bias"),
+    [
+        ("winter", "autumn", datetime(2027, 1, 10, 12, tzinfo=timezone.utc), 0.8),
+        ("spring", "winter", datetime(2027, 4, 10, 12, tzinfo=timezone.utc), -0.7),
+        ("summer", "spring", datetime(2027, 7, 10, 12, tzinfo=timezone.utc), 1.1),
+        ("autumn", "summer", datetime(2027, 10, 10, 12, tzinfo=timezone.utc), -1.2),
+    ],
+)
+def test_v031_late_seed_catches_up_after_entire_transition_was_missed(
+    current, previous, when, previous_bias
+):
+    model = PersonalModel.from_answers(3, 3, 3, 3)
+    setattr(model, f"{previous}_season_initialized", True)
+    setattr(model, f"{previous}_bias_c", previous_bias)
+    setattr(
+        model,
+        f"{previous}_season_stat",
+        learning.RunningStat(samples=17, mean=0.4, m2=1.2, weight_sum=14.7),
+    )
+
+    changed = model.prepare_seasons_for(when)
+
+    assert changed is True
+    assert getattr(model, f"{current}_season_initialized") is True
+    assert getattr(model, f"{current}_bias_c") == pytest.approx(previous_bias)
+    assert getattr(model, f"{current}_seeded_from") == previous
+    stat = getattr(model, f"{current}_season_stat")
+    assert stat.samples == 0
+    assert stat.weight_sum == 0.0
+    assert stat.mean == 0.0
+    assert stat.m2 == 0.0
+
+
+def test_v031_late_seed_happens_before_first_real_season_feedback():
+    model = PersonalModel.from_answers(3, 3, 3, 3)
+    model.autumn_season_initialized = True
+    model.autumn_bias_c = 1.0
+    model.autumn_season_stat = learning.RunningStat(samples=8, weight_sum=8.0)
+    january = datetime(2027, 1, 10, 12, tzinfo=timezone.utc)
+
+    learned = learning.apply_feedback(
+        model,
+        rating=const.FEEDBACK_TOO_COLD,
+        jacket=const.JACKET_LIGHT,
+        observed_at=january,
+    )
+
+    assert learned is True
+    assert model.winter_season_initialized is True
+    assert model.winter_seeded_from == "autumn"
+    assert model.winter_bias_c > 1.0
+    assert model.winter_season_stat.weight_sum == pytest.approx(1.0)
+    assert model.autumn_bias_c == pytest.approx(1.0)
+    assert model.autumn_season_stat.weight_sum == pytest.approx(8.0)
+
+
+def test_v031_late_seed_is_one_time_even_after_predecessor_changes():
+    model = PersonalModel.from_answers(3, 3, 3, 3)
+    model.autumn_season_initialized = True
+    model.autumn_bias_c = 0.8
+    january = datetime(2027, 1, 10, 12, tzinfo=timezone.utc)
+
+    assert model.prepare_seasons_for(january) is True
+    model.winter_bias_c = 0.2
+    model.winter_season_stat = learning.RunningStat(samples=4, weight_sum=4.0)
+    model.autumn_bias_c = 1.5
+
+    assert model.prepare_seasons_for(datetime(2028, 1, 10, 12, tzinfo=timezone.utc)) is False
+    assert model.winter_bias_c == pytest.approx(0.2)
+    assert model.winter_seeded_from == "autumn"
+    assert model.winter_season_stat.weight_sum == pytest.approx(4.0)
+
+
+def test_v031_multiple_fully_skipped_seasons_do_not_fabricate_seed_chain():
+    model = PersonalModel.from_answers(3, 3, 3, 3)
+    model.autumn_season_initialized = True
+    model.autumn_bias_c = 0.9
+    model.autumn_season_stat = learning.RunningStat(samples=5, weight_sum=5.0)
+
+    # Winter and spring were never encountered. On the first July access, the
+    # direct predecessor (spring) is unknown, so summer starts neutral. The
+    # implementation must not retroactively invent winter -> spring -> summer.
+    changed = model.prepare_seasons_for(datetime(2027, 7, 10, 12, tzinfo=timezone.utc))
+
+    assert changed is True
+    assert model.summer_season_initialized is True
+    assert model.summer_bias_c == pytest.approx(0.0)
+    assert model.summer_seeded_from == ""
+    assert model.summer_season_stat.weight_sum == 0.0
+    assert model.winter_season_initialized is False
+    assert model.spring_season_initialized is False
+
+
+def test_v031_first_winter_seeds_once_from_autumn_without_copying_evidence():
+    model = PersonalModel.from_answers(3, 3, 3, 3)
+    model.autumn_season_initialized = True
+    model.autumn_bias_c = 0.75
+    model.autumn_season_stat = learning.RunningStat(samples=8, weight_sum=8.0)
+
+    changed = model.prepare_seasons_for(datetime(2026, 11, 20, 12, tzinfo=timezone.utc))
+
+    assert changed is True
+    assert model.winter_season_initialized is True
+    assert model.winter_seeded_from == "autumn"
+    assert model.winter_bias_c == pytest.approx(0.75)
+    assert model.winter_season_stat.samples == 0
+    assert model.winter_season_stat.weight_sum == 0.0
+
+
+def test_v031_second_winter_keeps_own_value_and_is_never_reseeded():
+    model = PersonalModel.from_answers(3, 3, 3, 3)
+    model.autumn_season_initialized = True
+    model.autumn_bias_c = 0.75
+    model.prepare_seasons_for(datetime(2026, 11, 20, 12, tzinfo=timezone.utc))
+    model.winter_bias_c = 0.25
+    model.winter_season_stat = learning.RunningStat(samples=4, weight_sum=4.0)
+    model.autumn_bias_c = 1.4
+
+    changed = model.prepare_seasons_for(datetime(2027, 11, 20, 12, tzinfo=timezone.utc))
+
+    assert changed is False
+    assert model.winter_bias_c == pytest.approx(0.25)
+    assert model.winter_seeded_from == "autumn"
+    assert model.winter_season_stat.weight_sum == pytest.approx(4.0)
+
+
+def _confirmed_consensus_model() -> PersonalModel:
+    model = PersonalModel.from_answers(3, 3, 3, 3)
+    for name in ("winter", "spring", "summer", "autumn"):
+        setattr(model, f"{name}_season_initialized", True)
+        setattr(model, f"{name}_season_stat", learning.RunningStat(samples=3, weight_sum=3.0))
+    return model
+
+
+def test_v031_seeded_only_season_cannot_trigger_main_consensus():
+    model = _confirmed_consensus_model()
+    model.winter_bias_c = 1.0
+    model.spring_bias_c = 1.1
+    model.summer_bias_c = 1.2
+    model.autumn_bias_c = 0.9
+    model.autumn_season_stat = learning.RunningStat()
+    model.autumn_seeded_from = "summer"
+    before = model.general_offset_c
+
+    assert learning._pool_season_consensus(model) == 0.0
+    assert model.general_offset_c == before
+
+
+def test_v031_four_confirmed_positive_seasons_pool_common_component_to_main():
+    model = _confirmed_consensus_model()
+    model.winter_bias_c = 1.6
+    model.spring_bias_c = 1.4
+    model.summer_bias_c = 1.7
+    model.autumn_bias_c = 1.5
+
+    transfer = learning._pool_season_consensus(model)
+
+    assert transfer == pytest.approx(1.2)
+    assert model.general_offset_c == pytest.approx(1.2)
+    assert model.winter_bias_c == pytest.approx(0.4)
+    assert model.spring_bias_c == pytest.approx(0.2)
+    assert model.summer_bias_c == pytest.approx(0.5)
+    assert model.autumn_bias_c == pytest.approx(0.3)
+
+
+def test_v031_four_confirmed_negative_seasons_pool_common_component_to_main():
+    model = _confirmed_consensus_model()
+    model.winter_bias_c = -1.6
+    model.spring_bias_c = -1.4
+    model.summer_bias_c = -1.7
+    model.autumn_bias_c = -1.5
+
+    transfer = learning._pool_season_consensus(model)
+
+    assert transfer == pytest.approx(-1.2)
+    assert model.general_offset_c == pytest.approx(-1.2)
+    assert model.winter_bias_c == pytest.approx(-0.4)
+    assert model.spring_bias_c == pytest.approx(-0.2)
+    assert model.summer_bias_c == pytest.approx(-0.5)
+    assert model.autumn_bias_c == pytest.approx(-0.3)
+
+
+def test_v031_consensus_pooling_preserves_every_effective_season_value():
+    model = _confirmed_consensus_model()
+    model.general_offset_c = 0.6
+    model.winter_bias_c = 1.6
+    model.spring_bias_c = 1.4
+    model.summer_bias_c = 1.7
+    model.autumn_bias_c = 1.5
+    before = {
+        name: model.general_offset_c + getattr(model, f"{name}_bias_c")
+        for name in ("winter", "spring", "summer", "autumn")
+    }
+
+    learning._pool_season_consensus(model)
+
+    after = {
+        name: model.general_offset_c + getattr(model, f"{name}_bias_c")
+        for name in ("winter", "spring", "summer", "autumn")
+    }
+    assert after == pytest.approx(before)
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        (0.8, 0.7, -0.6, -0.5),
+        (0.8, 0.7, 0.6, -0.5),
+    ],
+)
+def test_v031_mixed_season_signs_never_move_main(values):
+    model = _confirmed_consensus_model()
+    for name, value in zip(("winter", "spring", "summer", "autumn"), values):
+        setattr(model, f"{name}_bias_c", value)
+    before = model.general_offset_c
+    assert learning._pool_season_consensus(model) == 0.0
+    assert model.general_offset_c == before
+
+
+def test_v031_later_common_negative_trend_can_reverse_earlier_positive_main_transfer():
+    model = _confirmed_consensus_model()
+    model.general_offset_c = 1.2
+    model.winter_bias_c = -0.4
+    model.spring_bias_c = -0.3
+    model.summer_bias_c = -1.2
+    model.autumn_bias_c = -0.5
+
+    transfer = learning._pool_season_consensus(model)
+
+    assert transfer == pytest.approx(-0.1)
+    assert model.general_offset_c == pytest.approx(1.1)
+    assert model.winter_bias_c == pytest.approx(-0.3)
+    assert model.spring_bias_c == pytest.approx(-0.2)
+    assert model.summer_bias_c == pytest.approx(-1.1)
+    assert model.autumn_bias_c == pytest.approx(-0.4)
+
+
+def test_v031_single_extreme_summer_does_not_move_main_against_other_seasons():
+    model = _confirmed_consensus_model()
+    model.general_offset_c = 0.8
+    model.winter_bias_c = 0.4
+    model.spring_bias_c = 0.3
+    model.summer_bias_c = -3.8
+    model.autumn_bias_c = 0.5
+    before = model.general_offset_c
+
+    learning._pool_season_consensus(model)
+
+    assert model.general_offset_c == before
+
+
+def test_v031_season_offsets_can_learn_to_plus_and_minus_four_degrees():
+    winter = datetime(2026, 1, 15, 12, tzinfo=timezone.utc)
+    warmer = PersonalModel.from_answers(3, 3, 3, 3)
+    colder = PersonalModel.from_answers(3, 3, 3, 3)
+
+    for _ in range(200):
+        learning.apply_feedback(
+            warmer,
+            rating=const.FEEDBACK_TOO_COLD,
+            jacket=const.JACKET_WINTER,
+            observed_at=winter,
+        )
+        learning.apply_feedback(
+            colder,
+            rating=const.FEEDBACK_TOO_WARM,
+            jacket=const.JACKET_LIGHT,
+            observed_at=winter,
+        )
+
+    assert warmer.winter_bias_c == pytest.approx(4.0)
+    assert colder.winter_bias_c == pytest.approx(-4.0)
+    assert warmer.general_offset_c == 0.0
+    assert colder.general_offset_c == 0.0
 
 
 def test_v030_no_jacket_too_warm_does_not_drag_personal_offsets_colder():
@@ -1345,3 +1703,52 @@ def test_v030_no_jacket_too_warm_does_not_drag_personal_offsets_colder():
     assert model.general_stat.weight_sum == 0.0
     assert model.total_feedback == before["total_feedback"] + 1
     assert model.confidence() == pytest.approx(confidence_before)
+
+
+def test_v031_late_current_seed_can_feed_the_transition_that_is_already_active():
+    model = PersonalModel.from_answers(3, 3, 3, 3)
+    model.autumn_season_initialized = True
+    model.autumn_bias_c = 0.8
+
+    # No access during the autumn->winter overlap. The first access happens in
+    # the following winter->spring overlap. Winter must first catch up from
+    # autumn; spring may then legitimately seed from winter in the active overlap.
+    changed = model.prepare_seasons_for(datetime(2027, 2, 20, 12, tzinfo=timezone.utc))
+
+    assert changed is True
+    assert model.winter_season_initialized is True
+    assert model.winter_bias_c == pytest.approx(0.8)
+    assert model.winter_seeded_from == "autumn"
+    assert model.winter_season_stat.weight_sum == 0.0
+    assert model.spring_season_initialized is True
+    assert model.spring_bias_c == pytest.approx(0.8)
+    assert model.spring_seeded_from == "winter"
+    assert model.spring_season_stat.weight_sum == 0.0
+
+
+def test_v031_late_seed_can_change_first_recommendation_before_any_feedback():
+    when = datetime(2027, 1, 10, 12, tzinfo=timezone.utc)
+    current = WeatherPoint(
+        dt=when,
+        temperature_c=16.5,
+        wind_kmh=0.0,
+        gust_kmh=0.0,
+        precipitation_probability=0.0,
+        condition="sunny",
+    )
+    model = PersonalModel.from_answers(3, 3, 3, 3)
+    model.autumn_season_initialized = True
+    model.autumn_bias_c = 1.0
+
+    without_late_seed = engine.build_recommendation(
+        current, [], model, indoor_temperature_c=21.0
+    )
+    assert without_late_seed.jacket_now == const.JACKET_NONE
+
+    assert model.prepare_seasons_for(when) is True
+    with_late_seed = engine.build_recommendation(
+        current, [], model, indoor_temperature_c=21.0
+    )
+
+    assert model.winter_bias_c == pytest.approx(1.0)
+    assert with_late_seed.jacket_now == const.JACKET_LIGHT

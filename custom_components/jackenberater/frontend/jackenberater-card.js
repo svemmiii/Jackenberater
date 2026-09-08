@@ -229,8 +229,11 @@ class JackenBeraterCard extends HTMLElement {
     this._session = null;
     this._loading = false;
     this._setup = { cold: 3, warm: 3, wind: 3, evening: 3 };
-    this._selectedProfile = config.profile_id || null;
-    this._profileFixed = Boolean(config.profile_id);
+    // Profile selection is runtime-owned. Normal users always use their own
+    // profile; configured shared accounts explicitly select a profile in-card.
+    // The old undocumented Lovelace `profile_id` shortcut is intentionally no
+    // longer accepted because it duplicated the authenticated server-side flow.
+    this._selectedProfile = null;
     this._autoShared = false;
     this._profileMetaLoaded = false;
     this._entryId = config.entry_id || null;
@@ -340,7 +343,6 @@ class JackenBeraterCard extends HTMLElement {
   }
 
   _restoreSharedProfile(profiles) {
-    if (this._profileFixed) return;
     const valid = new Set((profiles || []).map(profile => profile.id));
     if (this._selectedProfile && !valid.has(this._selectedProfile)) {
       this._selectedProfile = null;
@@ -361,7 +363,7 @@ class JackenBeraterCard extends HTMLElement {
   }
 
   _persistSharedProfile() {
-    if (!this._sharedMode() || this._profileFixed) return;
+    if (!this._sharedMode()) return;
     try {
       if (this._selectedProfile) {
         window.localStorage?.setItem(this._profileStorageKey(), this._selectedProfile);
@@ -403,7 +405,7 @@ class JackenBeraterCard extends HTMLElement {
 
       if (this._sharedMode()) {
         this._restoreSharedProfile(this._profiles);
-      } else if (!this._profileFixed && (wasShared || this._selectedProfile)) {
+      } else if (wasShared || this._selectedProfile) {
         this._selectedProfile = null;
         try { window.localStorage?.removeItem(this._profileStorageKey()); } catch (_err) {}
       }

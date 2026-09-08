@@ -106,7 +106,7 @@ def test_frontend_registration_does_not_hide_unexpected_runtime_errors():
 
 
 def test_release_version_is_consistent_across_current_release_files():
-    version = "0.3.0"
+    version = "0.3.1"
     manifest = json.loads((INTEGRATION / "manifest.json").read_text(encoding="utf-8"))
     const_source = (INTEGRATION / "const.py").read_text(encoding="utf-8")
     init_source = (INTEGRATION / "__init__.py").read_text(encoding="utf-8")
@@ -169,4 +169,36 @@ def test_user_card_does_not_expose_internal_effective_temperature():
 
 def test_bug_report_template_targets_current_release():
     bug = (ROOT / ".github" / "ISSUE_TEMPLATE" / "bug_report.yml").read_text(encoding="utf-8")
-    assert 'value: "0.3.0"' in bug
+    assert 'value: "0.3.1"' in bug
+
+
+def test_release_ci_covers_declared_minimum_current_and_latest_home_assistant():
+    workflow = (ROOT / ".github" / "workflows" / "validate.yml").read_text(
+        encoding="utf-8"
+    )
+    assert "ha-runtime-minimum:" in workflow
+    assert "pytest-homeassistant-custom-component==0.13.336" in workflow
+    assert "ha-runtime-smoke:" in workflow
+    assert "pytest-homeassistant-custom-component==0.13.364" in workflow
+    assert "ha-runtime-latest:" in workflow
+    assert "pip pytest-homeassistant-custom-component\n" in workflow
+
+
+def test_readme_documents_hacs_custom_repository_and_shared_admin_exception():
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    assert "Custom Repository" in readme
+    assert "https://github.com/svemmiii/Jackenberater" in readme
+    assert "Custom repositories" in readme
+    assert "Als Typ **Integration**" in readme
+    assert "Nicht-administrative Shared-Konten" in readme
+
+
+def test_frontend_has_no_undocumented_fixed_profile_id_config_path():
+    frontend = (INTEGRATION / "frontend" / "jackenberater-card.js").read_text(
+        encoding="utf-8"
+    )
+    assert "config.profile_id" not in frontend
+    assert "_profileFixed" not in frontend
+    # profile_id remains a server message field for authenticated Shared/Admin
+    # selection; only the old card-config shortcut is intentionally removed.
+    assert "profile_id: this._selectedProfile" in frontend

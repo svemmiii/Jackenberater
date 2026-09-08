@@ -1,4 +1,4 @@
-# JackenBerater v0.3.0
+# JackenBerater v0.3.1
 
 JackenBerater ist eine Home-Assistant-Integration für persönliche Jackenempfehlungen. Sie verwendet aktuelle Wetterdaten, den Forecast und optional persönliche Rückmeldungen.
 
@@ -12,10 +12,14 @@ JackenBerater ist eine Home-Assistant-Integration für persönliche Jackenempfeh
 
 ### HACS
 
-1. Repository in HACS als Integration hinzufügen.
-2. JackenBerater installieren.
-3. Home Assistant neu starten.
-4. Unter **Einstellungen → Geräte & Dienste** JackenBerater hinzufügen.
+JackenBerater wird derzeit als **Custom Repository** hinzugefügt:
+
+1. In HACS oben rechts das **Drei-Punkte-Menü** öffnen und **Custom repositories** wählen.
+2. `https://github.com/svemmiii/Jackenberater` eintragen.
+3. Als Typ **Integration** auswählen und mit **Add** hinzufügen.
+4. JackenBerater in HACS installieren.
+5. Home Assistant neu starten.
+6. Unter **Einstellungen → Geräte & Dienste** JackenBerater hinzufügen.
 
 ### Manuell
 
@@ -48,8 +52,9 @@ Jeder normale Home-Assistant-Benutzer hat sein eigenes Lernprofil. Beim ersten E
 - Zu warm
 - Nicht genutzt
 
-Das Grundprofil lernt von Anfang an schnell. Saisonwerte werden parallel gesammelt und als Abweichung vom persönlichen Grundprofil geführt, damit derselbe Fehler nicht gleichzeitig doppelt als allgemein und saisonal gelernt wird. Bestehende Profile aus v0.2.x werden beim Laden ohne Verlust ihrer bisherigen saisonalen Wirkung umgerechnet.
-Zwischen den vier Saisonankern wird rund um jeden meteorologischen Saisonwechsel über einen Monat weich überblendet; Feedback in dieser Zeit zählt anteilig für beide benachbarten Jahreszeiten.
+Das allgemeine Profil ist der ganzjährige persönliche Grundwert. Winter, Frühling, Sommer und Herbst besitzen daneben jeweils einen eigenen Offset. Normales thermisches Feedback verändert nach der Initialisierung nur die gerade beteiligte Jahreszeit; während der 30-tägigen Überblendung um den meteorologischen Saisonwechsel lernen ausschließlich die beiden benachbarten Saisonanker. Die saisonale Lernrate richtet sich nach der eigenen echten Evidenz der jeweiligen Jahreszeit und bleibt auch nach vielen Jahren reaktionsfähig.
+
+Beim allerersten Übergang in eine noch unbekannte Jahreszeit übernimmt sie einmalig nur den Offset der direkten Vorgängersaison als Startwert. Wird die komplette 30-Tage-Übergangszone verpasst, wird dieses einmalige Seeding beim ersten späteren Zugriff in der neuen Saison nachgeholt. Evidenz, Statistik und Lernhistorie werden nie mitkopiert; in späteren Jahren verwendet die Saison ausschließlich ihren eigenen zuletzt gelernten Zustand. Wurden mehrere ganze Jahreszeiten übersprungen und ist die direkte Vorgängersaison selbst unbekannt, wird keine künstliche Seed-Kette erzeugt: Nur die aktuell erreichte Saison startet dann neutral bei 0 relativ zu Main. Erst wenn alle vier Jahreszeiten ausreichend eigene Evidenz besitzen und ihre Offsets denselben gemeinsamen positiven oder negativen Sockel zeigen, wird dieser gemeinsame Anteil verlustfrei in den ganzjährigen Grundwert verschoben. `Main + Saisonoffset` bleibt dadurch für jede Jahreszeit unverändert. Bestehende v0.3.0-Profile werden beim Laden automatisch in dieses Modell migriert; synthetische Saisonwerte ohne eigene Evidenz werden dabei nicht als echte Saisonerfahrung übernommen.
 
 Wenn sich die Empfehlung im Tagesverlauf ändert, zeigt die Feedbackkarte auch diesen Wechsel. Bei "Zu kalt" oder "Zu warm" fragt sie konkret nach, ob die erste Empfehlung, der spätere Wechsel oder ein längerer Zeitraum nicht gepasst hat. Ein falsch getimter Wechsel korrigiert gezielt die betroffene Jackengrenze statt pauschal das ganze Wärmeprofil.
 
@@ -65,7 +70,7 @@ Ein als Shared-Konto freigegebener Home-Assistant-Benutzer wählt vor der Beratu
 - Details werden nur für das ausgewählte Profil geöffnet.
 - Fälliges Feedback gehört zum Profil und kann auch auf einem anderen Gerät beantwortet werden.
 - Nahezu identische Öffnungen desselben Profils innerhalb kurzer Zeit werden nicht doppelt als Lerngelegenheit gezählt.
-- Shared-Konten dürfen keine Profilverwaltung, kein Reset und kein freiwilliges Sofort-Feedback ausführen.
+- Nicht-administrative Shared-Konten dürfen keine Profilverwaltung, kein Reset und kein freiwilliges Sofort-Feedback ausführen. Home-Assistant-Administratoren behalten die vorgesehenen administrativen Rechte.
 
 Wird ein gespeichertes Profil gelöscht oder ändert sich der Shared-Status des Kontos, korrigiert die Karte die Auswahl automatisch.
 
@@ -88,7 +93,7 @@ title: Jacke heute
 
 Bei vollständig YAML-verwaltetem Lovelace muss die Ressource manuell eingetragen werden:
 
-`/jackenberater/frontend/jackenberater-card.js?v=0.3.0&ui=2`
+`/jackenberater/frontend/jackenberater-card.js?v=0.3.1&ui=2`
 
 Die beiden aufklappbaren Bereiche der Karte sind gegenseitig exklusiv: Entweder sind die Empfehlungsdetails oder das Infofeld geöffnet, nicht beide gleichzeitig.
 

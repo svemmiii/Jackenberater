@@ -12,6 +12,26 @@ def model_diagnostics(model: PersonalModel, *, simulation_active: bool = False) 
     result["confidence"] = round(model.confidence(), 3)
     result["learning_progress"] = round(model.learning_progress(), 3)
     result["simulation_active"] = simulation_active
+
+    seasons = ("winter", "spring", "summer", "autumn")
+    for season in seasons:
+        stat = getattr(model, f"{season}_season_stat")
+        result[f"{season}_real_weight"] = round(float(stat.weight_sum), 3)
+
+    confirmed = all(result[f"{season}_real_weight"] >= 3.0 for season in seasons)
+    values = [float(getattr(model, f"{season}_bias_c")) for season in seasons]
+    if confirmed and all(value > 0.0 for value in values):
+        direction = "positive"
+    elif confirmed and all(value < 0.0 for value in values):
+        direction = "negative"
+    else:
+        direction = "none"
+    result["season_consensus_eligible"] = confirmed
+    result["season_consensus_direction"] = direction
+    result["season_saturated"] = [
+        season for season in seasons
+        if abs(float(getattr(model, f"{season}_bias_c"))) >= 4.0 - 1e-9
+    ]
     return result
 
 

@@ -78,3 +78,20 @@ def test_diagnostics_are_complete_fixed_size_values_without_history():
     assert 0.0 <= first["confidence"] <= 1.0
     assert "sessions" not in first
     assert "history" not in first
+
+
+def test_v031_diagnostics_expose_real_season_evidence_and_consensus_state():
+    model = learning.PersonalModel.from_answers(3, 3, 3, 3)
+    values = {"winter": 1.0, "spring": 1.1, "summer": 1.2, "autumn": 4.0}
+    for season, value in values.items():
+        setattr(model, f"{season}_bias_c", value)
+        setattr(model, f"{season}_season_initialized", True)
+        setattr(model, f"{season}_season_stat", learning.RunningStat(samples=3, weight_sum=3.0))
+
+    result = diagnostics.model_diagnostics(model)
+
+    for season in values:
+        assert result[f"{season}_real_weight"] == 3.0
+    assert result["season_consensus_eligible"] is True
+    assert result["season_consensus_direction"] == "positive"
+    assert result["season_saturated"] == ["autumn"]

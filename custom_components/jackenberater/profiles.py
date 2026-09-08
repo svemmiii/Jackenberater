@@ -57,6 +57,14 @@ _FEEDBACK_UNDO_FIELDS = (
     "spring_bias_c",
     "summer_bias_c",
     "autumn_bias_c",
+    "winter_season_initialized",
+    "spring_season_initialized",
+    "summer_season_initialized",
+    "autumn_season_initialized",
+    "winter_seeded_from",
+    "spring_seeded_from",
+    "summer_seeded_from",
+    "autumn_seeded_from",
     "light_threshold_delta_c",
     "warm_threshold_delta_c",
     "winter_threshold_delta_c",
@@ -81,13 +89,12 @@ def _feedback_learning_snapshot(model: PersonalModel) -> dict[str, Any]:
 
 
 def _normalize_feedback_learning_snapshot(raw: Any) -> dict[str, Any] | None:
-    """Normalize legacy full-model undo snapshots to the compact v0.3 format.
+    """Normalize old undo snapshots to the compact current learning format.
 
-    v0.2.x stored ``PersonalModel.to_dict()`` as ``learning_before``.  Running
-    that full snapshot through ``PersonalModel.from_dict`` applies every current
-    storage migration (notably the v0.3 seasonal re-centering) before we select
-    the feedback-only undo fields.  Current compact snapshots deliberately lack
-    model/configuration markers and are only filtered defensively.
+    v0.2.x stored the complete model; v0.3 stored a compact learning-only snapshot
+    but did not yet include season-initialization metadata. Both forms must pass
+    through the current ``PersonalModel`` migration before an undo can restore
+    them into the independent v0.3.1 seasonal model.
     """
     if not isinstance(raw, dict):
         return None
@@ -105,6 +112,18 @@ def _normalize_feedback_learning_snapshot(raw: Any) -> dict[str, Any] | None:
     )
     if any(name in raw for name in legacy_full_markers):
         return _feedback_learning_snapshot(PersonalModel.from_dict(raw))
+
+    season_metadata = {
+        f"{season}_season_initialized"
+        for season in ("winter", "spring", "summer", "autumn")
+    }
+    if not season_metadata.issubset(raw):
+        # Compact v0.3 snapshot: reconstruct only enough model shape to let the
+        # v3 -> v4 seasonal migration use the snapshot's own biases and evidence.
+        reconstructed = PersonalModel().to_dict()
+        reconstructed.update(deepcopy(raw))
+        reconstructed["seasonal_model_version"] = 3
+        return _feedback_learning_snapshot(PersonalModel.from_dict(reconstructed))
 
     return {
         name: deepcopy(raw[name])
@@ -149,7 +168,14 @@ class ProfileManager:
         raw = self._profiles.get(profile_id)
         if not isinstance(raw, dict):
             return PersonalModel()
-        return PersonalModel.from_dict(raw.get("model"))
+        model = PersonalModel.from_dict(raw.get("model"))
+        # Initialize/seed each season at most once. If its whole transition was
+        # missed, prepare_seasons_for() catches that seed up on the first later
+        # access. Bootstrap metadata is persisted independently from evidence.
+        if model.prepare_seasons_for(dt_util.now()):
+            raw["model"] = model.to_dict()
+            self._schedule_save()
+        return model
 
     def get_profile_summary(self, profile_id: str) -> dict[str, Any]:
         raw = self._profiles.get(profile_id, {})
@@ -230,6 +256,7 @@ class ProfileManager:
         old = self.get_model(profile_id)
         fresh = PersonalModel.from_answers(cold, warm, wind, evening)
         fresh.learning_enabled = old.learning_enabled
+        fresh.prepare_seasons_for(dt_util.now())
         raw["model"] = fresh.to_dict()
         # A full setup replaces the personal model.  Feedback sessions contain
         # recommendation/weather/learning context from the previous model and

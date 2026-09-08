@@ -242,6 +242,9 @@ def test_async_flush_persists_current_profile_state_immediately():
         def __init__(self):
             self.saved = None
 
+        def async_delay_save(self, *args, **kwargs):
+            return None
+
         async def async_save(self, data):
             self.saved = data
 
@@ -562,7 +565,7 @@ def test_not_used_feedback_does_not_consume_previous_learning_undo_snapshot():
             "user", recommendation(),
             weather_context={"temperature_c": 20.0},
             learning_contexts={
-                "start": {"jacket": const.JACKET_NONE, "effective_c": 20.0},
+                "start": {"jacket": const.JACKET_NONE, "effective_c": 20.0, "observed_at": "2026-01-15T12:00:00+00:00"},
                 "later": {"jacket": const.JACKET_NONE, "effective_c": None},
             },
         )
@@ -570,7 +573,7 @@ def test_not_used_feedback_does_not_consume_previous_learning_undo_snapshot():
             "user", first["id"], rating=const.FEEDBACK_TOO_COLD, phase=None,
             recommendation_used=True, unusual_day=False, voluntary=True,
         )
-        learned_offset = manager.get_model("user").general_offset_c
+        learned_offset = manager.get_model("user").winter_bias_c
         assert learned_offset > 0
 
         second = await manager.async_open_session(
@@ -586,7 +589,7 @@ def test_not_used_feedback_does_not_consume_previous_learning_undo_snapshot():
             recommendation_used=False, unusual_day=False, voluntary=True,
         )
         assert await manager.async_undo_last_feedback("user") is True
-        assert manager.get_model("user").general_offset_c == 0.0
+        assert manager.get_model("user").winter_bias_c == 0.0
     asyncio.run(run())
 
 
@@ -601,7 +604,7 @@ def test_v030_no_jacket_too_warm_does_not_consume_previous_learning_undo_snapsho
             first_rec,
             weather_context={"temperature_c": 10.0},
             learning_contexts={
-                "start": {"jacket": const.JACKET_NONE, "effective_c": 10.0},
+                "start": {"jacket": const.JACKET_NONE, "effective_c": 10.0, "observed_at": "2026-01-15T12:00:00+00:00"},
                 "later": {"jacket": const.JACKET_NONE, "effective_c": None},
             },
         )
@@ -609,7 +612,7 @@ def test_v030_no_jacket_too_warm_does_not_consume_previous_learning_undo_snapsho
             "user", first["id"], rating=const.FEEDBACK_TOO_COLD, phase=None,
             recommendation_used=True, unusual_day=False, voluntary=True,
         )
-        learned_offset = manager.get_model("user").general_offset_c
+        learned_offset = manager.get_model("user").winter_bias_c
         assert learned_offset > 0.0
 
         second_rec = recommendation()
@@ -628,10 +631,10 @@ def test_v030_no_jacket_too_warm_does_not_consume_previous_learning_undo_snapsho
             "user", second["id"], rating=const.FEEDBACK_TOO_WARM, phase=None,
             recommendation_used=True, unusual_day=False, voluntary=True,
         )
-        assert manager.get_model("user").general_offset_c == learned_offset
+        assert manager.get_model("user").winter_bias_c == learned_offset
         assert second["id"] == manager.latest_session("user")["id"]
         assert await manager.async_undo_last_feedback("user") is True
-        assert manager.get_model("user").general_offset_c == 0.0
+        assert manager.get_model("user").winter_bias_c == 0.0
 
     asyncio.run(run())
 
@@ -687,7 +690,7 @@ def test_nonvoluntary_feedback_is_rejected_until_ready_but_voluntary_is_immediat
         session = await manager.async_open_session(
             "user", recommendation(), weather_context={"temperature_c": 15.0},
             learning_contexts={
-                "start": {"jacket": const.JACKET_LIGHT, "effective_c": 15.0},
+                "start": {"jacket": const.JACKET_LIGHT, "effective_c": 15.0, "observed_at": "2026-01-15T12:00:00+00:00"},
                 "later": {"jacket": const.JACKET_LIGHT, "effective_c": 15.0},
             },
         )
@@ -756,7 +759,7 @@ def test_v030_transient_no_jacket_too_warm_gets_its_own_undo_snapshot():
             first,
             weather_context={"temperature_c": 18.0},
             learning_contexts={
-                "start": {"jacket": const.JACKET_NONE, "effective_c": 18.0},
+                "start": {"jacket": const.JACKET_NONE, "effective_c": 18.0, "observed_at": "2026-09-01T12:00:00+00:00"},
                 "later": {"jacket": const.JACKET_NONE, "effective_c": 18.0},
             },
         )
@@ -769,8 +772,11 @@ def test_v030_transient_no_jacket_too_warm_gets_its_own_undo_snapshot():
             unusual_day=False,
             voluntary=True,
         )
-        general_after_first = manager.get_model("user").general_offset_c
-        assert general_after_first > 0.0
+        learned_after_first = manager.get_model("user")
+        summer_after_first = learned_after_first.summer_bias_c
+        autumn_after_first = learned_after_first.autumn_bias_c
+        assert summer_after_first > 0.0
+        assert autumn_after_first > 0.0
 
         # Build the second recommendation with the real engine.  It deliberately
         # chooses no jacket although the immediate thermal class is light because
@@ -822,7 +828,8 @@ def test_v030_transient_no_jacket_too_warm_gets_its_own_undo_snapshot():
         )
         after = manager.get_model("user")
         assert after.transient_tolerance > transient_before
-        assert after.general_offset_c == general_after_first
+        assert after.summer_bias_c == summer_after_first
+        assert after.autumn_bias_c == autumn_after_first
 
         stored = manager._find_session("user", transient_session["id"])
         assert isinstance(stored.get("learning_before"), dict)
@@ -832,7 +839,8 @@ def test_v030_transient_no_jacket_too_warm_gets_its_own_undo_snapshot():
         assert await manager.async_undo_last_feedback("user") is True
         undone = manager.get_model("user")
         assert undone.transient_tolerance == transient_before
-        assert undone.general_offset_c == general_after_first
+        assert undone.summer_bias_c == summer_after_first
+        assert undone.autumn_bias_c == autumn_after_first
 
     asyncio.run(run())
 
@@ -846,7 +854,7 @@ def test_v030_phase_all_noop_does_not_replace_previous_meaningful_undo():
             first,
             weather_context={"temperature_c": 15.0},
             learning_contexts={
-                "start": {"jacket": const.JACKET_LIGHT, "effective_c": 15.0},
+                "start": {"jacket": const.JACKET_LIGHT, "effective_c": 15.0, "observed_at": "2026-01-15T12:00:00+00:00"},
                 "later": {"jacket": const.JACKET_LIGHT, "effective_c": 15.0},
             },
         )
@@ -854,7 +862,7 @@ def test_v030_phase_all_noop_does_not_replace_previous_meaningful_undo():
             "user", first_session["id"], rating=const.FEEDBACK_TOO_COLD, phase=None,
             recommendation_used=True, unusual_day=False, voluntary=True,
         )
-        learned_general = manager.get_model("user").general_offset_c
+        learned_general = manager.get_model("user").winter_bias_c
 
         noop = recommendation()
         noop.jacket_now = const.JACKET_NONE
@@ -872,7 +880,7 @@ def test_v030_phase_all_noop_does_not_replace_previous_meaningful_undo():
             "user", noop_session["id"], rating=const.FEEDBACK_TOO_WARM, phase=const.PHASE_ALL,
             recommendation_used=True, unusual_day=False, voluntary=True,
         )
-        assert manager.get_model("user").general_offset_c == learned_general
+        assert manager.get_model("user").winter_bias_c == learned_general
         noop_stored = manager._find_session("user", noop_session["id"])
         assert noop_stored.get("learning_before") is None
         old_stored = manager._find_session("user", first_session["id"])
@@ -890,7 +898,7 @@ def test_v030_undo_keeps_learning_paused_after_meaningful_feedback():
             recommendation(),
             weather_context={"temperature_c": 15.0},
             learning_contexts={
-                "start": {"jacket": const.JACKET_LIGHT, "effective_c": 15.0},
+                "start": {"jacket": const.JACKET_LIGHT, "effective_c": 15.0, "observed_at": "2026-01-15T12:00:00+00:00"},
                 "later": {"jacket": const.JACKET_LIGHT, "effective_c": 15.0},
             },
         )
@@ -898,14 +906,14 @@ def test_v030_undo_keeps_learning_paused_after_meaningful_feedback():
             "user", session["id"], rating=const.FEEDBACK_TOO_COLD, phase=None,
             recommendation_used=True, unusual_day=False, voluntary=True,
         )
-        assert manager.get_model("user").general_offset_c > 0.0
+        assert manager.get_model("user").winter_bias_c > 0.0
 
         await manager.async_set_learning("user", False)
         assert manager.get_model("user").learning_enabled is False
 
         assert await manager.async_undo_last_feedback("user") is True
         undone = manager.get_model("user")
-        assert undone.general_offset_c == 0.0
+        assert undone.winter_bias_c == 0.0
         assert undone.learning_enabled is False
 
     asyncio.run(run())
@@ -920,7 +928,7 @@ def test_v030_undo_keeps_later_noop_feedback_and_all_opportunities_counted():
             recommendation(),
             weather_context={"temperature_c": 15.0},
             learning_contexts={
-                "start": {"jacket": const.JACKET_LIGHT, "effective_c": 15.0},
+                "start": {"jacket": const.JACKET_LIGHT, "effective_c": 15.0, "observed_at": "2026-01-15T12:00:00+00:00"},
                 "later": {"jacket": const.JACKET_LIGHT, "effective_c": 15.0},
             },
         )
@@ -931,7 +939,7 @@ def test_v030_undo_keeps_later_noop_feedback_and_all_opportunities_counted():
         after_first = manager.get_model("user")
         assert after_first.total_feedback == 1
         assert after_first.feedback_opportunities == 1
-        assert after_first.general_offset_c > 0.0
+        assert after_first.winter_bias_c > 0.0
 
         noop = recommendation()
         noop.jacket_now = const.JACKET_NONE
@@ -952,11 +960,11 @@ def test_v030_undo_keeps_later_noop_feedback_and_all_opportunities_counted():
         before_undo = manager.get_model("user")
         assert before_undo.total_feedback == 2
         assert before_undo.feedback_opportunities == 2
-        assert before_undo.general_offset_c > 0.0
+        assert before_undo.winter_bias_c > 0.0
 
         assert await manager.async_undo_last_feedback("user") is True
         undone = manager.get_model("user")
-        assert undone.general_offset_c == 0.0
+        assert undone.winter_bias_c == 0.0
         assert undone.total_feedback == 1
         assert undone.feedback_opportunities == 2
 
@@ -975,8 +983,8 @@ def test_v030_undo_keeps_opportunity_from_later_unrated_session():
             recommendation(),
             weather_context={"temperature_c": 15.0},
             learning_contexts={
-                "start": {"jacket": const.JACKET_LIGHT, "effective_c": 15.0},
-                "later": {"jacket": const.JACKET_LIGHT, "effective_c": 15.0},
+                "start": {"jacket": const.JACKET_LIGHT, "effective_c": 15.0, "observed_at": "2026-01-15T12:00:00+00:00"},
+                "later": {"jacket": const.JACKET_LIGHT, "effective_c": 15.0, "observed_at": "2026-01-15T12:00:00+00:00"},
             },
         )
         await manager.async_feedback(
@@ -1004,7 +1012,7 @@ def test_v030_undo_keeps_opportunity_from_later_unrated_session():
         undone = manager.get_model("user")
         assert undone.feedback_opportunities == 2
         assert undone.total_feedback == 0
-        assert undone.general_offset_c == 0.0
+        assert undone.winter_bias_c == 0.0
 
     asyncio.run(run())
 
@@ -1233,29 +1241,31 @@ def test_v030_profile_re_setup_discards_sessions_from_previous_model():
     asyncio.run(run())
 
 
-def test_v030_cleanup_migrates_legacy_full_undo_snapshot_before_undo():
+def test_v031_cleanup_migrates_legacy_full_undo_snapshot_before_undo():
     async def run():
         manager = make_manager()
 
+        # Simulate a v0.3 store in which only autumn has genuine season evidence.
+        # The other small biases are artefacts of the old recentering model and
+        # must not become fake experience in v0.3.1.
         legacy_before = learning.PersonalModel.from_answers(3, 3, 3, 3)
-        legacy_before.seasonal_model_version = 1
-        legacy_before.general_offset_c = 0.6
-        legacy_before.winter_bias_c = 0.4
-        legacy_before.spring_bias_c = 0.1
-        legacy_before.summer_bias_c = -0.2
-        legacy_before.autumn_bias_c = 0.1
-        expected_effective = {
-            name: legacy_before.general_offset_c + getattr(legacy_before, f"{name}_bias_c")
-            for name in ("winter", "spring", "summer", "autumn")
-        }
+        legacy_before.seasonal_model_version = 3
+        legacy_before.general_offset_c = 0.3
+        legacy_before.winter_bias_c = -0.1
+        legacy_before.spring_bias_c = -0.1
+        legacy_before.summer_bias_c = -0.1
+        legacy_before.autumn_bias_c = 0.3
+        legacy_before.autumn_season_stat.add(0.5, weight=4.0)
+        expected_autumn_effective = legacy_before.general_offset_c + legacy_before.autumn_bias_c
 
         legacy_after = learning.PersonalModel.from_answers(3, 3, 3, 3)
-        legacy_after.seasonal_model_version = 1
-        legacy_after.general_offset_c = 0.9
-        legacy_after.winter_bias_c = 0.6
-        legacy_after.spring_bias_c = 0.2
-        legacy_after.summer_bias_c = -0.1
-        legacy_after.autumn_bias_c = 0.2
+        legacy_after.seasonal_model_version = 3
+        legacy_after.general_offset_c = 0.3
+        legacy_after.winter_bias_c = -0.2
+        legacy_after.spring_bias_c = -0.2
+        legacy_after.summer_bias_c = -0.2
+        legacy_after.autumn_bias_c = 0.6
+        legacy_after.autumn_season_stat.add(0.5, weight=5.0)
         legacy_after.total_feedback = 1
         legacy_after.feedback_opportunities = 1
 
@@ -1269,7 +1279,7 @@ def test_v030_cleanup_migrates_legacy_full_undo_snapshot_before_undo():
                         "rating": const.FEEDBACK_TOO_COLD,
                         "undone": False,
                     },
-                    # v0.2.x stored the complete PersonalModel here.
+                    # Older releases stored the complete PersonalModel here.
                     "learning_before": legacy_before.to_dict(),
                 }
             ],
@@ -1278,35 +1288,98 @@ def test_v030_cleanup_migrates_legacy_full_undo_snapshot_before_undo():
         manager._cleanup_all()
 
         migrated_model = manager.get_model("user")
-        assert migrated_model.seasonal_model_version == 3
-        assert abs(sum(
-            getattr(migrated_model, f"{name}_bias_c")
-            for name in ("winter", "spring", "summer", "autumn")
-        )) < 1e-12
+        assert migrated_model.seasonal_model_version == 4
+        assert migrated_model.autumn_season_stat.weight_sum == 5.0
+        assert migrated_model.autumn_season_initialized is True
+        for name in ("winter", "spring", "summer"):
+            assert getattr(migrated_model, f"{name}_season_stat").weight_sum == 0.0
+            assert getattr(migrated_model, f"{name}_bias_c") == 0.0
+            assert getattr(migrated_model, f"{name}_season_initialized") is False
 
         stored = manager._find_session("user", "legacy-feedback")
         compact = stored["learning_before"]
         assert set(compact) == set(profiles._FEEDBACK_UNDO_FIELDS)
         assert "seasonal_model_version" not in compact
         assert "setup_complete" not in compact
-        assert abs(sum(
-            compact[f"{name}_bias_c"]
-            for name in ("winter", "spring", "summer", "autumn")
-        )) < 1e-12
-        for name, expected in expected_effective.items():
-            assert abs(compact["general_offset_c"] + compact[f"{name}_bias_c"] - expected) < 1e-12
+        for name in ("winter", "spring", "summer"):
+            assert compact[f"{name}_bias_c"] == 0.0
+            assert compact[f"{name}_season_initialized"] is False
+        assert compact["autumn_season_initialized"] is True
+        assert abs(compact["general_offset_c"] + compact["autumn_bias_c"] - expected_autumn_effective) < 1e-12
 
         assert await manager.async_undo_last_feedback("user") is True
         restored = manager.get_model("user")
-        assert restored.seasonal_model_version == 3
+        assert restored.seasonal_model_version == 4
         assert restored.total_feedback == 0
         assert restored.feedback_opportunities == 1
-        assert abs(sum(
-            getattr(restored, f"{name}_bias_c")
-            for name in ("winter", "spring", "summer", "autumn")
-        )) < 1e-12
-        for name, expected in expected_effective.items():
-            actual = restored.general_offset_c + getattr(restored, f"{name}_bias_c")
-            assert abs(actual - expected) < 1e-12
+        for name in ("winter", "spring", "summer"):
+            assert getattr(restored, f"{name}_bias_c") == 0.0
+            assert getattr(restored, f"{name}_season_stat").weight_sum == 0.0
+            assert getattr(restored, f"{name}_season_initialized") is False
+        assert restored.autumn_season_stat.weight_sum == 4.0
+        assert abs(restored.general_offset_c + restored.autumn_bias_c - expected_autumn_effective) < 1e-12
+
+    asyncio.run(run())
+
+
+def test_v031_late_seed_is_persisted_before_feedback_undo_snapshot():
+    async def run():
+        manager = make_manager()
+        january = datetime(2027, 1, 10, 12, tzinfo=timezone.utc)
+        original_now = profiles.dt_util.now
+        profiles.dt_util.now = lambda: january
+        try:
+            model = learning.PersonalModel.from_answers(3, 3, 3, 3)
+            model.autumn_season_initialized = True
+            model.autumn_bias_c = 1.0
+            model.autumn_season_stat = learning.RunningStat(samples=8, weight_sum=8.0)
+            manager._profiles["user"]["model"] = model.to_dict()
+
+            rec = recommendation()
+            session = await manager.async_open_session(
+                "user",
+                rec,
+                weather_context={"temperature_c": 15.0, "wind_kmh": 5.0},
+                learning_contexts={
+                    "start": {
+                        "jacket": const.JACKET_LIGHT,
+                        "wind_kmh": 5.0,
+                        "transition_penalty_c": 0.0,
+                        "observed_at": january.isoformat(),
+                    },
+                    "later": {
+                        "jacket": const.JACKET_LIGHT,
+                        "wind_kmh": 5.0,
+                        "transition_penalty_c": 0.0,
+                        "observed_at": january.isoformat(),
+                    },
+                },
+            )
+
+            seeded = manager.get_model("user")
+            assert seeded.winter_season_initialized is True
+            assert seeded.winter_seeded_from == "autumn"
+            assert seeded.winter_bias_c == 1.0
+            assert seeded.winter_season_stat.weight_sum == 0.0
+
+            await manager.async_feedback(
+                "user",
+                session["id"],
+                rating=const.FEEDBACK_TOO_COLD,
+                phase=None,
+                recommendation_used=True,
+                unusual_day=False,
+                voluntary=True,
+            )
+            assert manager.get_model("user").winter_bias_c > 1.0
+
+            assert await manager.async_undo_last_feedback("user") is True
+            restored = manager.get_model("user")
+            assert restored.winter_season_initialized is True
+            assert restored.winter_seeded_from == "autumn"
+            assert restored.winter_bias_c == 1.0
+            assert restored.winter_season_stat.weight_sum == 0.0
+        finally:
+            profiles.dt_util.now = original_now
 
     asyncio.run(run())

@@ -1,5 +1,23 @@
 # Changelog
 
+## v0.3.1
+
+- First-Season-Seeding gehärtet: Wird eine komplette 30-Tage-Übergangszone nicht benutzt, übernimmt die noch nie initialisierte aktuelle Saison beim ersten späteren Zugriff einmalig den Offset ihrer **direkten** bereits bekannten Vorgängersaison. Evidenz und RunningStats bleiben dabei exakt leer; der Seed liegt bereits vor Empfehlung, Feedback-Snapshot und Undo vor.
+- Mehrere vollständig übersprungene Saisons sind jetzt bewusst definiert: Ist die direkte Vorgängersaison unbekannt, wird **keine** rückwirkende Seed-Kette erfunden. Die aktuell erreichte Saison startet neutral und lernt ab dort selbst.
+- Der alte undokumentierte Lovelace-`profile_id`-Shortcut wurde aus der Karte entfernt. Profilwahl erfolgt ausschließlich über den serverseitig authentifizierten Eigenprofil-/Shared-/Admin-Pfad.
+- README dokumentiert die aktuelle HACS-Installation ausdrücklich als Custom Repository und beschreibt Shared-Rechte präzise für nicht-administrative Shared-Konten.
+- CI-Härtung: Runtime-Smoke zusätzlich gegen die deklarierte Mindestversion Home Assistant 2026.6.0 (`pytest-homeassistant-custom-component==0.13.336`) und gegen den jeweils neuesten verfügbaren HA-Teststack; der reproduzierbare aktuelle Job ist auf `0.13.364` aktualisiert.
+- Saisonmodell auf Version 4 umgestellt: Winter, Frühling, Sommer und Herbst sind echte eigenständige Offsets zum ganzjährigen `general_offset_c`; normales saisonales Feedback verschiebt Main nicht mehr direkt und rezentriert keine unbeteiligten Jahreszeiten.
+- Saisonlernen verwendet die jeweils eigene reale Saison-Evidenz für die Lernrate. Hohe Evidenz verfeinert die Schritte, friert das Modell aber nie vollständig ein; Saisonoffsets besitzen jetzt einen Bereich von **-4,0 bis +4,0 °C**.
+- Die bestehende 30-Tage-Smoothstep-Überblendung bleibt erhalten. Feedback in Übergängen trainiert ausschließlich die beiden Nachbarsaisons, verteilt reale Evidenz mit Summe 1,0 und normalisiert den Parameter-Schritt so, dass ein 50/50-Übergang den effektiven Lernschritt nicht halbiert.
+- Neue Jahreszeiten werden beim allerersten Übergang einmalig mit dem Offset der Vorgängersaison initialisiert; wurde die komplette Übergangszone verpasst, wird genau dieses Seeding beim ersten späteren Zugriff nachgeholt. Statistik, Evidenz, Confidence und Historie werden nicht kopiert; einmal initialisierte Saisons werden in späteren Jahren nie erneut überschrieben.
+- Neuer Vier-Saison-Konsens: Erst ab mindestens 3,0 realem Evidenzgewicht in allen vier Jahreszeiten und nur bei identischem Vorzeichen wird ein gemeinsamer Sockel bis auf ±0,2 °C Rest verlustfrei aus allen Saisonoffsets in Main verschoben. Der Transfer ist vollständig reversibel und erhält `main + saison` exakt.
+- Migration von v0.3.0 auf Saisonmodell v4 unterscheidet echte Saisonerfahrung anhand der jeweiligen `RunningStat.weight_sum` von alten Rezentrierungsartefakten. Untrainierte künstliche Saisonwerte werden neutralisiert; tatsächlich trainierte saisonale Wirkung bleibt erhalten. Legacy-Undo-Snapshots werden über dieselbe aktuelle Migration normalisiert.
+- Profildiagnostik zeigt pro Jahreszeit den echten `real_weight`, die aktuelle Konsensberechtigung/-richtung und Saisons am ±4-°C-Limit.
+- Transient-, Boundary-/Timing-, No-op-, Undo-, Forecast-, Arbeits- und Shared-Tablet-Verhalten bleiben unverändert; neue Regressionstests decken Saison-Isolation, Übergangsnormalisierung, Seeding, Konsens/Umkehrbarkeit, Sättigung und Migration ab.
+- Lokaler HA-unabhängiger Prüfstand: **230 / 230 Python-Tests**. Der separate HA-Runtime-Smoke-Test bleibt CI-abhängig, wenn das Home-Assistant-Testframework lokal nicht installiert ist.
+- Versionsstand projektweit auf **0.3.1** aktualisiert; historische Changelog-Versionen bleiben unverändert.
+
 ## v0.3.0
 
 - Lernmodell trennt das schnelle persönliche Grundprofil sauber von saisonalen Abweichungen. Ein Feedback erhält nur noch ein gemeinsames Korrekturbudget; Saisonlernen verstärkt denselben Fehler nicht zusätzlich.
