@@ -58,6 +58,7 @@ const JB_I18N = {
     phaseAll: "Über längere Zeit",
     cancel: "Abbrechen",
     submitted: "Danke – Bewertung übernommen.",
+    learningPausedFeedback: "Lernen ist pausiert. Feedback wird erst nach dem Fortsetzen wieder übernommen.",
     work: "Arbeit",
     gusts: "Böen",
     nowOnly: "nur jetzt",
@@ -99,7 +100,7 @@ const JB_I18N = {
     maintenanceTitle: "Lernprofil verwalten",
     learningPause: "Lernen pausieren",
     learningResume: "Lernen fortsetzen",
-    undoFeedback: "Letzte Bewertung zurücknehmen",
+    undoFeedback: "Letzte Lernänderung zurücknehmen",
     resetLearning: "Lernprofil zurücksetzen",
     maintenanceDone: "Lernprofil aktualisiert.",
     learnedProfileTitle: "Was hat dieses Profil gelernt?",
@@ -163,6 +164,7 @@ const JB_I18N = {
     phaseAll: "For a longer period",
     cancel: "Cancel",
     submitted: "Thanks – rating saved.",
+    learningPausedFeedback: "Learning is paused. Feedback will be accepted again after learning is resumed.",
     work: "Work",
     gusts: "Gusts",
     nowOnly: "now only",
@@ -204,7 +206,7 @@ const JB_I18N = {
     maintenanceTitle: "Manage learning profile",
     learningPause: "Pause learning",
     learningResume: "Resume learning",
-    undoFeedback: "Undo last rating",
+    undoFeedback: "Undo last learning change",
     resetLearning: "Reset learning profile",
     maintenanceDone: "Learning profile updated.",
     learnedProfileTitle: "What has this profile learned?",
@@ -223,11 +225,28 @@ function jbEscape(value) {
 
 class JackenBeraterCard extends HTMLElement {
   setConfig(config) {
+    // Invalidate every in-flight async result from the previous config/profile.
+    // A stale response must never overwrite the newly configured card.
+    this._requestGeneration = (this._requestGeneration || 0) + 1;
+    this._actionGeneration = (this._actionGeneration || 0) + 1;
+    this._viewRequestGeneration = (this._viewRequestGeneration || 0) + 1;
+    if (!(this._mutationFlights instanceof Map)) this._mutationFlights = new Map();
+    // Home Assistant may call setConfig() repeatedly on the same card instance.
+    // Never lose live timer handles: clear config-owned timers before resetting
+    // fields, then restart the lightweight revision poll if the card is already
+    // connected.
+    const restartRevisionTimer = Boolean(this.isConnected);
+    if (this._revisionTimer) clearInterval(this._revisionTimer);
+    if (this._stateRefreshTimer) clearTimeout(this._stateRefreshTimer);
+    this._revisionTimer = null;
+    this._stateRefreshTimer = null;
     this._config = { ...config };
     this._open = false;
     this._preview = null;
     this._session = null;
     this._loading = false;
+    this._loadingGeneration = null;
+    this._refreshPending = false;
     this._setup = { cold: 3, warm: 3, wind: 3, evening: 3 };
     // Profile selection is runtime-owned. Normal users always use their own
     // profile; configured shared accounts explicitly select a profile in-card.
@@ -247,30 +266,107 @@ class JackenBeraterCard extends HTMLElement {
     this._lastRefreshAttemptAt = 0;
     this._refreshFailures = 0;
     this._stateRefreshTimer = null;
+    this._revisionTimer = null;
+    this._profileRevision = null;
+    this._seenProfileRevision = null;
+    this._revisionCheckingGeneration = null;
     this._render();
+    if (restartRevisionTimer && !this._revisionTimer) {
+      this._revisionTimer = setInterval(() => this._checkProfileRevision(), 30 * 1000);
+    }
+    // setConfig() clears preview/profile metadata, so a connected/initialized
+    // card must actively load the new configuration instead of waiting for an
+    // unrelated state change or the five-minute fallback timer.
+    if (this._hass) void this._refresh();
   }
 
   set hass(hass) {
-    const first = !this._hass;
+    const previous = this._hass;
+    const first = !previous;
     this._hass = hass;
     if (first) {
       this._refresh();
-    } else {
+    } else if (this._relevantStateChanged(previous, hass)) {
       this._scheduleStateRefresh();
     }
+  }
+
+  _relevantStateChanged(previous, current) {
+    const watched = Array.isArray(this._watchedEntities) ? this._watchedEntities : [];
+    if (!watched.length) return false;
+    return watched.some(entityId => previous?.states?.[entityId] !== current?.states?.[entityId]);
   }
 
   connectedCallback() {
     if (!this._timer) {
       this._timer = setInterval(() => this._refresh(), 5 * 60 * 1000);
     }
+    if (!this._revisionTimer) {
+      // Learning/profile changes do not necessarily touch a watched HA entity.
+      // Poll only a tiny revision token so another already-open device notices
+      // feedback/pause/undo/reset promptly without doing a full preview refresh
+      // every minute.
+      this._revisionTimer = setInterval(() => this._checkProfileRevision(), 30 * 1000);
+    }
   }
 
   disconnectedCallback() {
     if (this._timer) clearInterval(this._timer);
+    if (this._revisionTimer) clearInterval(this._revisionTimer);
     if (this._stateRefreshTimer) clearTimeout(this._stateRefreshTimer);
     this._timer = null;
+    this._revisionTimer = null;
     this._stateRefreshTimer = null;
+    this._revisionCheckingGeneration = null;
+    this._refreshPending = false;
+  }
+
+  async _checkProfileRevision() {
+    if (!this._hass) return;
+    const generation = this._requestGeneration || 0;
+    if (this._revisionCheckingGeneration === generation) return;
+    const requestedProfile = this._selectedProfile;
+    const requestedEntry = this._config?.entry_id || null;
+    const stillCurrent = () => (
+      generation === (this._requestGeneration || 0) &&
+      requestedProfile === this._selectedProfile &&
+      requestedEntry === (this._config?.entry_id || null)
+    );
+    this._revisionCheckingGeneration = generation;
+    try {
+      const result = await this._send("jackenberater/profile_revision");
+      if (!stillCurrent()) return;
+      const revision = result?.revision == null ? null : String(result.revision);
+      if (!revision) return;
+      this._seenProfileRevision = revision;
+      if (this._profileRevision === null) {
+        // No successfully applied full profile state exists yet. Merely seeing
+        // a token is not the same as applying its profile/preview payload.
+        this._scheduleStateRefresh();
+        return;
+      }
+      if (revision !== this._profileRevision) {
+        // Do not mark the revision as applied yet. If the subsequent full
+        // refresh fails, the next 30-second poll must still see the mismatch
+        // and retry instead of waiting for the five-minute fallback.
+        this._scheduleStateRefresh();
+      }
+    } catch (err) {
+      // A stale poll must not alter the new config/profile; otherwise this is
+      // best effort only and the normal five-minute refresh remains fallback.
+      if (!stillCurrent()) return;
+      const raw = err?.message || String(err);
+      if (raw.includes("shared_profile_access_denied") || raw.includes("profile_not_found")) {
+        // A selected shared profile may have been deleted or access revoked.
+        // profiles is deliberately recovery-capable, so force a metadata/full
+        // refresh instead of waiting for the five-minute fallback.
+        this._scheduleStateRefresh();
+      }
+    } finally {
+      if (this._revisionCheckingGeneration === generation) {
+        this._revisionCheckingGeneration = null;
+      }
+    }
   }
 
   _retryIntervalMs() {
@@ -279,7 +375,11 @@ class JackenBeraterCard extends HTMLElement {
   }
 
   _scheduleStateRefresh() {
-    if (!this._hass || this._loading) return;
+    if (!this._hass) return;
+    if (this._loading) {
+      this._refreshPending = true;
+      return;
+    }
     const interval = this._retryIntervalMs();
     const elapsed = Date.now() - (this._lastRefreshAttemptAt || 0);
     if (elapsed >= interval) {
@@ -326,6 +426,7 @@ class JackenBeraterCard extends HTMLElement {
     if (raw.includes("work_weather_unavailable")) return this._t("workWeatherUnavailable");
     if (raw.includes("weather_unavailable")) return this._t("noData");
     if (raw.includes("simulation_active")) return this._t("simulationWarning");
+    if (raw.includes("learning_paused")) return this._t("learningPausedFeedback");
     return raw;
   }
 
@@ -385,22 +486,121 @@ class JackenBeraterCard extends HTMLElement {
     });
   }
 
+  _captureAsyncContext() {
+    return {
+      generation: this._requestGeneration || 0,
+      profile: this._selectedProfile,
+      entry: this._config?.entry_id || null,
+    };
+  }
+
+  _asyncContextIsCurrent(context) {
+    return Boolean(
+      context &&
+      context.generation === (this._requestGeneration || 0) &&
+      context.profile === this._selectedProfile &&
+      context.entry === (this._config?.entry_id || null)
+    );
+  }
+
+  _captureActionContext() {
+    this._actionGeneration = (this._actionGeneration || 0) + 1;
+    return {
+      ...this._captureAsyncContext(),
+      action: this._actionGeneration,
+    };
+  }
+
+  _actionContextIsCurrent(context) {
+    return Boolean(
+      this._asyncContextIsCurrent(context) &&
+      context.action === (this._actionGeneration || 0)
+    );
+  }
+
+  _beginMutationFlight(key) {
+    if (!(this._mutationFlights instanceof Map)) this._mutationFlights = new Map();
+    if (this._mutationFlights.has(key)) return null;
+    const token = Symbol(key);
+    this._mutationFlights.set(key, token);
+    this._render();
+    return { key, token };
+  }
+
+  _endMutationFlight(flight) {
+    if (!flight || !(this._mutationFlights instanceof Map)) return;
+    if (this._mutationFlights.get(flight.key) === flight.token) {
+      this._mutationFlights.delete(flight.key);
+      this._render();
+    }
+  }
+
+  _mutationFlightActive(key) {
+    return this._mutationFlights instanceof Map && this._mutationFlights.has(key);
+  }
+
+  _beginViewRequest() {
+    // One monotonically ordered stream for every async operation that may
+    // replace the visible recommendation/session context. A later-started
+    // refresh supersedes an older open_session response and vice versa.
+    this._viewRequestGeneration = (this._viewRequestGeneration || 0) + 1;
+    return this._viewRequestGeneration;
+  }
+
+  _viewRequestIsCurrent(generation) {
+    return generation === (this._viewRequestGeneration || 0);
+  }
+
+  _notePartialSnapshotRevision(value) {
+    if (value == null) return false;
+    const revision = String(value);
+    this._seenProfileRevision = revision;
+    // Action responses (open_session/manual feedback) refresh recommendation and
+    // session state, but they do not replace the complete profiles+preview
+    // snapshot (profile metadata, diagnostics, shared directory). Never mark a
+    // newer action revision as fully applied until a full refresh succeeds.
+    return this._profileRevision === null || revision !== this._profileRevision;
+  }
+
   async _refresh() {
-    if (!this._hass || this._loading) return;
+    if (!this._hass) return;
+    const generation = this._requestGeneration || 0;
+    if (this._loading && this._loadingGeneration === generation) {
+      this._refreshPending = true;
+      return;
+    }
+    const viewRequestGeneration = this._beginViewRequest();
     if (this._stateRefreshTimer) {
       clearTimeout(this._stateRefreshTimer);
       this._stateRefreshTimer = null;
     }
     this._loading = true;
+    this._loadingGeneration = generation;
     this._lastRefreshAttemptAt = Date.now();
+    let refreshedRevision = null;
+    let profilesDirectoryRevision = null;
+    const stillCurrent = () => (
+      generation === (this._requestGeneration || 0) &&
+      this._viewRequestIsCurrent(viewRequestGeneration)
+    );
     try {
       const wasShared = this._autoShared;
       const profiles = await this._send("jackenberater/profiles");
+      if (!stillCurrent()) return;
+
       this._profiles = profiles?.profiles || [];
       this._entryId = profiles?.entry_id || this._entryId;
       this._currentUserId = profiles?.current_user_id || this._currentUserId;
       this._isAdmin = Boolean(profiles?.is_admin);
       this._autoShared = Boolean(profiles?.shared_account);
+      if (profiles?.profile_revision != null) {
+        refreshedRevision = String(profiles.profile_revision);
+        this._seenProfileRevision = refreshedRevision;
+      }
+      if (profiles?.directory_revision != null) {
+        profilesDirectoryRevision = String(profiles.directory_revision);
+      }
+      this._watchedEntities = Array.isArray(profiles?.watched_entities) ? profiles.watched_entities : [];
       this._profileMetaLoaded = true;
 
       if (this._sharedMode()) {
@@ -410,23 +610,65 @@ class JackenBeraterCard extends HTMLElement {
         try { window.localStorage?.removeItem(this._profileStorageKey()); } catch (_err) {}
       }
 
+      if (!stillCurrent()) return;
       if (this._sharedMode() && !this._selectedProfile) {
         this._preview = null;
         this._error = "";
         this._lastRefreshAt = Date.now();
         this._refreshFailures = 0;
+        if (refreshedRevision !== null) this._profileRevision = refreshedRevision;
         return;
       }
-      this._preview = await this._send("jackenberater/preview");
+
+      // Bind the preview request to the exact profile/config generation that
+      // started it. A profile switch while awaiting the backend invalidates the
+      // generation, so an old user's recommendation is discarded, never rendered
+      // under the newly selected user.
+      const requestedProfile = this._selectedProfile;
+      const preview = await this._send("jackenberater/preview");
+      if (!stillCurrent() || requestedProfile !== this._selectedProfile) return;
+      if (
+        this._sharedMode() &&
+        profilesDirectoryRevision !== null &&
+        preview?.directory_revision != null &&
+        String(preview.directory_revision) !== profilesDirectoryRevision
+      ) {
+        // The selectable profile directory changed between the list and advice
+        // request. Never mark a stale list as current via a newer preview token.
+        this._refreshPending = true;
+        this._lastRefreshAttemptAt = 0;
+        return;
+      }
+
+      this._preview = preview;
       this._error = "";
       this._lastRefreshAt = Date.now();
       this._refreshFailures = 0;
+      // Advice may initialize/seed the active season and thereby bump the
+      // selected profile revision after the earlier profiles response. Prefer
+      // the post-advice token so the next 30-second poll does not trigger a
+      // redundant second full refresh.
+      if (preview?.profile_revision != null) {
+        refreshedRevision = String(preview.profile_revision);
+        this._seenProfileRevision = refreshedRevision;
+      }
+      if (refreshedRevision !== null) this._profileRevision = refreshedRevision;
     } catch (err) {
+      if (!stillCurrent()) return;
       this._refreshFailures = Math.min(8, (this._refreshFailures || 0) + 1);
       this._error = this._errorText(err);
     } finally {
-      this._loading = false;
-      this._render();
+      // A stale coroutine must not clear the loading state or render over a
+      // newer config/profile refresh that has already taken ownership.
+      if (this._loadingGeneration === generation) {
+        this._loading = false;
+        this._loadingGeneration = null;
+        this._render();
+        if (this._refreshPending) {
+          this._refreshPending = false;
+          this._scheduleStateRefresh();
+        }
+      }
     }
   }
 
@@ -476,25 +718,47 @@ class JackenBeraterCard extends HTMLElement {
     this._notice = "";
     this._manualFeedbackVisible = false;
     this._open = true;
+    const context = this._captureActionContext();
+    const viewRequestGeneration = this._beginViewRequest();
+    const viewIsCurrent = () => (
+      this._actionContextIsCurrent(context) &&
+      this._viewRequestIsCurrent(viewRequestGeneration)
+    );
+    let fullSnapshotRefreshNeeded = false;
     try {
       const response = await this._send("jackenberater/open_session");
+      if (!viewIsCurrent()) return;
       this._session = this._autoShared && !this._isAdmin ? null : (response?.session || null);
-      if (response?.recommendation) this._preview.recommendation = response.recommendation;
-      if (response?.feedback) this._preview.feedback = response.feedback;
+      if (response?.recommendation && this._preview) this._preview.recommendation = response.recommendation;
+      if (response?.feedback && this._preview) this._preview.feedback = response.feedback;
+      if (response?.profile && this._preview) this._preview.profile = response.profile;
+      fullSnapshotRefreshNeeded = this._notePartialSnapshotRevision(response?.profile_revision);
       this._error = "";
     } catch (err) {
+      if (!viewIsCurrent()) return;
       this._error = this._errorText(err);
     }
-    this._render();
+    if (viewIsCurrent()) {
+      this._render();
+      if (fullSnapshotRefreshNeeded) {
+        // Apply profile metadata/diagnostics/directory for the seen revision; do
+        // not wait for the normal five-minute fallback.
+        this._lastRefreshAttemptAt = 0;
+        this._scheduleStateRefresh();
+      }
+    }
   }
 
   async _saveSetup() {
+    const context = this._captureActionContext();
     try {
       await this._send("jackenberater/profile_setup", this._setup);
+      if (!this._actionContextIsCurrent(context)) return;
       this._error = "";
       this._open = false;
       await this._refresh();
     } catch (err) {
+      if (!this._actionContextIsCurrent(context)) return;
       this._error = this._errorText(err);
       this._render();
     }
@@ -507,11 +771,18 @@ class JackenBeraterCard extends HTMLElement {
 
   async _feedback(session, rating, voluntary = false, phase = null, unusualDay = false) {
     const rec = session?.recommendation || {};
+    const futureChangePending = Boolean(
+      voluntary && rec?.later_at && rec.jacket_now !== rec.jacket_later && Date.now() < new Date(rec.later_at).getTime()
+    );
+    if (futureChangePending) phase = "start";
     if (!phase && ["too_cold", "too_warm"].includes(rating) && rec.jacket_now !== rec.jacket_later) {
       this._phasePending = { session, rating, voluntary, unusualDay };
       this._render();
       return;
     }
+    const flight = this._beginMutationFlight(`feedback:${session?.id || "unknown"}`);
+    if (!flight) return;
+    const context = this._captureActionContext();
     try {
       await this._send("jackenberater/feedback", {
         session_id: session.id,
@@ -521,6 +792,7 @@ class JackenBeraterCard extends HTMLElement {
         unusual_day: unusualDay,
         voluntary,
       });
+      if (!this._actionContextIsCurrent(context)) return;
       this._phasePending = null;
       this._error = "";
       this._notice = this._t("submitted");
@@ -532,8 +804,11 @@ class JackenBeraterCard extends HTMLElement {
       this._manualFeedbackVisible = false;
       await this._refresh();
     } catch (err) {
+      if (!this._actionContextIsCurrent(context)) return;
       this._error = this._errorText(err);
       this._render();
+    } finally {
+      this._endMutationFlight(flight);
     }
   }
 
@@ -541,8 +816,16 @@ class JackenBeraterCard extends HTMLElement {
     // Manual feedback means “rate what I am seeing now”. Always refresh the
     // recommendation session first so a detail panel left open for hours cannot
     // train on stale weather/context from when it was originally opened.
+    const context = this._captureActionContext();
+    const viewRequestGeneration = this._beginViewRequest();
+    const viewIsCurrent = () => (
+      this._actionContextIsCurrent(context) &&
+      this._viewRequestIsCurrent(viewRequestGeneration)
+    );
+    let fullSnapshotRefreshNeeded = false;
     try {
       const response = await this._send("jackenberater/open_session");
+      if (!viewIsCurrent()) return;
       this._session = response?.session || null;
       if (response?.recommendation && this._preview) {
         this._preview.recommendation = response.recommendation;
@@ -550,13 +833,24 @@ class JackenBeraterCard extends HTMLElement {
       if (response?.feedback && this._preview) {
         this._preview.feedback = response.feedback;
       }
-      this._manualFeedbackVisible = Boolean(this._session);
+      if (response?.profile && this._preview) {
+        this._preview.profile = response.profile;
+      }
+      fullSnapshotRefreshNeeded = this._notePartialSnapshotRevision(response?.profile_revision);
+      this._manualFeedbackVisible = Boolean(this._session && !this._session.feedback);
       this._error = "";
     } catch (err) {
+      if (!viewIsCurrent()) return;
       this._manualFeedbackVisible = false;
       this._error = this._errorText(err);
     }
-    this._render();
+    if (viewIsCurrent()) {
+      this._render();
+      if (fullSnapshotRefreshNeeded) {
+        this._lastRefreshAttemptAt = 0;
+        this._scheduleStateRefresh();
+      }
+    }
   }
 
   _jacketLabel(value) {
@@ -643,13 +937,21 @@ class JackenBeraterCard extends HTMLElement {
           const later = Date.parse(rec.later_at);
           const start = Date.parse(rec.work_start || "");
           const end = Date.parse(rec.work_end || "");
-          const duringWork = Number.isFinite(later) && Number.isFinite(start) && Number.isFinite(end)
-            && later >= start && later <= end;
+          const duringWork = rec.later_work_period === "actual" || (
+            rec.later_work_period !== "buffer"
+            && Number.isFinite(later) && Number.isFinite(start) && Number.isFinite(end)
+            && later >= start && later <= end
+          );
           return duringWork
             ? `${prefix} Für deine Arbeitszeit wird ab etwa ${when} ${jacket} sinnvoll. Wenn du vorher nicht mehr nach Hause kommst: ${jacket} ${this._t("takeLater")}.`
             : `${prefix} Rund um deine Arbeit wird ab etwa ${when} ${jacket} sinnvoll. Wenn du bis dahin unterwegs bist: ${jacket} ${this._t("takeLater")}.`;
         }
         return `${prefix} Wenn du dann noch unterwegs bist: ${jacket} ${this._t("takeLater")}; ab etwa ${when} wird sie sinnvoll.`;
+      }
+      if (rec.later_change_confirmed === false) {
+        return rec.jacket_later === "none"
+          ? `Der letzte Forecastwert um ${when} deutet darauf hin, dass du dann wahrscheinlich keine Jacke mehr brauchst.`
+          : `Der letzte Forecastwert um ${when} deutet darauf hin, dass ${this._jacketArticle(rec.jacket_later)} reichen könnte.`;
       }
       return rec.jacket_later === "none"
         ? `Ab etwa ${when} brauchst du voraussichtlich keine Jacke mehr.`
@@ -662,13 +964,21 @@ class JackenBeraterCard extends HTMLElement {
         const later = Date.parse(rec.later_at);
         const start = Date.parse(rec.work_start || "");
         const end = Date.parse(rec.work_end || "");
-        const duringWork = Number.isFinite(later) && Number.isFinite(start) && Number.isFinite(end)
-          && later >= start && later <= end;
+        const duringWork = rec.later_work_period === "actual" || (
+          rec.later_work_period !== "buffer"
+          && Number.isFinite(later) && Number.isFinite(start) && Number.isFinite(end)
+          && later >= start && later <= end
+        );
         return duringWork
           ? `${prefix} For your work period, ${jacket} becomes useful from about ${when}. If you will not be home again beforehand, ${jacket}: ${this._t("takeLater")}.`
           : `${prefix} Around your work period, ${jacket} becomes useful from about ${when}. If you will still be out then, ${jacket}: ${this._t("takeLater")}.`;
       }
       return `${prefix} If you will still be out then, ${jacket}: ${this._t("takeLater")}; it becomes useful from about ${when}.`;
+    }
+    if (rec.later_change_confirmed === false) {
+      return rec.jacket_later === "none"
+        ? `The final forecast point around ${when} suggests you may no longer need a jacket then.`
+        : `The final forecast point around ${when} suggests ${this._jacketArticle(rec.jacket_later)} may be enough then.`;
     }
     return rec.jacket_later === "none"
       ? `From about ${when}, you probably won't need a jacket anymore.`
@@ -778,29 +1088,38 @@ class JackenBeraterCard extends HTMLElement {
         ${canImport ? `<button data-action="profile-import"><ha-icon icon="mdi:tray-arrow-up"></ha-icon>${this._t("importProfile")}</button><input type="file" accept="application/json,.json" data-profile-import hidden>` : ""}
       </div></div>` : ""}
       ${canManage ? `<div class="jb-info-backup"><div class="jb-section-title">${this._t("maintenanceTitle")}</div><div class="jb-info-actions">
-        <button data-maintenance="${profile.learning_enabled === false ? "learning_on" : "learning_off"}">${this._t(profile.learning_enabled === false ? "learningResume" : "learningPause")}</button>
-        <button data-maintenance="undo">${this._t("undoFeedback")}</button>
-        <button data-maintenance="reset">${this._t("resetLearning")}</button>
+        <button data-maintenance="${profile.learning_enabled === false ? "learning_on" : "learning_off"}" ${this._mutationFlightActive("maintenance") ? "disabled" : ""}>${this._t(profile.learning_enabled === false ? "learningResume" : "learningPause")}</button>
+        <button data-maintenance="undo" ${this._mutationFlightActive("maintenance") ? "disabled" : ""}>${this._t("undoFeedback")}</button>
+        <button data-maintenance="reset" ${this._mutationFlightActive("maintenance") ? "disabled" : ""}>${this._t("resetLearning")}</button>
       </div></div>` : ""}
     </div>`;
   }
 
   async _maintainProfile(action) {
+    if (action === "reset" && !window.confirm(this._t("resetLearning"))) return;
+    const flight = this._beginMutationFlight("maintenance");
+    if (!flight) return;
+    const context = this._captureActionContext();
     try {
-      if (action === "reset" && !window.confirm(this._t("resetLearning"))) return;
       await this._send("jackenberater/profile_maintenance", { action });
+      if (!this._actionContextIsCurrent(context)) return;
       this._notice = this._t("maintenanceDone");
       this._error = "";
       await this._refresh();
     } catch (err) {
+      if (!this._actionContextIsCurrent(context)) return;
       this._error = this._errorText(err);
       this._render();
+    } finally {
+      this._endMutationFlight(flight);
     }
   }
 
   async _exportProfile() {
+    const context = this._captureActionContext();
     try {
       const payload = await this._send("jackenberater/profile_export");
+      if (!this._actionContextIsCurrent(context)) return;
       const json = JSON.stringify(payload, null, 2);
       const blob = new Blob([json], { type: "application/json" });
       const url = URL.createObjectURL(blob);
@@ -815,6 +1134,7 @@ class JackenBeraterCard extends HTMLElement {
       this._notice = this._t("profileExported");
       this._error = "";
     } catch (err) {
+      if (!this._actionContextIsCurrent(context)) return;
       this._error = this._errorText(err);
     }
     this._render();
@@ -822,15 +1142,19 @@ class JackenBeraterCard extends HTMLElement {
 
   async _importProfileFile(file) {
     if (!file) return;
+    const context = this._captureActionContext();
     try {
       const payload = JSON.parse(await file.text());
+      if (!this._actionContextIsCurrent(context)) return;
       await this._send("jackenberater/profile_import", { payload });
+      if (!this._actionContextIsCurrent(context)) return;
       this._session = null;
       this._manualFeedbackVisible = false;
       this._notice = this._t("profileImported");
       this._error = "";
       await this._refresh();
     } catch (err) {
+      if (!this._actionContextIsCurrent(context)) return;
       this._error = `${this._t("profileImportError")} ${this._errorText(err)}`;
       this._render();
     }
@@ -928,7 +1252,7 @@ class JackenBeraterCard extends HTMLElement {
     const manualCandidate = [this._session, latest].find(session =>
       session && !session.feedback && !pendingIds.has(session.id)
     );
-    const manualHtml = manualCandidate
+    const manualHtml = profile.learning_enabled !== false && manualCandidate
       ? `<div class="jb-divider"></div><div class="jb-section-title">${this._t("manualFeedback")}</div>${
           this._manualFeedbackVisible
             ? this._feedbackCard(manualCandidate, false, true)
@@ -967,10 +1291,10 @@ class JackenBeraterCard extends HTMLElement {
       <div class="jb-feedback-rec">${jbEscape(this._feedbackRecommendationText(rec))}<span>${weather.temperature_c ?? rec.current_temperature_c ?? "–"} °C${weather.wind_kmh != null ? ` · ${weather.wind_kmh} km/h` : ""}</span></div>
       <label class="jb-unusual"><input type="checkbox" data-unusual> ${this._t("unusualDay")}</label>
       <div class="jb-feedback-buttons">
-        <button data-feedback="too_cold" data-voluntary="${voluntary}">🥶 ${this._t("tooCold")}</button>
-        <button data-feedback="perfect" data-voluntary="${voluntary}">✓ ${this._t("perfect")}</button>
-        <button data-feedback="too_warm" data-voluntary="${voluntary}">🥵 ${this._t("tooWarm")}</button>
-        <button data-feedback="not_used" data-voluntary="${voluntary}">${this._t("notUsed")}</button>
+        <button data-feedback="too_cold" data-voluntary="${voluntary}" ${this._mutationFlightActive(`feedback:${session.id}`) ? "disabled" : ""}>🥶 ${this._t("tooCold")}</button>
+        <button data-feedback="perfect" data-voluntary="${voluntary}" ${this._mutationFlightActive(`feedback:${session.id}`) ? "disabled" : ""}>✓ ${this._t("perfect")}</button>
+        <button data-feedback="too_warm" data-voluntary="${voluntary}" ${this._mutationFlightActive(`feedback:${session.id}`) ? "disabled" : ""}>🥵 ${this._t("tooWarm")}</button>
+        <button data-feedback="not_used" data-voluntary="${voluntary}" ${this._mutationFlightActive(`feedback:${session.id}`) ? "disabled" : ""}>${this._t("notUsed")}</button>
       </div>
     </div>`;
   }
@@ -1054,7 +1378,12 @@ class JackenBeraterCard extends HTMLElement {
     this.querySelector("#jb-save-setup")?.addEventListener("click", () => this._saveSetup());
     this.querySelectorAll("[data-scale]").forEach(el => el.addEventListener("click", () => this._setScale(el.dataset.scale, el.dataset.value)));
     this.querySelector("#jb-profile")?.addEventListener("change", async ev => {
+      this._requestGeneration = (this._requestGeneration || 0) + 1;
+      this._loading = false;
+      this._loadingGeneration = null;
       this._selectedProfile = ev.target.value || null;
+      this._profileRevision = null;
+      this._seenProfileRevision = null;
       this._persistSharedProfile();
       this._setup = { cold: 3, warm: 3, wind: 3, evening: 3 };
       this._open = false;
@@ -1119,12 +1448,18 @@ class JackenBeraterCardEditor extends HTMLElement {
   }
 }
 
-customElements.define("jackenberater-card", JackenBeraterCard);
-customElements.define("jackenberater-card-editor", JackenBeraterCardEditor);
+if (!customElements.get("jackenberater-card")) {
+  customElements.define("jackenberater-card", JackenBeraterCard);
+}
+if (!customElements.get("jackenberater-card-editor")) {
+  customElements.define("jackenberater-card-editor", JackenBeraterCardEditor);
+}
 window.customCards = window.customCards || [];
-window.customCards.push({
-  type: "jackenberater-card",
-  name: "JackenBerater",
-  description: "Persönlich lernende Jacken- und Regenschutzempfehlung.",
-  preview: true,
-});
+if (!window.customCards.some(card => card?.type === "jackenberater-card")) {
+  window.customCards.push({
+    type: "jackenberater-card",
+    name: "JackenBerater",
+    description: "Persönlich lernende Jacken- und Regenschutzempfehlung.",
+    preview: true,
+  });
+}

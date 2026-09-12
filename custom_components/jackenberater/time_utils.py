@@ -53,3 +53,9 @@ def is_between(value: datetime, start: datetime, end: datetime) -> bool:
     """Return whether an instant lies inside an inclusive interval."""
     key = instant_key(value)
     return instant_key(start) <= key <= instant_key(end)
+
+
+def is_between_half_open(value: datetime, start: datetime, end: datetime) -> bool:
+    """Return whether an instant is in ``[start, end)`` by real UTC instant."""
+    key = instant_key(value)
+    return instant_key(start) <= key < instant_key(end)

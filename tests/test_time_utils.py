@@ -31,3 +31,12 @@ def test_ambiguous_fold_is_ordered_by_real_utc_instant():
     assert time_utils.elapsed(first, second) == timedelta(minutes=45)
     assert time_utils.instant_key(first) != time_utils.instant_key(second)
     assert time_utils.as_utc(first).tzinfo == timezone.utc
+
+
+
+def test_half_open_interval_excludes_exact_end():
+    start = datetime(2026, 9, 1, 13, 0, tzinfo=timezone.utc)
+    end = datetime(2026, 9, 1, 15, 0, tzinfo=timezone.utc)
+    assert time_utils.is_between_half_open(start, start, end)
+    assert time_utils.is_between_half_open(end - timedelta(microseconds=1), start, end)
+    assert not time_utils.is_between_half_open(end, start, end)

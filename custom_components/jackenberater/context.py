@@ -139,8 +139,10 @@ async def work_windows(
     surviving = _subtract_blocked_windows(raw_actual, vacation_windows)
     surviving = _clip_window_ends(surviving, end)
     planning = _buffer_windows(surviving)
-    # Actual work must only describe a real current/future work period; the
-    # just-ended shift remains available only through the planning buffer.
+    # Preserve the true bounds of a just-ended shift while its +30 minute
+    # planning buffer is still relevant. ``active_window`` checks the real bounds
+    # separately, so retaining them here never pretends the user is still at work;
+    # it merely lets downstream text distinguish actual work from the buffer.
     actual = _current_or_future_windows(surviving, now, end)
     # A partial absence must also remain a gap in the expanded planning range.
     planning = _subtract_blocked_windows(planning, vacation_windows)
@@ -237,7 +239,10 @@ def _parse_calendar_time(value: Any, tzinfo) -> datetime | None:
             except ValueError:
                 return None
         else:
-            parsed = dt_util.parse_datetime(value)
+            try:
+                parsed = dt_util.parse_datetime(value)
+            except (TypeError, ValueError):
+                return None
     else:
         return None
     if parsed is None:
@@ -408,12 +413,13 @@ def _current_or_future_windows(
     now: datetime,
     end: datetime,
 ) -> list[tuple[datetime, datetime]]:
-    """Keep current/future real work periods while preserving their true start."""
+    """Keep real work bounds while their planning relevance has not expired."""
     kept: list[tuple[datetime, datetime]] = []
     for window_start, window_end in windows:
         clipped_end = min((window_end, end), key=instant_key)
+        planning_end = real_add(clipped_end, WORK_BUFFER)
         if (
-            is_at_or_after(clipped_end, now)
+            is_at_or_after(planning_end, now)
             and is_at_or_before(window_start, end)
             and is_after(clipped_end, window_start)
         ):

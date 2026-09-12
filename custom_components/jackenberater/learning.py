@@ -259,7 +259,53 @@ class PersonalModel:
             return self.winter_stat.confidence
         return 0.0
 
-    def decision_confidence(self, jacket_now: str, jacket_later: str) -> float:
+    def _season_context_confidence(self, when: datetime | None) -> float:
+        """Confidence contributed by the season anchors active at one instant.
+
+        A freshly seeded season is a useful starting estimate, not confirmed
+        personal evidence. Keep decision confidence below the hide threshold until
+        the active season has accumulated some own feedback. During an overlap the
+        two anchors contribute proportionally to their actual season weights.
+        """
+        weights = _season_weights(when)
+        if not weights:
+            return 1.0
+        confidence = 0.0
+        for name, season_weight in weights.items():
+            evidence = _season_stat(self, name).weight_sum
+            anchor_confidence = 0.45 + 0.50 * (1.0 - math.exp(-evidence / 2.5))
+            confidence += season_weight * min(0.95, anchor_confidence)
+        return max(0.0, min(0.95, confidence))
+
+    def has_low_evidence_season_anchor(
+        self,
+        when: datetime | None,
+        *,
+        min_weight: float = 0.10,
+        min_real_evidence: float = 1.0,
+    ) -> bool:
+        """Return whether a materially active season still lacks own evidence.
+
+        A seeded season is only a starting estimate. Once it contributes at
+        least ``min_weight`` to the recommendation, keep the card reachable
+        until roughly one full equivalent real seasonal rating has confirmed
+        it. Tiny transition tails intentionally do not prevent hiding.
+        """
+        for name, weight in _season_weights(when).items():
+            if weight + 1e-12 < min_weight:
+                continue
+            if _season_stat(self, name).weight_sum + 1e-12 < min_real_evidence:
+                return True
+        return False
+
+    def decision_confidence(
+        self,
+        jacket_now: str,
+        jacket_later: str,
+        *,
+        observed_at: datetime | None = None,
+        later_at: datetime | None = None,
+    ) -> float:
         """Return conservative confidence for the recommendation being shown."""
         jacket_conf = min(
             self.jacket_confidence(jacket_now),
@@ -268,8 +314,15 @@ class PersonalModel:
         # During the first few ratings the global model is intentionally the main
         # learner. Afterwards the garment-boundary confidence also matters.
         if self.general_stat.weight_sum < 10.0:
-            return self.confidence()
-        return min(self.confidence(), jacket_conf)
+            confidence = self.confidence()
+        else:
+            confidence = min(self.confidence(), jacket_conf)
+
+        if observed_at is not None:
+            confidence = min(confidence, self._season_context_confidence(observed_at))
+        if later_at is not None:
+            confidence = min(confidence, self._season_context_confidence(later_at))
+        return confidence
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -312,6 +365,12 @@ class PersonalModel:
         model.light_threshold_delta_c = _safe_number(raw.get("light_threshold_delta_c"), 0.0, -3.0, 4.0)
         model.warm_threshold_delta_c = _safe_number(raw.get("warm_threshold_delta_c"), 0.0, -3.0, 4.0)
         model.winter_threshold_delta_c = _safe_number(raw.get("winter_threshold_delta_c"), 0.0, -3.0, 4.0)
+        # Older profiles could retain raw threshold values beyond a neighbour-
+        # imposed effective cap. Collapse that hidden excess on load without
+        # changing any effective jacket boundary or evidence. This makes the
+        # v0.3.2 "no invisible threshold learning" rule apply immediately to
+        # upgraded profiles as well as newly created ones.
+        _canonicalize_threshold_deltas(model)
 
         for name in (
             "general_stat", "wind_stat", "transition_stat", "transient_stat",
@@ -379,6 +438,86 @@ def _model_thresholds(model: PersonalModel) -> tuple[float, float, float]:
     warm = min(BASE_WARM_THRESHOLD_C + model.warm_threshold_delta_c, light - 2.5)
     winter = min(BASE_WINTER_THRESHOLD_C + model.winter_threshold_delta_c, warm - 2.5)
     return light, warm, winter
+
+
+def _canonicalize_threshold_deltas(model: PersonalModel) -> None:
+    """Remove raw threshold excess hidden behind neighbour spacing caps.
+
+    The effective three thresholds are preserved exactly; only the persisted
+    representation is normalized so future learning cannot count movement that
+    was merely a collapse of previously hidden raw state.
+    """
+    light, warm, winter = _model_thresholds(model)
+    model.light_threshold_delta_c = _clamp(
+        light - BASE_LIGHT_THRESHOLD_C, -3.0, 4.0
+    )
+    model.warm_threshold_delta_c = _clamp(
+        warm - BASE_WARM_THRESHOLD_C, -3.0, 4.0
+    )
+    model.winter_threshold_delta_c = _clamp(
+        winter - BASE_WINTER_THRESHOLD_C, -3.0, 4.0
+    )
+
+
+def _threshold_delta_bounds(
+    model: PersonalModel, attribute: str
+) -> tuple[float, float]:
+    """Return raw-delta bounds that preserve the 2.5 °C threshold spacing."""
+    light, warm, winter = _model_thresholds(model)
+    if attribute == "light_threshold_delta_c":
+        low = max(-3.0, warm + 2.5 - BASE_LIGHT_THRESHOLD_C)
+        high = 4.0
+    elif attribute == "warm_threshold_delta_c":
+        low = max(-3.0, winter + 2.5 - BASE_WARM_THRESHOLD_C)
+        high = min(4.0, light - 2.5 - BASE_WARM_THRESHOLD_C)
+    elif attribute == "winter_threshold_delta_c":
+        low = -3.0
+        high = min(4.0, warm - 2.5 - BASE_WINTER_THRESHOLD_C)
+    else:
+        return -3.0, 4.0
+    if low > high:
+        # Defensive fallback for a hand-edited/legacy model that is already
+        # inconsistent. Freeze this boundary rather than accumulating invisible
+        # learning behind a neighbour-imposed cap.
+        current = float(getattr(model, attribute))
+        return current, current
+    return low, high
+
+
+def _apply_threshold_move(
+    model: PersonalModel,
+    attribute: str,
+    stat: RunningStat,
+    *,
+    error: float,
+    weight: float,
+) -> bool:
+    """Move one stored threshold only when its effective boundary can move."""
+    previous = stat.weight_sum
+    threshold_step = _learning_step(previous) * 0.35 * weight
+    before = float(getattr(model, attribute))
+    before_effective = _model_thresholds(model)
+    index = {
+        "light_threshold_delta_c": 0,
+        "warm_threshold_delta_c": 1,
+        "winter_threshold_delta_c": 2,
+    }.get(attribute)
+    if index is None:
+        return False
+    low, high = _threshold_delta_bounds(model, attribute)
+    after = _clamp(before + error * threshold_step, low, high)
+    if abs(after - before) <= 1e-12:
+        return False
+    setattr(model, attribute, after)
+    after_effective = _model_thresholds(model)
+    if abs(after_effective[index] - before_effective[index]) <= 1e-12:
+        # The raw value changed but the boundary actually used by the engine did
+        # not. Revert and do not manufacture evidence/confidence for a masked
+        # learning step.
+        setattr(model, attribute, before)
+        return False
+    stat.add(error, weight=weight)
+    return True
 
 
 def _choice(value: int) -> int:
@@ -450,7 +589,7 @@ def _season_transition_for(when: datetime | None) -> tuple[str, str] | None:
     for year in (current.year - 1, current.year, current.year + 1):
         for month, day, previous_name, next_name in _SEASON_TRANSITIONS:
             boundary = date(year, month, day)
-            if boundary - half < current < boundary + half:
+            if boundary - half <= current < boundary + half:
                 return previous_name, next_name
     return None
 
@@ -459,8 +598,9 @@ def _season_weights(when: datetime | None) -> dict[str, float]:
     """Return one or two season-anchor weights that always sum to one.
 
     Each meteorological boundary is surrounded by one month of smooth overlap:
-    15 days before through 15 days after. Outside these windows exactly one
-    season anchor is active. No transition value is stored or learned.
+    15 calendar days before the boundary through 14 days after it (30 active
+    dates total). Outside these windows exactly one season anchor is active. No
+    transition value is stored or learned.
     """
     if not isinstance(when, datetime):
         return {}
@@ -471,9 +611,16 @@ def _season_weights(when: datetime | None) -> dict[str, float]:
             boundary = date(year, month, day)
             start = boundary - half
             end = boundary + half
-            if not (start < current < end):
+            if not (start <= current < end):
                 continue
-            progress = (current - start).days / float((end - start).days)
+            # ``date`` values are discrete. Mapping the inclusive first active
+            # day directly to 0 would technically expose only one anchor there
+            # and leave 29 genuinely mixed dates. Keep the meteorological
+            # boundary exactly 50/50 while placing the mathematical 0/1 endpoints
+            # half a day beyond the active date range; all 30 active calendar
+            # dates then contain both neighbouring anchors.
+            day_offset = (current - boundary).days
+            progress = 0.5 + day_offset / float(2 * (_SEASON_TRANSITION_HALF_DAYS + 1))
             next_weight = _smoothstep(progress)
             previous_weight = 1.0 - next_weight
             # Avoid tiny floating tails so pure-anchor logic remains exact close
@@ -906,25 +1053,21 @@ def apply_feedback(
             "winter_threshold_delta_c": model.winter_stat,
         }
         explicit_stat = explicit_targets.get(boundary_attribute or "")
-        if explicit_stat is not None:
-            threshold_stats = [explicit_stat]
-            explicit_target = (str(boundary_attribute), explicit_stat)
+        explicit_target = (str(boundary_attribute), explicit_stat) if explicit_stat is not None else None
+        if error == 0.0:
+            stats = (
+                [explicit_stat]
+                if explicit_stat is not None
+                else _threshold_stats_for_observation(model, jacket, error, effective_c)
+            )
+            for stat in stats:
+                stat.add(error, weight=weight)
         else:
-            threshold_stats = _threshold_stats_for_observation(model, jacket, error, effective_c)
-            explicit_target = None
-        previous_threshold_weights = {id(stat): stat.weight_sum for stat in threshold_stats}
-        for stat in threshold_stats:
-            stat.add(error, weight=weight)
-        if error != 0.0:
             target = explicit_target or _threshold_target(model, jacket, error)
             if target is not None:
                 attribute, stat = target
-                previous = previous_threshold_weights.get(id(stat), max(0.0, stat.weight_sum - weight))
-                threshold_step = _learning_step(previous) * 0.35 * weight
-                setattr(
-                    model,
-                    attribute,
-                    _clamp(float(getattr(model, attribute)) + error * threshold_step, -3.0, 4.0),
+                _apply_threshold_move(
+                    model, attribute, stat, error=error, weight=weight
                 )
         return _learned()
 
@@ -963,16 +1106,20 @@ def apply_feedback(
             # ``main + season`` for every anchor exactly.
             _pool_season_consensus(model)
 
-    # Boundary confidence should still grow during early learning. A perfect
-    # rating is especially valuable here because it confirms that the current
-    # jacket interval was sensible without forcing the threshold to move.
+    # During bootstrap the garment boundaries intentionally collect evidence
+    # before they start moving. Once the mature threshold learner is active, a
+    # non-perfect rating only counts as boundary evidence if the real boundary
+    # can actually move; this prevents confidence from increasing behind a
+    # neighbour-imposed 2.5 °C spacing cap.
     threshold_stats = _threshold_stats_for_observation(model, jacket, error, effective_c)
-    previous_threshold_weights = {id(stat): stat.weight_sum for stat in threshold_stats}
-    for stat in threshold_stats:
-        stat.add(error, weight=weight)
-
     if model.general_stat.weight_sum <= 10.0:
+        for stat in threshold_stats:
+            stat.add(error, weight=weight)
         return _learned()
+
+    if error == 0.0:
+        for stat in threshold_stats:
+            stat.add(error, weight=weight)
 
     # Only train the wind model when wind actually changed the thermal decision.
     # Raw gusts can be high while the engine deliberately applies no wind penalty
@@ -1002,12 +1149,8 @@ def apply_feedback(
         target = _threshold_target(model, jacket, error)
         if target is not None:
             attribute, stat = target
-            previous = previous_threshold_weights.get(id(stat), max(0.0, stat.weight_sum - weight))
-            threshold_step = _learning_step(previous) * 0.35 * weight
-            setattr(
-                model,
-                attribute,
-                _clamp(getattr(model, attribute) + error * threshold_step, -3.0, 4.0),
+            _apply_threshold_move(
+                model, attribute, stat, error=error, weight=weight
             )
 
     return _learned()

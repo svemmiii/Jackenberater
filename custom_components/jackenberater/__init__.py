@@ -11,11 +11,13 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
-from homeassistant.helpers.event import async_track_time_interval
+from homeassistant.helpers.event import async_track_state_change_event, async_track_time_interval
 
 from .api import async_register_api
 from .const import (
+    CONF_CONTEXT_CALENDAR,
     CONF_SHIFT_PATTERN,
+    CONF_VACATION_CALENDAR,
     CONF_WORK_CALENDAR,
     CONF_WORK_MODE,
     CONF_WORKDAY_END,
@@ -37,7 +39,7 @@ FRONTEND_URL = "/jackenberater/frontend"
 FRONTEND_FILE = "jackenberater-card.js"
 # Frontend cache revision. The release version already busts the resource URL;
 # keep a small independent revision for frontend-only fixes within the same release.
-FRONTEND_CACHE_REVISION = "2"
+FRONTEND_CACHE_REVISION = "13"
 LEGACY_PROFILE_ENTITY_SUFFIXES = (
     "_learning_enabled",
     "_reset_learning",
@@ -192,7 +194,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     _async_remove_orphan_profile_diagnostics(hass, entry, manager.profile_ids)
 
     async def _async_sync_user_directory(_now) -> None:
-        manager.sync_user_directory(await hass.auth.async_get_users())
+        users = await hass.auth.async_get_users()
+        # The interval listener can be removed while an already-started callback
+        # is awaiting auth. Never let that old callback mutate/schedule a save on
+        # a manager that is unloading or has already been replaced by reload.
+        runtime = getattr(entry, "runtime_data", None)
+        if (
+            not isinstance(runtime, dict)
+            or runtime.get("unloading")
+            or runtime.get("profiles") is not manager
+        ):
+            return
+        manager.sync_user_directory(users)
 
     entry.async_on_unload(
         async_track_time_interval(
@@ -214,8 +227,38 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "profiles": manager,
         "coordinator": coordinator,
         "context_cache": {},
+        "context_cache_generation": 0,
         "simulations": {},
+        "unloading": False,
     }
+
+    # Calendar windows are cached for efficiency, but an explicit calendar state
+    # change should invalidate that cache immediately. This keeps last-minute
+    # vacation/absence edits and context-calendar changes from lingering for up to
+    # the short internal TTL.
+    calendar_entities = [
+        entity_id
+        for entity_id in (
+            entry.data.get(CONF_CONTEXT_CALENDAR),
+            entry.data.get(CONF_VACATION_CALENDAR),
+        )
+        if isinstance(entity_id, str) and entity_id
+    ]
+    if calendar_entities:
+        def _invalidate_calendar_cache(_event) -> None:
+            runtime = getattr(entry, "runtime_data", None)
+            if isinstance(runtime, dict):
+                runtime["context_cache_generation"] = int(
+                    runtime.get("context_cache_generation", 0)
+                ) + 1
+                runtime.setdefault("context_cache", {}).clear()
+
+        entry.async_on_unload(
+            async_track_state_change_event(
+                hass, list(dict.fromkeys(calendar_entities)), _invalidate_calendar_cache
+            )
+        )
+
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     entry.async_on_unload(entry.add_update_listener(_async_reload))
     return True
@@ -226,10 +269,25 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # current in-memory state to disk before a reload can create a new manager.
     runtime = getattr(entry, "runtime_data", None)
     if isinstance(runtime, dict):
-        manager = runtime.get("profiles")
-        if isinstance(manager, ProfileManager):
-            await manager.async_flush()
-    return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+        runtime["unloading"] = True
+    try:
+        if isinstance(runtime, dict):
+            manager = runtime.get("profiles")
+            if isinstance(manager, ProfileManager):
+                await manager.async_flush()
+        ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    except Exception:
+        # Flush/platform unload failed, so the entry can remain loaded. Restore
+        # the runtime flag so guarded callbacks do not stay permanently disabled.
+        current = getattr(entry, "runtime_data", None)
+        if isinstance(current, dict) and current is runtime:
+            current["unloading"] = False
+        raise
+    if not ok:
+        current = getattr(entry, "runtime_data", None)
+        if isinstance(current, dict) and current is runtime:
+            current["unloading"] = False
+    return ok
 
 
 async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:

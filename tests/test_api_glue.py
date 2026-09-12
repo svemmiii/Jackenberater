@@ -94,6 +94,8 @@ weather_stub.indoor_temperature_c = lambda *args, **kwargs: 21.5
 sys.modules[weather_stub.__name__] = weather_stub
 
 api = load("api")
+REAL_CACHED_WORK_WINDOW_SETS = api._cached_work_window_sets
+REAL_CACHED_CALENDAR_HORIZON = api._cached_calendar_horizon
 
 
 def point(temp: float, *, dt: datetime = NOW):
@@ -161,6 +163,7 @@ def test_real_recommendation_survives_ws_preview_and_shared_diagnostics_stay_pri
 
     manager = types.SimpleNamespace(
         profile_ids={"person"}, get_model=lambda profile_id: model,
+        prepare_model_for_advice=lambda profile_id, when=None: model,
         get_profile_summary=lambda profile_id: {
             "id": profile_id, "name": "Person", "setup_complete": True,
             "confidence": 0.2, "total_feedback": 0,
@@ -211,6 +214,7 @@ def test_own_ws_preview_contains_personal_diagnostics():
 
     manager = types.SimpleNamespace(
         profile_ids={"person"}, get_model=lambda profile_id: model,
+        prepare_model_for_advice=lambda profile_id, when=None: model,
         async_ensure_profile=ensure,
         get_profile_summary=lambda profile_id: {
             "id": profile_id, "name": "Person", "setup_complete": True,
@@ -338,6 +342,7 @@ def test_shared_user_opens_own_profile_scoped_session_but_not_other_writes():
 
     manager = types.SimpleNamespace(
         profile_ids={"person"}, get_model=lambda profile_id: model,
+        prepare_model_for_advice=lambda profile_id, when=None: model,
         async_open_session=open_session,
         feedback_candidates=lambda profile_id, **kwargs: [],
         get_profile_summary=lambda profile_id: {
@@ -515,6 +520,58 @@ def test_simulation_blocks_sessions_and_feedback_without_changing_persistent_dat
     )
     assert len(errors) == 2
     assert persistent == before
+
+
+def test_calendar_cache_generation_prevents_inflight_work_request_from_repopulating_stale_cache():
+    runtime = {"context_cache": {}, "context_cache_generation": 0}
+
+    calls = 0
+    async def raced_windows(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            runtime["context_cache_generation"] += 1
+            runtime["context_cache"].clear()
+            return ([(NOW, NOW + timedelta(hours=1))], [], const.CALENDAR_STATUS_AVAILABLE)
+        return ([(NOW + timedelta(hours=1), NOW + timedelta(hours=2))], [], const.CALENDAR_STATUS_AVAILABLE)
+
+    original = api.work_windows
+    api.work_windows = raced_windows
+    try:
+        result = asyncio.run(api._cached_work_window_sets(types.SimpleNamespace(), types.SimpleNamespace(data={}), runtime))
+    finally:
+        api.work_windows = original
+
+    assert result[2] == const.CALENDAR_STATUS_AVAILABLE
+    assert result[0][0][0] == NOW + timedelta(hours=1)
+    assert calls == 2
+    assert "updated" in runtime["context_cache"]
+
+
+def test_calendar_cache_generation_prevents_inflight_context_request_from_repopulating_stale_cache():
+    runtime = {"context_cache": {}, "context_cache_generation": 0}
+    entry = types.SimpleNamespace(data={const.CONF_CONTEXT_CALENDAR: "calendar.context"})
+
+    calls = 0
+    async def raced_context(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            runtime["context_cache_generation"] += 1
+            runtime["context_cache"].clear()
+            return 6, const.CALENDAR_STATUS_AVAILABLE
+        return 8, const.CALENDAR_STATUS_AVAILABLE
+
+    original = api.calendar_context_horizon
+    api.calendar_context_horizon = raced_context
+    try:
+        result = asyncio.run(api._cached_calendar_horizon(types.SimpleNamespace(), entry, runtime))
+    finally:
+        api.calendar_context_horizon = original
+
+    assert result == (8, const.CALENDAR_STATUS_AVAILABLE)
+    assert calls == 2
+    assert "calendar_updated" in runtime["context_cache"]
 
 
 def test_actual_work_window_does_not_fall_back_to_home_when_work_current_is_missing():
@@ -938,3 +995,1151 @@ def test_multiple_work_windows_display_the_window_that_drives_later_advice():
 
     assert rec.work_start == second[0]
     assert rec.work_end == second[1]
+
+
+def test_work_forecast_coverage_shift_end_short_tail_and_past_window():
+    shift_end = datetime(2026, 9, 1, 14, 0, tzinfo=timezone.utc)
+    window = [(datetime(2026, 9, 1, 5, 30, tzinfo=timezone.utc), shift_end + timedelta(minutes=30))]
+    points = [
+        point(10, dt=datetime(2026, 9, 1, hour, 0, tzinfo=timezone.utc))
+        for hour in (13, 14, 15, 16)
+    ]
+    for minute in (59,):
+        origin = datetime(2026, 9, 1, 13, minute, tzinfo=timezone.utc)
+        assert api._work_forecast_coverage(origin, points, window) == "complete"
+    for minute in (0, 1, 10, 29):
+        origin = datetime(2026, 9, 1, 14, minute, tzinfo=timezone.utc)
+        assert api._work_forecast_coverage(origin, points, window) == "complete"
+    for minute in (30, 31):
+        origin = datetime(2026, 9, 1, 14, minute, tzinfo=timezone.utc)
+        assert api._work_forecast_coverage(origin, points, window) == "not_applicable"
+
+
+def test_work_forecast_coverage_all_standard_shift_end_hours():
+    for hour in (6, 14, 17, 22):
+        shift_end = datetime(2026, 9, 1, hour, 0, tzinfo=timezone.utc)
+        window = [(shift_end - timedelta(hours=8, minutes=30), shift_end + timedelta(minutes=30))]
+        points = [
+            point(10, dt=shift_end - timedelta(hours=1)),
+            point(10, dt=shift_end),
+            point(10, dt=shift_end + timedelta(hours=1)),
+        ]
+        assert api._work_forecast_coverage(shift_end, points, window) == "complete"
+        assert api._work_forecast_coverage(shift_end + timedelta(minutes=10), points, window) == "complete"
+
+
+def test_post_work_buffer_keeps_true_shift_bounds_and_marks_buffer_context():
+    home = point(20, dt=NOW + timedelta(hours=3, minutes=5))  # 15:05
+    actual = (NOW + timedelta(hours=1), NOW + timedelta(hours=3))  # 13:00-15:00
+    planning = (actual[0] - timedelta(minutes=30), actual[1] + timedelta(minutes=30))
+    later_at = NOW + timedelta(hours=3, minutes=15)  # 15:15, buffer only
+    entry = types.SimpleNamespace(data={
+        const.CONF_WEATHER: "weather.home",
+        const.CONF_WORK_WEATHER: "weather.work",
+        const.CONF_FALLBACK_INDOOR_TEMP: 21.5,
+        const.CONF_RAIN_ADVICE: True,
+    })
+    runtime = {"coordinator": types.SimpleNamespace(data={"home_forecast": [], "work_forecast": [point(8, dt=later_at)]}), "context_cache": {}}
+    model = learning.PersonalModel.from_answers(3, 3, 3, 3)
+
+    original_now = api.dt_util.now
+    original_current = api.current_weather
+    original_indoor = api.indoor_temperature_c
+    original_calendar = api._cached_calendar_horizon
+    original_work_sets = api._cached_work_window_sets
+    original_build = api.build_recommendation
+    api.dt_util.now = lambda: home.dt
+    api.current_weather = lambda hass, entity_id: home
+    api.indoor_temperature_c = lambda *args, **kwargs: 21.5
+
+    async def no_calendar(*args, **kwargs):
+        return None, const.CALENDAR_STATUS_NOT_CONFIGURED
+
+    async def work_sets(*args, **kwargs):
+        return [actual], [planning], const.CALENDAR_STATUS_NOT_CONFIGURED
+
+    def fixed_build(*args, **kwargs):
+        return models.Recommendation(
+            jacket_now=const.JACKET_NONE, jacket_later=const.JACKET_LIGHT,
+            later_at=later_at, rain_status=const.RAIN_NONE, display_mode=const.DISPLAY_FULL,
+            horizon_hours=1, effective_now_c=20.0, min_effective_c=8.0, max_effective_c=20.0,
+            confidence=0.5, reasons=["forecast_change", "work_location"],
+            current_temperature_c=20.0, current_wind_kmh=0.0, current_gust_kmh=0.0,
+            current_condition="sunny", transition_penalty_c=0.0,
+            later_context="work", work_context=True, work_jacket=const.JACKET_LIGHT,
+        )
+
+    api._cached_calendar_horizon = no_calendar
+    api._cached_work_window_sets = work_sets
+    api.build_recommendation = fixed_build
+    hass = types.SimpleNamespace(states=types.SimpleNamespace(get=lambda entity_id: None))
+    try:
+        rec = asyncio.run(api._recommendation(hass, entry, runtime, model))
+    finally:
+        api.dt_util.now = original_now
+        api.current_weather = original_current
+        api.indoor_temperature_c = original_indoor
+        api._cached_calendar_horizon = original_calendar
+        api._cached_work_window_sets = original_work_sets
+        api.build_recommendation = original_build
+
+    assert rec.work_start == actual[0]
+    assert rec.work_end == actual[1]
+    assert rec.later_work_period == "buffer"
+
+
+
+def test_exact_shift_end_is_buffer_not_actual_work():
+    home = point(18, dt=NOW)
+    work = point(6, dt=NOW)
+    actual = (NOW - timedelta(hours=2), NOW)
+    planning = (actual[0] - timedelta(minutes=30), actual[1] + timedelta(minutes=30))
+    entry = types.SimpleNamespace(data={
+        const.CONF_WEATHER: "weather.home",
+        const.CONF_WORK_WEATHER: "weather.work",
+        const.CONF_FALLBACK_INDOOR_TEMP: 21.5,
+        const.CONF_RAIN_ADVICE: True,
+    })
+    runtime = {"coordinator": types.SimpleNamespace(data={"home_forecast": [], "work_forecast": []}), "context_cache": {}}
+    model = learning.PersonalModel.from_answers(3, 3, 3, 3)
+
+    original_now = api.dt_util.now
+    original_current = api.current_weather
+    original_indoor = api.indoor_temperature_c
+    original_calendar = api._cached_calendar_horizon
+    original_work_sets = api._cached_work_window_sets
+    api.dt_util.now = lambda: NOW
+    api.current_weather = lambda hass, entity_id: work if entity_id == "weather.work" else home
+    api.indoor_temperature_c = lambda *args, **kwargs: 21.5
+
+    async def no_calendar(*args, **kwargs):
+        return None, const.CALENDAR_STATUS_NOT_CONFIGURED
+
+    async def work_sets(*args, **kwargs):
+        return [actual], [planning], const.CALENDAR_STATUS_NOT_CONFIGURED
+
+    api._cached_calendar_horizon = no_calendar
+    api._cached_work_window_sets = work_sets
+    try:
+        rec = asyncio.run(api._recommendation(types.SimpleNamespace(states=types.SimpleNamespace(get=lambda _e: None)), entry, runtime, model))
+    finally:
+        api.dt_util.now = original_now
+        api.current_weather = original_current
+        api.indoor_temperature_c = original_indoor
+        api._cached_calendar_horizon = original_calendar
+        api._cached_work_window_sets = original_work_sets
+
+    assert rec.source == "home"
+    assert rec.current_temperature_c == 18.0
+
+
+
+def test_failed_forecast_source_is_not_consumed_as_fresh_forecast_data():
+    class Coordinator:
+        last_update_success = True
+        data = {
+            "updated": NOW,
+            "home_forecast": [point(-10, dt=NOW + timedelta(hours=1))],
+            "home_forecast_success": False,
+            "work_forecast": [],
+            "work_forecast_success": True,
+            "forecast_fetch_failed": True,
+        }
+
+        async def async_refresh(self):
+            raise AssertionError("fresh failure backoff should avoid immediate refetch")
+
+    home = point(18)
+    entry = types.SimpleNamespace(data={
+        const.CONF_WEATHER: "weather.home",
+        const.CONF_FALLBACK_INDOOR_TEMP: 21.5,
+        const.CONF_RAIN_ADVICE: True,
+    })
+    runtime = {"coordinator": Coordinator(), "context_cache": {}}
+    model = learning.PersonalModel.from_answers(3, 3, 3, 3)
+
+    original_current = api.current_weather
+    original_indoor = api.indoor_temperature_c
+    original_calendar = api._cached_calendar_horizon
+    api.current_weather = lambda hass, entity_id: home
+    api.indoor_temperature_c = lambda *args, **kwargs: 21.5
+
+    async def no_calendar(*args, **kwargs):
+        return None, const.CALENDAR_STATUS_NOT_CONFIGURED
+
+    api._cached_calendar_horizon = no_calendar
+    try:
+        rec = asyncio.run(api._recommendation(types.SimpleNamespace(states=None), entry, runtime, model))
+    finally:
+        api.current_weather = original_current
+        api.indoor_temperature_c = original_indoor
+        api._cached_calendar_horizon = original_calendar
+
+    assert rec.jacket_later == rec.jacket_now
+    assert rec.forecast_coverage_complete is False
+
+
+def test_calendar_generation_second_invalidation_falls_back_conservatively():
+    runtime = {"context_cache": {}, "context_cache_generation": 0}
+
+    async def always_raced(*args, **kwargs):
+        runtime["context_cache_generation"] += 1
+        runtime["context_cache"].clear()
+        return ([(NOW, NOW + timedelta(hours=1))], [], const.CALENDAR_STATUS_AVAILABLE)
+
+    original = api.work_windows
+    api.work_windows = always_raced
+    try:
+        result = asyncio.run(
+            REAL_CACHED_WORK_WINDOW_SETS(
+                types.SimpleNamespace(), types.SimpleNamespace(data={}), runtime
+            )
+        )
+    finally:
+        api.work_windows = original
+
+    assert result == ([], [], const.CALENDAR_STATUS_UNAVAILABLE)
+    assert "updated" not in runtime["context_cache"]
+
+
+def test_learning_context_uses_exact_recommendation_observation_timestamp():
+    observed = datetime(2026, 11, 30, 23, 59, 59, tzinfo=timezone.utc)
+    rec = models.Recommendation(
+        jacket_now=const.JACKET_LIGHT,
+        jacket_later=const.JACKET_LIGHT,
+        later_at=None,
+        rain_status=const.RAIN_NONE,
+        display_mode=const.DISPLAY_FULL,
+        horizon_hours=1,
+        effective_now_c=15.0,
+        min_effective_c=15.0,
+        max_effective_c=15.0,
+        confidence=0.5,
+        reasons=[],
+        current_temperature_c=15.0,
+        current_wind_kmh=5.0,
+        current_gust_kmh=5.0,
+        current_condition="cloudy",
+        transition_penalty_c=0.0,
+        observed_at=observed,
+    )
+    contexts = api._learning_contexts(rec)
+    assert contexts["start"]["observed_at"] == observed.isoformat()
+
+
+def test_work_forecast_coverage_multiple_windows_is_order_independent_partial():
+    first = (NOW + timedelta(hours=1), NOW + timedelta(hours=3))
+    second = (NOW + timedelta(hours=5), NOW + timedelta(hours=7))
+    first_points = [
+        point(10, dt=NOW + timedelta(hours=hour)) for hour in (1, 2, 3)
+    ]
+    second_points = [
+        point(10, dt=NOW + timedelta(hours=hour)) for hour in (5, 6, 7)
+    ]
+    assert api._work_forecast_coverage(NOW, second_points, [first, second]) == "partial"
+    assert api._work_forecast_coverage(NOW, first_points, [first, second]) == "partial"
+    assert api._work_forecast_coverage(NOW, [], [first, second]) == "missing"
+    assert api._work_forecast_coverage(NOW, first_points + second_points, [first, second]) == "complete"
+
+
+def test_forecast_retry_ignores_failed_work_source_when_only_home_is_required():
+    calls = []
+
+    class Coordinator:
+        last_update_success = True
+
+        def __init__(self):
+            self.data = {
+                "updated": NOW - timedelta(minutes=2),
+                "home_forecast_success": True,
+                "work_forecast_success": False,
+                "forecast_fetch_failed": True,
+            }
+
+        async def async_refresh(self):
+            calls.append("refresh")
+            self.data["updated"] = NOW
+
+    original_now = api.dt_util.now
+    api.dt_util.now = lambda: NOW
+    try:
+        fresh = asyncio.run(
+            api._ensure_forecast_fresh(Coordinator(), required_sources={"home"})
+        )
+    finally:
+        api.dt_util.now = original_now
+
+    assert fresh is True
+    assert calls == []
+
+
+def test_forecast_retry_uses_short_backoff_when_failed_work_source_is_required():
+    calls = []
+
+    class Coordinator:
+        last_update_success = True
+
+        def __init__(self):
+            self.data = {
+                "updated": NOW - timedelta(minutes=2),
+                "home_forecast_success": True,
+                "work_forecast_success": False,
+                "forecast_fetch_failed": True,
+            }
+
+        async def async_refresh(self):
+            calls.append("refresh")
+            self.data["updated"] = NOW
+            self.data["work_forecast_success"] = True
+
+    original_now = api.dt_util.now
+    api.dt_util.now = lambda: NOW
+    try:
+        fresh = asyncio.run(
+            api._ensure_forecast_fresh(
+                Coordinator(), required_sources={"home", "work"}
+            )
+        )
+    finally:
+        api.dt_util.now = original_now
+
+    assert fresh is True
+    assert calls == ["refresh"]
+
+
+def test_websocket_user_sync_does_not_mutate_replaced_manager_after_await():
+    synced = []
+
+    class Manager:
+        def sync_user_directory(self, users):
+            synced.append(users)
+
+    manager = Manager()
+    entry = types.SimpleNamespace(
+        runtime_data={"profiles": manager, "unloading": False}
+    )
+
+    async def get_users():
+        entry.runtime_data = {"profiles": object(), "unloading": False}
+        return [types.SimpleNamespace(id="user")]
+
+    hass = types.SimpleNamespace(
+        auth=types.SimpleNamespace(async_get_users=get_users)
+    )
+    result = asyncio.run(api._sync_profile_directory(hass, entry, manager))
+
+    assert result is False
+    assert synced == []
+
+
+def test_irrelevant_failed_work_forecast_does_not_force_short_retry_for_home_advice():
+    home = point(18)
+
+    class Coordinator:
+        last_update_success = True
+
+        def __init__(self):
+            self.data = {
+                "updated": NOW - timedelta(minutes=2),
+                "home_forecast": [point(17, dt=NOW + timedelta(hours=1))],
+                "home_forecast_success": True,
+                "work_forecast": [],
+                "work_forecast_success": False,
+                "forecast_fetch_failed": True,
+            }
+
+        async def async_refresh(self):
+            raise AssertionError("irrelevant failed work source must not trigger short retry")
+
+    entry = types.SimpleNamespace(data={
+        const.CONF_WEATHER: "weather.home",
+        const.CONF_WORK_WEATHER: "weather.work",
+        const.CONF_FALLBACK_INDOOR_TEMP: 21.5,
+        const.CONF_RAIN_ADVICE: True,
+    })
+    runtime = {"coordinator": Coordinator(), "context_cache": {}}
+    model = learning.PersonalModel.from_answers(3, 3, 3, 3)
+
+    original_current = api.current_weather
+    original_indoor = api.indoor_temperature_c
+    original_calendar = api._cached_calendar_horizon
+    original_work_sets = api._cached_work_window_sets
+    original_now = api.dt_util.now
+    api.current_weather = lambda hass, entity_id: home if entity_id == "weather.home" else None
+    api.indoor_temperature_c = lambda *args, **kwargs: 21.5
+    api.dt_util.now = lambda: NOW
+
+    async def no_calendar(*args, **kwargs):
+        return None, const.CALENDAR_STATUS_NOT_CONFIGURED
+
+    async def no_work(*args, **kwargs):
+        return [], [], const.CALENDAR_STATUS_NOT_CONFIGURED
+
+    api._cached_calendar_horizon = no_calendar
+    api._cached_work_window_sets = no_work
+    try:
+        rec = asyncio.run(
+            api._recommendation(types.SimpleNamespace(states=types.SimpleNamespace(get=lambda *_: None)), entry, runtime, model)
+        )
+    finally:
+        api.current_weather = original_current
+        api.indoor_temperature_c = original_indoor
+        api._cached_calendar_horizon = original_calendar
+        api._cached_work_window_sets = original_work_sets
+        api.dt_util.now = original_now
+
+    assert rec.source == "home"
+    assert rec.work_forecast_coverage == "not_applicable"
+
+
+def test_actual_work_wins_over_previous_split_window_buffer_at_absence_end():
+    first = (NOW, NOW + timedelta(hours=4))
+    second = (NOW + timedelta(hours=4, minutes=30), NOW + timedelta(hours=8))
+    target = second[0]
+    planning = [
+        (first[0] - const.WORK_BUFFER, first[1] + const.WORK_BUFFER),
+        (second[0] - const.WORK_BUFFER, second[1] + const.WORK_BUFFER),
+    ]
+    matched, period = api._work_period_for_target(target, [first, second], planning)
+    assert matched == second
+    assert period == "actual"
+
+
+def test_calendar_context_bundle_retries_both_sources_as_one_generation():
+    runtime = {"context_cache": {}, "context_cache_generation": 10}
+    calls = {"horizon": 0, "work": 0}
+
+    async def horizon(*args, **kwargs):
+        calls["horizon"] += 1
+        if calls["horizon"] == 1:
+            return 16, const.CALENDAR_STATUS_AVAILABLE
+        return 4, const.CALENDAR_STATUS_AVAILABLE
+
+    async def work(*args, **kwargs):
+        calls["work"] += 1
+        if calls["work"] == 1:
+            runtime["context_cache_generation"] += 1
+            return (
+                [(NOW, NOW + timedelta(hours=8))],
+                [(NOW, NOW + timedelta(hours=8, minutes=30))],
+                const.CALENDAR_STATUS_AVAILABLE,
+            )
+        return (
+            [(NOW + timedelta(hours=1), NOW + timedelta(hours=2))],
+            [(NOW + timedelta(minutes=30), NOW + timedelta(hours=2, minutes=30))],
+            const.CALENDAR_STATUS_AVAILABLE,
+        )
+
+    original_horizon = api._cached_calendar_horizon
+    original_work = api._cached_work_window_sets
+    api._cached_calendar_horizon = horizon
+    api._cached_work_window_sets = work
+    try:
+        result = asyncio.run(
+            api._calendar_context_bundle(
+                types.SimpleNamespace(), types.SimpleNamespace(data={}), runtime,
+                include_work=True,
+            )
+        )
+    finally:
+        api._cached_calendar_horizon = original_horizon
+        api._cached_work_window_sets = original_work
+
+    assert result[0] == 4
+    assert result[2] == [(NOW + timedelta(hours=1), NOW + timedelta(hours=2))]
+    assert calls == {"horizon": 2, "work": 2}
+
+
+def test_revision_token_for_connection_is_profile_scoped_for_normal_user():
+    connection = types.SimpleNamespace(
+        user=types.SimpleNamespace(id="user-a", name="A", is_admin=False)
+    )
+    entry = types.SimpleNamespace(data={const.CONF_SHARED_USER_IDS: []})
+    manager = types.SimpleNamespace(
+        profile_ids={"user-a", "user-b"},
+        profile_revision_token=lambda profile_id: f"profile:{profile_id}",
+        directory_revision_token="directory:1",
+        card_revision_token=lambda profile_id, include_directory=False: (
+            f"directory+card:{profile_id}" if include_directory else f"card:{profile_id}"
+        ),
+    )
+    assert api._revision_token_for_connection(connection, entry, manager, None) == "card:user-a"
+
+
+def test_shared_revision_poll_survives_just_deleted_selected_profile():
+    connection = types.SimpleNamespace(
+        user=types.SimpleNamespace(id="tablet", name="Tablet", is_admin=False)
+    )
+    entry = types.SimpleNamespace(data={const.CONF_SHARED_USER_IDS: ["tablet"]})
+    manager = types.SimpleNamespace(
+        profile_ids={"other"},
+        directory_revision_token="directory:9",
+        revision_token="legacy:9",
+    )
+    assert (
+        api._revision_token_for_connection(connection, entry, manager, "deleted")
+        == "directory:9"
+    )
+
+
+def test_runtime_rejects_unloading_or_non_loaded_entry_state():
+    manager = object()
+    runtime = {"profiles": manager, "unloading": True}
+    entry = types.SimpleNamespace(
+        entry_id="entry",
+        data={},
+        runtime_data=runtime,
+    )
+    hass = types.SimpleNamespace(
+        config_entries=types.SimpleNamespace(async_entries=lambda domain: [entry]),
+        data={},
+    )
+    try:
+        api._runtime(hass, "entry")
+    except ValueError as err:
+        assert str(err) == "integration_reloading"
+    else:
+        raise AssertionError("unloading runtime must be rejected")
+
+    runtime["unloading"] = False
+    entry.state = types.SimpleNamespace(value="unload_in_progress")
+    try:
+        api._runtime(hass, "entry")
+    except ValueError as err:
+        assert str(err) == "integration_reloading"
+    else:
+        raise AssertionError("non-loaded config entry must be rejected")
+
+
+def test_profiles_endpoint_recovers_stale_foreign_selection_after_shared_access_revoked():
+    results = []
+    errors = []
+    manager = types.SimpleNamespace(
+        profile_ids={"tablet", "person"},
+        summaries=lambda: [
+            {"id": "tablet", "name": "Tablet", "setup_complete": True},
+            {"id": "person", "name": "Person", "setup_complete": True},
+        ],
+        get_profile_summary=lambda profile_id: {
+            "id": profile_id,
+            "name": "Tablet" if profile_id == "tablet" else "Person",
+            "setup_complete": True,
+        },
+        profile_revision_token=lambda profile_id: f"profile:{profile_id}",
+        directory_revision_token="directory:4",
+        revision_token="legacy:4",
+        sync_user_directory=lambda users: False,
+    )
+    runtime = {"profiles": manager, "unloading": False}
+    entry = types.SimpleNamespace(
+        entry_id="entry",
+        data={const.CONF_SHARED_USER_IDS: []},
+        runtime_data=runtime,
+    )
+
+    async def users():
+        return [types.SimpleNamespace(id="tablet", name="Tablet")]
+
+    hass = types.SimpleNamespace(
+        config_entries=types.SimpleNamespace(async_entries=lambda domain: [entry]),
+        data={},
+        auth=types.SimpleNamespace(async_get_users=users),
+    )
+    connection = types.SimpleNamespace(
+        user=types.SimpleNamespace(id="tablet", name="Tablet", is_admin=False),
+        send_error=lambda *args: errors.append(args),
+        send_result=lambda *args: results.append(args[1]),
+    )
+
+    asyncio.run(
+        api.ws_profiles(
+            hass,
+            connection,
+            {"id": 1, "entry_id": "entry", "profile_id": "person"},
+        )
+    )
+
+    assert errors == []
+    assert results[0]["shared_account"] is False
+    assert results[0]["shared_access"] is False
+    assert results[0]["profile_revision"] == "profile:tablet"
+    assert [item["id"] for item in results[0]["profiles"]] == ["tablet"]
+
+
+def test_open_session_drops_old_runtime_before_mutating_replaced_manager():
+    async def run():
+        results = []
+        errors = []
+        started = asyncio.Event()
+        release = asyncio.Event()
+        opened = []
+        model = learning.PersonalModel.from_answers(3, 3, 3, 3)
+
+        async def open_session(*args, **kwargs):
+            opened.append((args, kwargs))
+            return {"id": "must-not-exist"}
+
+        async def ensure_profile(profile_id, name):
+            return model
+
+        old_manager = types.SimpleNamespace(
+            profile_ids={"person"},
+            get_model=lambda profile_id: model,
+            prepare_model_for_advice=lambda profile_id, when=None: model,
+            async_ensure_profile=ensure_profile,
+            async_open_session=open_session,
+            feedback_candidates=lambda profile_id: [],
+            get_profile_summary=lambda profile_id: {
+                "id": profile_id,
+                "name": "Person",
+                "setup_complete": True,
+            },
+            profile_revision_token=lambda profile_id: "old:p:1",
+            card_revision_token=lambda profile_id, include_directory=False: "old:d1:p1",
+        )
+        old_runtime = {
+            "profiles": old_manager,
+            "simulations": {},
+            "unloading": False,
+        }
+        entry = types.SimpleNamespace(
+            entry_id="entry",
+            data={const.CONF_SHARED_USER_IDS: []},
+            runtime_data=old_runtime,
+        )
+        hass = types.SimpleNamespace(
+            config_entries=types.SimpleNamespace(async_entries=lambda domain: [entry]),
+            data={},
+        )
+        connection = types.SimpleNamespace(
+            user=types.SimpleNamespace(id="person", name="Person", is_admin=False),
+            send_error=lambda *args: errors.append(args),
+            send_result=lambda *args: results.append(args),
+        )
+
+        async def delayed_recommendation(*args, **kwargs):
+            started.set()
+            await release.wait()
+            return models.Recommendation(
+                jacket_now=const.JACKET_LIGHT,
+                jacket_later=const.JACKET_LIGHT,
+                later_at=None,
+                rain_status=const.RAIN_NONE,
+                display_mode=const.DISPLAY_FULL,
+                horizon_hours=1,
+                effective_now_c=15.0,
+                min_effective_c=15.0,
+                max_effective_c=15.0,
+                confidence=0.2,
+                reasons=[],
+                current_temperature_c=15.0,
+                current_wind_kmh=5.0,
+                current_gust_kmh=5.0,
+                current_condition="cloudy",
+                transition_penalty_c=0.0,
+            )
+
+        original = api._recommendation
+        api._recommendation = delayed_recommendation
+        try:
+            task = asyncio.create_task(
+                api.ws_open_session(
+                    hass,
+                    connection,
+                    {"id": 1, "entry_id": "entry"},
+                )
+            )
+            await started.wait()
+            old_runtime["unloading"] = True
+            entry.runtime_data = {
+                "profiles": types.SimpleNamespace(),
+                "simulations": {},
+                "unloading": False,
+            }
+            release.set()
+            await task
+        finally:
+            api._recommendation = original
+
+        assert opened == []
+        assert results == []
+        assert errors and errors[0][2] == "integration_reloading"
+
+    asyncio.run(run())
+
+
+def _snapshot_rec(marker: str) -> models.Recommendation:
+    return models.Recommendation(
+        jacket_now=const.JACKET_LIGHT,
+        jacket_later=const.JACKET_LIGHT,
+        later_at=None,
+        rain_status=const.RAIN_NONE,
+        display_mode=const.DISPLAY_FULL,
+        horizon_hours=1,
+        effective_now_c=15.0,
+        min_effective_c=15.0,
+        max_effective_c=15.0,
+        confidence=0.4,
+        reasons=[marker],
+        current_temperature_c=15.0,
+        current_wind_kmh=5.0,
+        current_gust_kmh=5.0,
+        current_condition="cloudy",
+        transition_penalty_c=0.0,
+    )
+
+
+def test_stable_advice_snapshot_retries_when_profile_changes_mid_recommendation():
+    state = {
+        "rev": 1,
+        "model": learning.PersonalModel.from_answers(3, 3, 3, 3),
+    }
+    state["model"].general_offset_c = 0.0
+    newer = learning.PersonalModel.from_answers(3, 3, 3, 3)
+    newer.general_offset_c = 2.0
+    calls = []
+
+    manager = types.SimpleNamespace(
+        profile_ids={"person"},
+        prepare_model_for_advice=lambda profile_id, when=None: state["model"],
+        profile_revision_token=lambda profile_id: f"runtime:p:{state['rev']}",
+        directory_revision_token="runtime:d:1",
+        revision_token="runtime:1",
+    )
+    runtime = {"profiles": manager, "simulations": {}, "unloading": False}
+    entry = types.SimpleNamespace(
+        entry_id="entry", data={const.CONF_SHARED_USER_IDS: []}, runtime_data=runtime
+    )
+    hass = types.SimpleNamespace()
+    connection = types.SimpleNamespace(
+        user=types.SimpleNamespace(id="person", name="Person", is_admin=False)
+    )
+
+    async def changing_recommendation(*args):
+        model = args[-1]
+        calls.append(model.general_offset_c)
+        if len(calls) == 1:
+            state["model"] = newer
+            state["rev"] = 2
+        return _snapshot_rec(f"offset:{model.general_offset_c}")
+
+    original = api._recommendation
+    api._recommendation = changing_recommendation
+    try:
+        model, rec, simulated, revision, directory = asyncio.run(
+            api._stable_advice_snapshot(
+                hass,
+                connection,
+                entry,
+                runtime,
+                manager,
+                "person",
+                allow_simulation=False,
+            )
+        )
+    finally:
+        api._recommendation = original
+
+    assert calls == [0.0, 2.0]
+    assert model.general_offset_c == 2.0
+    assert rec.reasons == ["offset:2.0"]
+    assert simulated is False
+    assert revision == "runtime:p:2"
+    assert directory == "runtime:d:1"
+
+
+def test_open_session_uses_same_stable_model_snapshot_as_returned_recommendation():
+    state = {
+        "rev": 1,
+        "model": learning.PersonalModel.from_answers(3, 3, 3, 3),
+    }
+    state["model"].general_offset_c = 0.0
+    newer = learning.PersonalModel.from_answers(3, 3, 3, 3)
+    newer.general_offset_c = 2.0
+    opened = []
+    results = []
+    errors = []
+    calls = 0
+
+    async def ensure_profile(profile_id, name):
+        return state["model"]
+
+    async def open_session(profile_id, rec, **kwargs):
+        opened.append((rec.reasons[:], kwargs["prepared_model"].general_offset_c))
+        return {"id": "session-new", "recommendation": rec.as_dict()}
+
+    manager = types.SimpleNamespace(
+        profile_ids={"person"},
+        get_model=lambda profile_id: state["model"],
+        prepare_model_for_advice=lambda profile_id, when=None: state["model"],
+        async_ensure_profile=ensure_profile,
+        async_open_session=open_session,
+        feedback_candidates=lambda profile_id: [],
+        get_profile_summary=lambda profile_id: {
+            "id": profile_id, "name": "Person", "setup_complete": True
+        },
+        profile_revision_token=lambda profile_id: f"runtime:p:{state['rev']}",
+        directory_revision_token="runtime:d:3",
+        revision_token="runtime:3",
+    )
+    runtime = {"profiles": manager, "simulations": {}, "unloading": False}
+    entry = types.SimpleNamespace(
+        entry_id="entry", data={const.CONF_SHARED_USER_IDS: []}, runtime_data=runtime
+    )
+    hass = types.SimpleNamespace(
+        config_entries=types.SimpleNamespace(async_entries=lambda domain: [entry]), data={}
+    )
+    connection = types.SimpleNamespace(
+        user=types.SimpleNamespace(id="person", name="Person", is_admin=False),
+        send_result=lambda *args: results.append(args[1]),
+        send_error=lambda *args: errors.append(args),
+    )
+
+    async def changing_recommendation(*args):
+        nonlocal calls
+        calls += 1
+        model = args[-1]
+        if calls == 1:
+            state["model"] = newer
+            state["rev"] = 2
+        return _snapshot_rec(f"offset:{model.general_offset_c}")
+
+    original = api._recommendation
+    api._recommendation = changing_recommendation
+    try:
+        asyncio.run(api.ws_open_session(hass, connection, {"id": 1, "entry_id": "entry"}))
+    finally:
+        api._recommendation = original
+
+    assert errors == []
+    assert calls == 2
+    assert opened == [(["offset:2.0"], 2.0)]
+    assert results[0]["recommendation"]["reasons"] == ["offset:2.0"]
+    assert results[0]["profile_revision"] == "runtime:p:2"
+    assert results[0]["directory_revision"] == "runtime:d:3"
+
+
+def test_open_session_profile_deleted_during_recommendation_returns_profile_not_found():
+    results = []
+    errors = []
+    profile_ids = {"person"}
+    model = learning.PersonalModel.from_answers(3, 3, 3, 3)
+
+    async def ensure_profile(profile_id, name):
+        return model
+
+    manager = types.SimpleNamespace(
+        profile_ids=profile_ids,
+        get_model=lambda profile_id: model,
+        prepare_model_for_advice=lambda profile_id, when=None: model,
+        async_ensure_profile=ensure_profile,
+        async_open_session=lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("deleted profile must never reach async_open_session")
+        ),
+        feedback_candidates=lambda profile_id: [],
+        get_profile_summary=lambda profile_id: {"id": profile_id},
+        profile_revision_token=lambda profile_id: "runtime:p:1",
+        directory_revision_token="runtime:d:1",
+        revision_token="runtime:1",
+    )
+    runtime = {"profiles": manager, "simulations": {}, "unloading": False}
+    entry = types.SimpleNamespace(
+        entry_id="entry", data={const.CONF_SHARED_USER_IDS: []}, runtime_data=runtime
+    )
+    hass = types.SimpleNamespace(
+        config_entries=types.SimpleNamespace(async_entries=lambda domain: [entry]), data={}
+    )
+    connection = types.SimpleNamespace(
+        user=types.SimpleNamespace(id="person", name="Person", is_admin=False),
+        send_result=lambda *args: results.append(args),
+        send_error=lambda *args: errors.append(args),
+    )
+
+    async def deleting_recommendation(*args):
+        profile_ids.clear()
+        return _snapshot_rec("stale")
+
+    original = api._recommendation
+    api._recommendation = deleting_recommendation
+    try:
+        asyncio.run(api.ws_open_session(hass, connection, {"id": 1, "entry_id": "entry"}))
+    finally:
+        api._recommendation = original
+
+    assert results == []
+    assert errors
+    assert errors[0][1] == "unavailable"
+    assert errors[0][2] == "profile_not_found"
+
+
+def test_stable_advice_snapshot_aborts_after_second_concurrent_profile_change():
+    state = {"rev": 1}
+    model = learning.PersonalModel.from_answers(3, 3, 3, 3)
+    manager = types.SimpleNamespace(
+        profile_ids={"person"},
+        prepare_model_for_advice=lambda profile_id, when=None: model,
+        profile_revision_token=lambda profile_id: f"runtime:p:{state['rev']}",
+        directory_revision_token="runtime:d:1",
+        revision_token="runtime:1",
+    )
+    runtime = {"profiles": manager, "simulations": {}, "unloading": False}
+    entry = types.SimpleNamespace(
+        entry_id="entry", data={const.CONF_SHARED_USER_IDS: []}, runtime_data=runtime
+    )
+    connection = types.SimpleNamespace(
+        user=types.SimpleNamespace(id="person", name="Person", is_admin=False)
+    )
+
+    async def always_changes(*args):
+        state["rev"] += 1
+        return _snapshot_rec(f"attempt:{state['rev']}")
+
+    original = api._recommendation
+    api._recommendation = always_changes
+    try:
+        try:
+            asyncio.run(
+                api._stable_advice_snapshot(
+                    types.SimpleNamespace(), connection, entry, runtime, manager,
+                    "person", allow_simulation=False,
+                )
+            )
+        except ValueError as err:
+            assert str(err) == "profile_changed_retry"
+        else:
+            raise AssertionError("two consecutive model races must abort conservatively")
+    finally:
+        api._recommendation = original
+
+    assert state["rev"] == 3
+
+
+def test_stable_advice_snapshot_rejects_simulation_activated_during_open_session_retry():
+    state = {"rev": 1}
+    model = learning.PersonalModel.from_answers(3, 3, 3, 3)
+    simulated = learning.PersonalModel.from_answers(3, 3, 3, 3)
+    runtime = {"simulations": {}, "unloading": False}
+    manager = types.SimpleNamespace(
+        profile_ids={"person"},
+        prepare_model_for_advice=lambda profile_id, when=None: model,
+        profile_revision_token=lambda profile_id: f"runtime:p:{state['rev']}",
+        directory_revision_token="runtime:d:1",
+        revision_token="runtime:1",
+    )
+    runtime["profiles"] = manager
+    entry = types.SimpleNamespace(
+        entry_id="entry", data={const.CONF_SHARED_USER_IDS: []}, runtime_data=runtime
+    )
+    connection = types.SimpleNamespace(
+        user=types.SimpleNamespace(id="person", name="Person", is_admin=False)
+    )
+    calls = 0
+
+    async def enable_simulation(*args):
+        nonlocal calls
+        calls += 1
+        runtime["simulations"]["person"] = simulated
+        state["rev"] = 2
+        return _snapshot_rec("before-simulation")
+
+    original = api._recommendation
+    api._recommendation = enable_simulation
+    try:
+        try:
+            asyncio.run(
+                api._stable_advice_snapshot(
+                    types.SimpleNamespace(), connection, entry, runtime, manager,
+                    "person", allow_simulation=False,
+                )
+            )
+        except ValueError as err:
+            assert str(err) == "simulation_active"
+        else:
+            raise AssertionError("open-session advice must abort when simulation becomes active")
+    finally:
+        api._recommendation = original
+
+    assert calls == 1
+
+
+def test_stable_advice_snapshot_returns_current_directory_marker_after_directory_race():
+    state = {"directory": 1}
+    model = learning.PersonalModel.from_answers(3, 3, 3, 3)
+    class DynamicManager:
+        profile_ids = {"admin", "person"}
+        revision_token = "runtime:1"
+
+        @property
+        def directory_revision_token(self):
+            return f"runtime:d:{state['directory']}"
+
+        def prepare_model_for_advice(self, profile_id, when=None):
+            return model
+
+        def profile_revision_token(self, profile_id):
+            return "runtime:p:1"
+
+        def card_revision_token(self, profile_id, include_directory=False):
+            return (
+                f"runtime:d{state['directory']}:p1"
+                if include_directory
+                else "runtime:p1"
+            )
+
+    manager = DynamicManager()
+    runtime = {"profiles": manager, "simulations": {}, "unloading": False}
+    entry = types.SimpleNamespace(
+        entry_id="entry", data={const.CONF_SHARED_USER_IDS: []}, runtime_data=runtime
+    )
+    connection = types.SimpleNamespace(
+        user=types.SimpleNamespace(id="admin", name="Admin", is_admin=True)
+    )
+
+    async def directory_changes(*args):
+        state["directory"] = 2
+        return _snapshot_rec("stable-profile")
+
+    original = api._recommendation
+    api._recommendation = directory_changes
+    try:
+        _model, rec, _sim, card_revision, directory_revision = asyncio.run(
+            api._stable_advice_snapshot(
+                types.SimpleNamespace(), connection, entry, runtime, manager,
+                "person", allow_simulation=False,
+            )
+        )
+    finally:
+        api._recommendation = original
+
+    assert rec.reasons == ["stable-profile"]
+    assert directory_revision == "runtime:d:2"
+    assert card_revision == "runtime:d2:p1"
+
+
+def test_open_session_does_not_create_real_session_if_simulation_activates_mid_advice():
+    state = {"rev": 1}
+    model = learning.PersonalModel.from_answers(3, 3, 3, 3)
+    simulated = learning.PersonalModel.from_answers(3, 3, 3, 3)
+    opened = []
+    results = []
+    errors = []
+
+    async def ensure_profile(profile_id, name):
+        return model
+
+    async def forbidden_open(*args, **kwargs):
+        opened.append((args, kwargs))
+        raise AssertionError("simulation-active advice must never create a real session")
+
+    manager = types.SimpleNamespace(
+        profile_ids={"person"},
+        get_model=lambda profile_id: model,
+        prepare_model_for_advice=lambda profile_id, when=None: model,
+        async_ensure_profile=ensure_profile,
+        async_open_session=forbidden_open,
+        feedback_candidates=lambda profile_id: [],
+        get_profile_summary=lambda profile_id: {"id": profile_id},
+        profile_revision_token=lambda profile_id: f"runtime:p:{state['rev']}",
+        directory_revision_token="runtime:d:1",
+        revision_token="runtime:1",
+    )
+    runtime = {"profiles": manager, "simulations": {}, "unloading": False}
+    entry = types.SimpleNamespace(
+        entry_id="entry", data={const.CONF_SHARED_USER_IDS: []}, runtime_data=runtime
+    )
+    hass = types.SimpleNamespace(
+        config_entries=types.SimpleNamespace(async_entries=lambda domain: [entry]), data={}
+    )
+    connection = types.SimpleNamespace(
+        user=types.SimpleNamespace(id="person", name="Person", is_admin=False),
+        send_result=lambda *args: results.append(args),
+        send_error=lambda *args: errors.append(args),
+    )
+    calls = 0
+
+    async def enable_simulation(*args):
+        nonlocal calls
+        calls += 1
+        runtime["simulations"]["person"] = simulated
+        state["rev"] = 2
+        return _snapshot_rec("before-simulation")
+
+    original = api._recommendation
+    api._recommendation = enable_simulation
+    try:
+        asyncio.run(api.ws_open_session(hass, connection, {"id": 1, "entry_id": "entry"}))
+    finally:
+        api._recommendation = original
+
+    assert calls == 1
+    assert opened == []
+    assert results == []
+    assert errors
+    assert errors[0][1] == "unavailable"
+    assert errors[0][2] == "simulation_active"
+
+
+def test_shared_profile_list_excludes_all_current_shared_control_accounts_and_advice_rejects_them():
+    results = []
+    errors = []
+    model = learning.PersonalModel.from_answers(3, 3, 3, 3)
+    manager = types.SimpleNamespace(
+        profile_ids={"tablet1", "tablet2", "person"},
+        summaries=lambda: [
+            {"id": "tablet1", "name": "Tablet 1", "setup_complete": True},
+            {"id": "tablet2", "name": "Tablet 2", "setup_complete": True},
+            {"id": "person", "name": "Person", "setup_complete": True},
+        ],
+        get_model=lambda profile_id: model,
+        get_profile_summary=lambda profile_id: {
+            "id": profile_id, "name": profile_id, "setup_complete": True,
+        },
+        card_revision_token=lambda profile_id, include_directory=False: f"card:{profile_id}",
+        profile_revision_token=lambda profile_id: f"profile:{profile_id}",
+        directory_revision_token="directory:1",
+        revision_token="legacy:1",
+        sync_user_directory=lambda users: False,
+    )
+    runtime = {"profiles": manager, "unloading": False}
+    entry = types.SimpleNamespace(
+        entry_id="entry",
+        data={const.CONF_SHARED_USER_IDS: ["tablet1", "tablet2"]},
+        runtime_data=runtime,
+    )
+
+    async def users():
+        return [
+            types.SimpleNamespace(id="tablet1", name="Tablet 1"),
+            types.SimpleNamespace(id="tablet2", name="Tablet 2"),
+            types.SimpleNamespace(id="person", name="Person"),
+        ]
+
+    hass = types.SimpleNamespace(
+        config_entries=types.SimpleNamespace(async_entries=lambda domain: [entry]),
+        data={},
+        auth=types.SimpleNamespace(async_get_users=users),
+    )
+    connection = types.SimpleNamespace(
+        user=types.SimpleNamespace(id="tablet1", name="Tablet 1", is_admin=False),
+        send_error=lambda *args: errors.append(args),
+        send_result=lambda *args: results.append(args[1]),
+    )
+
+    asyncio.run(api.ws_profiles(hass, connection, {"id": 1, "entry_id": "entry"}))
+    assert errors == []
+    assert [item["id"] for item in results[0]["profiles"]] == ["person"]
+
+    try:
+        asyncio.run(
+            api._profile(
+                connection,
+                manager,
+                "tablet2",
+                entry,
+                allow_shared_read=True,
+            )
+        )
+    except ValueError as err:
+        assert str(err) == "shared_profile_is_control"
+    else:
+        raise AssertionError("current shared-control accounts must never be advice targets")

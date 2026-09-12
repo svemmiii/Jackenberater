@@ -393,3 +393,18 @@ def test_ambiguous_autumn_shift_boundaries_keep_the_repeated_hour():
     )
     assert first is not None and second is not None
     assert context.elapsed(first, second) == timedelta(hours=1)
+
+
+def test_finished_shift_bounds_survive_until_planning_buffer_ends():
+    actual = [(datetime(2026, 9, 1, 13, tzinfo=timezone.utc), datetime(2026, 9, 1, 15, tzinfo=timezone.utc))]
+    horizon = datetime(2026, 9, 2, 0, tzinfo=timezone.utc)
+    assert context._current_or_future_windows(
+        actual, datetime(2026, 9, 1, 15, 15, tzinfo=timezone.utc), horizon
+    ) == actual
+    assert context._current_or_future_windows(
+        actual, datetime(2026, 9, 1, 15, 31, tzinfo=timezone.utc), horizon
+    ) == []
+
+
+def test_calendar_datetime_parser_rejects_impossible_timestamp():
+    assert context._parse_calendar_time("2026-02-30T12:00:00+00:00", timezone.utc) is None

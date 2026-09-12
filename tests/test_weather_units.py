@@ -172,7 +172,9 @@ def test_coordinator_skips_work_forecast_when_work_mode_is_disabled():
 
     async def fetch(_hass, entity_id):
         calls.append(entity_id)
-        return [types.SimpleNamespace(dt=datetime.now(timezone.utc))]
+        return weather.ForecastFetchResult(
+            [types.SimpleNamespace(dt=datetime.now(timezone.utc))], True
+        )
 
     weather._fetch_hourly = fetch
     weather.current_weather = lambda *_args, **_kwargs: None
@@ -194,3 +196,140 @@ def test_coordinator_skips_work_forecast_when_work_mode_is_disabled():
     assert calls == ["weather.home"]
     assert result["work_forecast"] == []
 
+
+
+def test_normalize_forecast_deduplicates_same_real_instant():
+    entity_id = "weather.test"
+    state = types.SimpleNamespace(attributes={
+        "temperature_unit": "°C", "wind_speed_unit": "km/h", "precipitation_unit": "mm",
+    })
+    hass = types.SimpleNamespace(
+        states=types.SimpleNamespace(get=lambda requested: state if requested == entity_id else None),
+        config=types.SimpleNamespace(units=types.SimpleNamespace(temperature_unit="°C", accumulated_precipitation_unit="mm")),
+    )
+    raw = [
+        {"datetime": "2026-09-06T12:00:00+00:00", "temperature": 10},
+        {"datetime": "2026-09-06T14:00:00+02:00", "temperature": 11},
+        {"datetime": "2026-09-06T13:00:00+00:00", "temperature": 12},
+    ]
+    normalized = weather.normalize_forecast(hass, entity_id, raw)
+    assert len(normalized) == 2
+    assert len({item.dt.astimezone(timezone.utc) for item in normalized}) == 2
+
+
+
+def test_normalize_forecast_duplicate_prefers_most_complete_then_latest_on_tie():
+    entity_id = "weather.test"
+    state = types.SimpleNamespace(attributes={
+        "temperature_unit": "°C", "wind_speed_unit": "km/h", "precipitation_unit": "mm",
+    })
+    hass = types.SimpleNamespace(
+        states=types.SimpleNamespace(get=lambda requested: state if requested == entity_id else None),
+        config=types.SimpleNamespace(units=types.SimpleNamespace(temperature_unit="°C", accumulated_precipitation_unit="mm")),
+    )
+    raw = [
+        {"datetime": "2026-09-06T18:00:00+00:00", "temperature": 12},
+        {
+            "datetime": "2026-09-06T20:00:00+02:00", "temperature": 9,
+            "humidity": 80, "wind_speed": 15, "condition": "rainy",
+        },
+        {
+            "datetime": "2026-09-06T19:00:00+00:00", "temperature": 11,
+            "humidity": 70, "wind_speed": 10, "condition": "cloudy",
+        },
+        {
+            "datetime": "2026-09-06T19:00:00+00:00", "temperature": 10,
+            "humidity": 60, "wind_speed": 12, "condition": "sunny",
+        },
+    ]
+    normalized = weather.normalize_forecast(hass, entity_id, raw)
+    assert len(normalized) == 2
+    assert normalized[0].temperature_c == 9.0  # fuller duplicate beats first partial row
+    assert normalized[1].temperature_c == 10.0  # equal completeness: latest row wins
+
+
+def test_fetch_hourly_distinguishes_provider_failure_from_successful_empty_forecast():
+    import asyncio
+
+    entity_id = "weather.test"
+    state = types.SimpleNamespace(attributes={
+        "temperature_unit": "°C",
+        "wind_speed_unit": "km/h",
+        "precipitation_unit": "mm",
+    })
+
+    class Services:
+        def __init__(self, response=None, error=None):
+            self.response = response
+            self.error = error
+
+        async def async_call(self, *args, **kwargs):
+            if self.error is not None:
+                raise self.error
+            return self.response
+
+    base = dict(
+        states=types.SimpleNamespace(get=lambda requested: state if requested == entity_id else None),
+        config=types.SimpleNamespace(
+            units=types.SimpleNamespace(
+                temperature_unit="°C", accumulated_precipitation_unit="mm"
+            )
+        ),
+    )
+    failed_hass = types.SimpleNamespace(
+        **base,
+        services=Services(error=weather.HomeAssistantError("temporary outage")),
+    )
+    failed = asyncio.run(weather._fetch_hourly(failed_hass, entity_id))
+    assert failed.success is False
+    assert failed.points == []
+
+    empty_hass = types.SimpleNamespace(
+        **base,
+        services=Services(response={entity_id: {"forecast": []}}),
+    )
+    empty = asyncio.run(weather._fetch_hourly(empty_hass, entity_id))
+    assert empty.success is True
+    assert empty.points == []
+
+
+def test_invalid_calendar_date_in_forecast_is_skipped_instead_of_raising():
+    entity_id = "weather.test"
+    state = types.SimpleNamespace(attributes={
+        "temperature_unit": "°C", "wind_speed_unit": "km/h", "precipitation_unit": "mm",
+    })
+    hass = types.SimpleNamespace(
+        states=types.SimpleNamespace(get=lambda requested: state if requested == entity_id else None),
+        config=types.SimpleNamespace(units=types.SimpleNamespace(temperature_unit="°C", accumulated_precipitation_unit="mm")),
+    )
+    raw = [
+        {"datetime": "2026-02-30T12:00:00+00:00", "temperature": 5},
+        {"datetime": "2026-03-01T12:00:00+00:00", "temperature": 6},
+    ]
+    normalized = weather.normalize_forecast(hass, entity_id, raw)
+    assert len(normalized) == 1
+    assert normalized[0].temperature_c == 6.0
+
+
+def test_nonempty_but_fully_invalid_forecast_payload_is_fetch_failure():
+    import asyncio
+
+    entity_id = "weather.test"
+    state = types.SimpleNamespace(attributes={
+        "temperature_unit": "°C", "wind_speed_unit": "km/h", "precipitation_unit": "mm",
+    })
+
+    class Services:
+        async def async_call(self, *args, **kwargs):
+            return {entity_id: {"forecast": [
+                {"datetime": "2026-02-30T12:00:00+00:00", "temperature": 5}
+            ]}}
+
+    hass = types.SimpleNamespace(
+        services=Services(),
+        states=types.SimpleNamespace(get=lambda requested: state if requested == entity_id else None),
+        config=types.SimpleNamespace(units=types.SimpleNamespace(temperature_unit="°C", accumulated_precipitation_unit="mm")),
+    )
+    result = asyncio.run(weather._fetch_hourly(hass, entity_id))
+    assert result.points == []
+    assert result.success is False

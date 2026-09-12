@@ -488,6 +488,785 @@ assert.ok(Card, "jackenberater-card must register itself");
   assert.match(warmPhase, /Schon am Anfang war mir zu warm/, "start feedback should use normal user language");
   assert.match(warmPhase, /über längere Zeit zu warm/, "long-duration feedback should use normal user language");
 
+  // A relevant HA state update that arrives while a refresh is running must
+  // be remembered and picked up immediately afterwards instead of being lost.
+  const dirtyCard = new Card();
+  dirtyCard._hass = { language: "de" };
+  dirtyCard._loading = true;
+  dirtyCard._scheduleStateRefresh();
+  assert.equal(dirtyCard._refreshPending, true, "state changes during refresh must mark a follow-up refresh pending");
+
+  const pendingCard = new Card();
+  pendingCard._hass = { language: "de" };
+  pendingCard._render = () => {};
+  let scheduledFollowups = 0;
+  pendingCard._scheduleStateRefresh = () => { scheduledFollowups += 1; };
+  pendingCard._send = async (type) => {
+    if (type === "jackenberater/profiles") {
+      pendingCard._refreshPending = true;
+      return { profiles: [], shared_account: false };
+    }
+    if (type === "jackenberater/preview") return { recommendation: { display_mode: "full" }, profile: { setup_complete: true }, feedback: [] };
+    throw new Error(`unexpected message: ${type}`);
+  };
+  await pendingCard._refresh();
+  assert.equal(scheduledFollowups, 1, "pending state refresh must re-enter through the throttle scheduler, not recurse directly");
+
+  const explicitBufferText = textCard._laterText({
+    jacket_now: "light", jacket_later: "warm",
+    later_at: "2026-09-01T14:15:00+00:00", later_context: "work",
+    work_start: "2026-09-01T12:30:00+00:00", work_end: "2026-09-01T15:30:00+00:00",
+    later_work_period: "buffer",
+  });
+  assert.match(explicitBufferText, /Rund um deine Arbeit/, "explicit backend buffer context must override timestamp inference");
+
+  const lastPointText = textCard._laterText({
+    jacket_now: "warm", jacket_later: "light",
+    later_at: "2026-09-01T18:00:00+00:00",
+    later_change_confirmed: false,
+  });
+  assert.match(lastPointText, /letzte Forecastwert/, "a single unconfirmed last forecast point must be phrased cautiously");
+  assert.doesNotMatch(lastPointText, /Ab etwa/, "single unconfirmed endpoint must not sound like a confirmed trend start");
+
+  assert.match(source, /if \(!customElements\.get\("jackenberater-card"\)\)/, "main custom element registration must be duplicate-load safe");
+  assert.match(source, /if \(!customElements\.get\("jackenberater-card-editor"\)\)/, "editor custom element registration must be duplicate-load safe");
+  assert.match(source, /!window\.customCards\.some/, "customCards metadata must not be duplicated");
+
+  // Irrelevant HA state churn must not drive the card into one backend refresh
+  // per minute. Only entities explicitly returned by the backend are watched.
+  const selectiveCard = new Card();
+  selectiveCard._watchedEntities = ["weather.home"];
+  let selectiveRefreshes = 0;
+  selectiveCard._scheduleStateRefresh = () => { selectiveRefreshes += 1; };
+  const sameWeather = { state: "sunny" };
+  selectiveCard._hass = { states: { "weather.home": sameWeather, "sensor.noisy": { state: "1" } } };
+  selectiveCard.hass = { states: { "weather.home": sameWeather, "sensor.noisy": { state: "2" } } };
+  assert.equal(selectiveRefreshes, 0, "unrelated HA state changes must not schedule a JackenBerater refresh");
+  selectiveCard.hass = { states: { "weather.home": { state: "cloudy" }, "sensor.noisy": { state: "2" } } };
+  assert.equal(selectiveRefreshes, 1, "watched weather/calendar/input changes must schedule a refresh");
+
+  // A profile change made on another device must be noticed without waiting
+  // for the five-minute full-refresh fallback. The lightweight revision token
+  // schedules a normal throttled refresh only when it actually changes.
+  const revisionCard = new Card();
+  revisionCard._hass = { language: "de" };
+  revisionCard._profileRevision = 4;
+  revisionCard._render = () => {};
+  let revisionRefreshes = 0;
+  revisionCard._scheduleStateRefresh = () => { revisionRefreshes += 1; };
+  revisionCard._send = async (type) => {
+    assert.equal(type, "jackenberater/profile_revision");
+    return { revision: 5 };
+  };
+  await revisionCard._checkProfileRevision();
+  assert.equal(revisionCard._profileRevision, 4, "revision poll must not mark unapplied profile data as current");
+  assert.equal(revisionCard._seenProfileRevision, "5", "revision poll should remember the newest server token");
+  assert.equal(revisionRefreshes, 1, "remote profile changes must schedule a card refresh promptly");
+  await revisionCard._checkProfileRevision();
+  assert.equal(revisionRefreshes, 2, "a failed/unapplied refresh must remain retryable on the next revision poll");
+
+  // Voluntary feedback before a predicted future jacket switch can only rate
+  // the current/start state; the future state has not been experienced yet.
+  const pausedFeedbackCard = new Card();
+  pausedFeedbackCard._preview = { latest_session: session };
+  pausedFeedbackCard._session = session;
+  pausedFeedbackCard._manualFeedbackVisible = false;
+  pausedFeedbackCard._t = (key) => key;
+  const pausedDetails = pausedFeedbackCard._details(
+    { reasons: [], rain_status: "none", current_temperature_c: 15, current_wind_kmh: 5, horizon_hours: 1 },
+    { confidence: 0.5, total_feedback: 0, learning_enabled: false },
+    [],
+  );
+  assert.doesNotMatch(pausedDetails, /data-action="manual-feedback"/, "paused learning must not offer voluntary feedback");
+
+  const futureFeedbackCard = new Card();
+  futureFeedbackCard._t = (key) => key;
+  futureFeedbackCard._refresh = async () => {};
+  futureFeedbackCard._render = () => {};
+  let feedbackPayload = null;
+  futureFeedbackCard._send = async (type, payload) => {
+    if (type === "jackenberater/feedback") feedbackPayload = payload;
+    return { ok: true };
+  };
+  const futureSession = {
+    id: "future123",
+    recommendation: {
+      jacket_now: "light",
+      jacket_later: "warm",
+      later_at: "2099-09-01T18:00:00+00:00",
+    },
+  };
+  await futureFeedbackCard._feedback(futureSession, "perfect", true);
+  assert.equal(feedbackPayload.phase, "start", "voluntary feedback must not confirm an unexperienced future jacket change");
+
+  // Reconfiguring a connected card must not orphan the 30-second revision
+  // interval (or a pending state-refresh timeout). After disconnect, every
+  // interval created by this card instance must be gone.
+  const originalSetInterval = context.setInterval;
+  const originalClearInterval = context.clearInterval;
+  const originalSetTimeout = context.setTimeout;
+  const originalClearTimeout = context.clearTimeout;
+  let timerSeq = 0;
+  const activeIntervals = new Set();
+  const activeTimeouts = new Set();
+  context.setInterval = () => { const id = ++timerSeq; activeIntervals.add(id); return id; };
+  context.clearInterval = (id) => { activeIntervals.delete(id); };
+  context.setTimeout = () => { const id = ++timerSeq; activeTimeouts.add(id); return id; };
+  context.clearTimeout = (id) => { activeTimeouts.delete(id); };
+  try {
+    const timerCard = new Card();
+    timerCard._render = () => {};
+    timerCard.isConnected = true;
+    timerCard.connectedCallback();
+    assert.equal(activeIntervals.size, 2, "connected card should own full-refresh and revision intervals");
+    timerCard._stateRefreshTimer = context.setTimeout(() => {}, 1000);
+    timerCard.setConfig({ type: "custom:jackenberater-card" });
+    assert.equal(activeIntervals.size, 2, "setConfig must replace, not leak, the revision interval");
+    assert.equal(activeTimeouts.size, 0, "setConfig must clear an outstanding state-refresh timeout");
+    timerCard.disconnectedCallback();
+    assert.equal(activeIntervals.size, 0, "disconnect after reconfiguration must leave no orphan intervals");
+  } finally {
+    context.setInterval = originalSetInterval;
+    context.clearInterval = originalClearInterval;
+    context.setTimeout = originalSetTimeout;
+    context.clearTimeout = originalClearTimeout;
+  }
+
+
+  // A revision token seen while no full profile state has been applied must
+  // trigger a full refresh, not become the local applied baseline by itself.
+  const emptyRevisionCard = new Card();
+  emptyRevisionCard._hass = { language: "de" };
+  emptyRevisionCard._profileRevision = null;
+  emptyRevisionCard._render = () => {};
+  let emptyRevisionRefreshes = 0;
+  emptyRevisionCard._scheduleStateRefresh = () => { emptyRevisionRefreshes += 1; };
+  emptyRevisionCard._send = async () => ({ revision: "runtime-x:7" });
+  await emptyRevisionCard._checkProfileRevision();
+  assert.equal(emptyRevisionCard._profileRevision, null, "seeing a revision without full state must not mark it applied");
+  assert.equal(emptyRevisionCard._seenProfileRevision, "runtime-x:7");
+  assert.equal(emptyRevisionRefreshes, 1, "empty card state must request a full refresh after seeing server revision");
+
+  // Profile changes invalidate in-flight async results. An old profile A result
+  // may finish after B was selected, but it must never overwrite B's preview.
+  const raceCard = new Card();
+  raceCard._hass = { language: "de" };
+  raceCard._render = () => {};
+  raceCard._autoShared = true;
+  raceCard._selectedProfile = "A";
+  raceCard._requestGeneration = 1;
+  const deferred = () => {
+    let resolve;
+    const promise = new Promise(r => { resolve = r; });
+    return { promise, resolve };
+  };
+  const previewA = deferred();
+  const previewB = deferred();
+  raceCard._send = async (type) => {
+    if (type === "jackenberater/profiles") {
+      return {
+        profiles: [{ id: "A" }, { id: "B" }], shared_account: true,
+        entry_id: "entry", profile_revision: "runtime:1", watched_entities: [],
+      };
+    }
+    if (type === "jackenberater/preview") {
+      return raceCard._selectedProfile === "A" ? previewA.promise : previewB.promise;
+    }
+    throw new Error(`unexpected ${type}`);
+  };
+  const oldRefresh = raceCard._refresh();
+  await Promise.resolve();
+  await Promise.resolve();
+  raceCard._requestGeneration += 1;
+  raceCard._loading = false;
+  raceCard._loadingGeneration = null;
+  raceCard._selectedProfile = "B";
+  const newRefresh = raceCard._refresh();
+  await Promise.resolve();
+  await Promise.resolve();
+  previewB.resolve({ recommendation: { marker: "B" }, profile: { setup_complete: true }, feedback: [] });
+  await newRefresh;
+  previewA.resolve({ recommendation: { marker: "A" }, profile: { setup_complete: true }, feedback: [] });
+  await oldRefresh;
+  assert.equal(raceCard._selectedProfile, "B");
+  assert.equal(raceCard._preview?.recommendation?.marker, "B", "stale A response must not render after switching to B");
+
+  // setConfig invalidates an in-flight request and starts a full refresh for the
+  // new config as soon as hass is available. The late old response is ignored.
+  const configRaceCard = new Card();
+  configRaceCard._hass = { language: "de" };
+  configRaceCard._render = () => {};
+  configRaceCard._config = { entry_id: "old" };
+  configRaceCard._requestGeneration = 1;
+  const oldProfiles = deferred();
+  configRaceCard._send = async (type) => {
+    if (type === "jackenberater/profiles" && configRaceCard._config?.entry_id === "old") return oldProfiles.promise;
+    if (type === "jackenberater/profiles") {
+      return { profiles: [], shared_account: false, entry_id: "new", profile_revision: "new-runtime:0", watched_entities: ["weather.new"] };
+    }
+    if (type === "jackenberater/preview") return { recommendation: { marker: "new" }, profile: { setup_complete: true }, feedback: [] };
+    throw new Error(`unexpected ${type}`);
+  };
+  const staleRefresh = configRaceCard._refresh();
+  await Promise.resolve();
+  configRaceCard.setConfig({ type: "custom:jackenberater-card", entry_id: "new" });
+  await Promise.resolve();
+  await Promise.resolve();
+  oldProfiles.resolve({ profiles: [], shared_account: false, entry_id: "old", profile_revision: "old-runtime:5", watched_entities: ["weather.old"] });
+  await staleRefresh;
+  // Let the refresh started by setConfig settle.
+  for (let i = 0; i < 5; i += 1) await Promise.resolve();
+  assert.equal(configRaceCard._entryId, "new", "stale config response must not restore old entry metadata");
+  assert.deepEqual(configRaceCard._watchedEntities, ["weather.new"]);
+  assert.equal(configRaceCard._preview?.recommendation?.marker, "new", "setConfig must load and keep the new preview");
+
+
+  // open_session responses are generation/profile bound just like preview. A
+  // late response for A must never overwrite B after a shared-profile switch.
+  const openRaceCard = new Card();
+  openRaceCard._hass = { language: "de" };
+  openRaceCard._render = () => {};
+  openRaceCard._autoShared = true;
+  openRaceCard._isAdmin = true;
+  openRaceCard._selectedProfile = "A";
+  openRaceCard._requestGeneration = 10;
+  openRaceCard._config = { entry_id: "entry" };
+  openRaceCard._preview = {
+    recommendation: { marker: "A", simulation_active: false },
+    profile: { setup_complete: true }, feedback: [],
+  };
+  const openA = deferred();
+  openRaceCard._send = async (type) => {
+    if (type === "jackenberater/open_session") return openA.promise;
+    throw new Error(`unexpected ${type}`);
+  };
+  const staleOpen = openRaceCard._openAdvice();
+  await Promise.resolve();
+  openRaceCard._requestGeneration += 1;
+  openRaceCard._selectedProfile = "B";
+  openRaceCard._open = false;
+  openRaceCard._session = null;
+  openRaceCard._preview = {
+    recommendation: { marker: "B", simulation_active: false },
+    profile: { setup_complete: true }, feedback: [],
+  };
+  openA.resolve({
+    session: { id: "sessA" }, recommendation: { marker: "A-late" },
+    feedback: [{ id: "feedbackA" }], profile_revision: "runtime:d1:p1",
+  });
+  await staleOpen;
+  assert.equal(openRaceCard._selectedProfile, "B");
+  assert.equal(openRaceCard._preview.recommendation.marker, "B", "late open_session(A) must not overwrite B");
+  assert.equal(openRaceCard._session, null, "late open_session(A) must not install A's session under B");
+
+  // The manual-feedback open_session path has the same generation guard.
+  const manualRaceCard = new Card();
+  manualRaceCard._hass = { language: "de" };
+  manualRaceCard._render = () => {};
+  manualRaceCard._selectedProfile = "A";
+  manualRaceCard._requestGeneration = 3;
+  manualRaceCard._config = { entry_id: "entry" };
+  manualRaceCard._preview = { recommendation: { marker: "A" }, feedback: [] };
+  const manualA = deferred();
+  manualRaceCard._send = async (type) => {
+    if (type === "jackenberater/open_session") return manualA.promise;
+    throw new Error(`unexpected ${type}`);
+  };
+  const staleManual = manualRaceCard._prepareManualFeedback();
+  await Promise.resolve();
+  manualRaceCard._requestGeneration += 1;
+  manualRaceCard._selectedProfile = "B";
+  manualRaceCard._preview = { recommendation: { marker: "B" }, feedback: [] };
+  manualA.resolve({ session: { id: "old-A" }, recommendation: { marker: "A-late" }, feedback: [] });
+  await staleManual;
+  assert.equal(manualRaceCard._preview.recommendation.marker, "B");
+  assert.notEqual(manualRaceCard._session?.id, "old-A", "stale manual feedback session must be discarded");
+
+  // A revision poll started for an old profile/config must be ignored after a
+  // generation change and must not schedule a redundant refresh.
+  const revisionRaceCard = new Card();
+  revisionRaceCard._hass = { language: "de" };
+  revisionRaceCard._config = { entry_id: "entry" };
+  revisionRaceCard._selectedProfile = "A";
+  revisionRaceCard._requestGeneration = 4;
+  revisionRaceCard._profileRevision = "runtime:d0:p0";
+  let staleRevisionRefreshes = 0;
+  revisionRaceCard._scheduleStateRefresh = () => { staleRevisionRefreshes += 1; };
+  const revisionA = deferred();
+  revisionRaceCard._send = async (type) => {
+    if (type === "jackenberater/profile_revision") return revisionA.promise;
+    throw new Error(`unexpected ${type}`);
+  };
+  const stalePoll = revisionRaceCard._checkProfileRevision();
+  await Promise.resolve();
+  revisionRaceCard._requestGeneration += 1;
+  revisionRaceCard._selectedProfile = "B";
+  revisionA.resolve({ revision: "runtime:d9:p9" });
+  await stalePoll;
+  assert.equal(staleRevisionRefreshes, 0, "stale revision poll must not refresh the new profile");
+  assert.notEqual(revisionRaceCard._seenProfileRevision, "runtime:d9:p9");
+
+  // Preview returns the post-advice revision. If season bootstrap changes the
+  // model during preview, that newer token must become the applied baseline.
+  const bootstrapRevisionCard = new Card();
+  bootstrapRevisionCard._hass = { language: "de" };
+  bootstrapRevisionCard._render = () => {};
+  bootstrapRevisionCard._config = { entry_id: "entry" };
+  bootstrapRevisionCard._send = async (type) => {
+    if (type === "jackenberater/profiles") {
+      return { profiles: [], shared_account: false, entry_id: "entry", profile_revision: "runtime:p:4", watched_entities: [] };
+    }
+    if (type === "jackenberater/preview") {
+      return { recommendation: { marker: "seeded" }, profile: { setup_complete: true }, feedback: [], profile_revision: "runtime:p:5" };
+    }
+    throw new Error(`unexpected ${type}`);
+  };
+  await bootstrapRevisionCard._refresh();
+  assert.equal(bootstrapRevisionCard._profileRevision, "runtime:p:5", "post-advice revision must prevent redundant bootstrap refresh");
+
+
+
+  // Async actions that were started for profile A must not mutate profile B's
+  // local UI state when they finish after a shared-profile switch.
+  const actionRaceCard = new Card();
+  actionRaceCard._hass = { language: "de" };
+  actionRaceCard._render = () => {};
+  actionRaceCard._config = { entry_id: "entry" };
+  actionRaceCard._selectedProfile = "A";
+  actionRaceCard._requestGeneration = 1;
+  actionRaceCard._preview = { recommendation: { jacket_now: "light", jacket_later: "light" } };
+  const feedbackDone = deferred();
+  actionRaceCard._send = async (type) => {
+    if (type === "jackenberater/feedback") return feedbackDone.promise;
+    throw new Error(`unexpected ${type}`);
+  };
+  const oldSession = { id: "sessA", recommendation: { jacket_now: "light", jacket_later: "light" } };
+  const staleFeedback = actionRaceCard._feedback(oldSession, "perfect", false);
+  await Promise.resolve();
+  actionRaceCard._requestGeneration += 1;
+  actionRaceCard._selectedProfile = "B";
+  actionRaceCard._session = { id: "sessB" };
+  actionRaceCard._manualFeedbackVisible = true;
+  actionRaceCard._notice = "";
+  feedbackDone.resolve({});
+  await staleFeedback;
+  assert.equal(actionRaceCard._selectedProfile, "B");
+  assert.equal(actionRaceCard._session?.id, "sessB", "late feedback(A) must not clear B's session");
+  assert.equal(actionRaceCard._manualFeedbackVisible, true, "late feedback(A) must not close B's manual panel");
+  assert.equal(actionRaceCard._notice, "", "late feedback(A) must not show A's success notice on B");
+
+  const setupRaceCard = new Card();
+  setupRaceCard._hass = { language: "de" };
+  setupRaceCard._render = () => {};
+  setupRaceCard._config = { entry_id: "entry" };
+  setupRaceCard._selectedProfile = "A";
+  setupRaceCard._requestGeneration = 2;
+  const setupDone = deferred();
+  setupRaceCard._send = async (type) => {
+    if (type === "jackenberater/profile_setup") return setupDone.promise;
+    throw new Error(`unexpected ${type}`);
+  };
+  const staleSetup = setupRaceCard._saveSetup();
+  await Promise.resolve();
+  setupRaceCard._requestGeneration += 1;
+  setupRaceCard._selectedProfile = "B";
+  setupRaceCard._open = true;
+  setupDone.resolve({});
+  await staleSetup;
+  assert.equal(setupRaceCard._open, true, "late setup(A) must not close B's detail/setup state");
+
+  const maintenanceRaceCard = new Card();
+  maintenanceRaceCard._hass = { language: "de" };
+  maintenanceRaceCard._render = () => {};
+  maintenanceRaceCard._config = { entry_id: "entry" };
+  maintenanceRaceCard._selectedProfile = "A";
+  maintenanceRaceCard._requestGeneration = 3;
+  const maintenanceDone = deferred();
+  maintenanceRaceCard._send = async (type) => {
+    if (type === "jackenberater/profile_maintenance") return maintenanceDone.promise;
+    throw new Error(`unexpected ${type}`);
+  };
+  const staleMaintenance = maintenanceRaceCard._maintainProfile("learning_off");
+  await Promise.resolve();
+  maintenanceRaceCard._requestGeneration += 1;
+  maintenanceRaceCard._selectedProfile = "B";
+  maintenanceRaceCard._notice = "B-notice";
+  maintenanceDone.resolve({});
+  await staleMaintenance;
+  assert.equal(maintenanceRaceCard._notice, "B-notice", "late maintenance(A) must not overwrite B's notice");
+
+  // The revision-poll lock belongs to the generation that acquired it. An old
+  // poll finishing after setConfig/profile change must not unlock a newer poll.
+  const pollOwnerCard = new Card();
+  pollOwnerCard._hass = { language: "de" };
+  pollOwnerCard._config = { entry_id: "entry" };
+  pollOwnerCard._selectedProfile = "A";
+  pollOwnerCard._requestGeneration = 1;
+  pollOwnerCard._profileRevision = "old:0";
+  pollOwnerCard._scheduleStateRefresh = () => {};
+  const pollOld = deferred();
+  const pollNew = deferred();
+  let pollCalls = 0;
+  pollOwnerCard._send = async (type) => {
+    assert.equal(type, "jackenberater/profile_revision");
+    pollCalls += 1;
+    return pollCalls === 1 ? pollOld.promise : pollNew.promise;
+  };
+  const oldPoll = pollOwnerCard._checkProfileRevision();
+  await Promise.resolve();
+  pollOwnerCard._requestGeneration = 2;
+  pollOwnerCard._selectedProfile = "B";
+  pollOwnerCard._revisionCheckingGeneration = null;
+  const newPoll = pollOwnerCard._checkProfileRevision();
+  await Promise.resolve();
+  assert.equal(pollOwnerCard._revisionCheckingGeneration, 2);
+  pollOld.resolve({ revision: "old:1" });
+  await oldPoll;
+  assert.equal(pollOwnerCard._revisionCheckingGeneration, 2, "old poll must not release new poll's lock");
+  pollNew.resolve({ revision: "new:1" });
+  await newPoll;
+  assert.equal(pollOwnerCard._revisionCheckingGeneration, null);
+
+  // Access revoked while a foreign profile is selected: revision polling should
+  // nudge a full metadata refresh so the recovery-capable profiles endpoint can
+  // clear the stale selection promptly.
+  const revokedSharedCard = new Card();
+  revokedSharedCard._hass = { language: "de" };
+  revokedSharedCard._config = { entry_id: "entry" };
+  revokedSharedCard._selectedProfile = "foreign";
+  revokedSharedCard._requestGeneration = 5;
+  revokedSharedCard._profileRevision = "shared:old";
+  let revokedRefreshes = 0;
+  revokedSharedCard._scheduleStateRefresh = () => { revokedRefreshes += 1; };
+  revokedSharedCard._send = async () => { throw new Error("shared_profile_access_denied"); };
+  await revokedSharedCard._checkProfileRevision();
+  assert.equal(revokedRefreshes, 1, "revoked shared access should trigger profiles recovery refresh");
+
+  // A shared profile directory that changes between profiles and preview must
+  // not be marked current by the newer preview token. The card immediately
+  // repeats the full transaction and renders only the coherent second snapshot.
+  const directoryRaceCard = new Card();
+  directoryRaceCard._hass = { language: "de" };
+  directoryRaceCard._render = () => {};
+  directoryRaceCard._config = { entry_id: "entry" };
+  directoryRaceCard._selectedProfile = "A";
+  let directoryProfilesCalls = 0;
+  let directoryPreviewCalls = 0;
+  directoryRaceCard._send = async (type) => {
+    if (type === "jackenberater/profiles") {
+      directoryProfilesCalls += 1;
+      const dir = directoryProfilesCalls === 1 ? "runtime:d:1" : "runtime:d:2";
+      return {
+        profiles: [{ id: "A" }, { id: "B" }], shared_account: true,
+        entry_id: "entry", profile_revision: `${dir}:p1`, directory_revision: dir,
+        watched_entities: [],
+      };
+    }
+    if (type === "jackenberater/preview") {
+      directoryPreviewCalls += 1;
+      const first = directoryPreviewCalls === 1;
+      return {
+        recommendation: { marker: first ? "stale-directory" : "fresh-directory" },
+        profile: { setup_complete: true }, feedback: [],
+        profile_revision: first ? "runtime:d:2:p1" : "runtime:d:2:p1",
+        directory_revision: "runtime:d:2",
+      };
+    }
+    throw new Error(`unexpected ${type}`);
+  };
+  await directoryRaceCard._refresh();
+  for (let i = 0; i < 12; i += 1) await Promise.resolve();
+  assert.equal(directoryProfilesCalls, 2, "directory mismatch should repeat profiles transaction once");
+  assert.equal(directoryPreviewCalls, 2, "directory mismatch should discard stale preview and retry");
+  assert.equal(directoryRaceCard._preview?.recommendation?.marker, "fresh-directory");
+
+  // Same-profile actions need their own generation too. A slow S1 feedback
+  // response must not close or relabel a newer manual S2 feedback surface.
+  const sameProfileActionCard = new Card();
+  sameProfileActionCard._hass = { language: "de" };
+  sameProfileActionCard._render = () => {};
+  sameProfileActionCard._config = { entry_id: "entry" };
+  sameProfileActionCard._selectedProfile = "A";
+  sameProfileActionCard._requestGeneration = 1;
+  sameProfileActionCard._preview = {
+    recommendation: { jacket_now: "light", jacket_later: "light" }, feedback: [],
+  };
+  const oldSameProfileFeedback = deferred();
+  sameProfileActionCard._send = async (type) => {
+    if (type === "jackenberater/feedback") return oldSameProfileFeedback.promise;
+    if (type === "jackenberater/open_session") {
+      return {
+        session: { id: "S2", recommendation: { jacket_now: "light", jacket_later: "light" } },
+        recommendation: { jacket_now: "light", jacket_later: "light" }, feedback: [],
+      };
+    }
+    throw new Error(`unexpected ${type}`);
+  };
+  const oldSameAction = sameProfileActionCard._feedback(
+    { id: "S1", recommendation: { jacket_now: "light", jacket_later: "light" } },
+    "perfect", false,
+  );
+  await Promise.resolve();
+  await sameProfileActionCard._prepareManualFeedback();
+  assert.equal(sameProfileActionCard._session?.id, "S2");
+  assert.equal(sameProfileActionCard._manualFeedbackVisible, true);
+  sameProfileActionCard._notice = "";
+  oldSameProfileFeedback.resolve({});
+  await oldSameAction;
+  assert.equal(sameProfileActionCard._session?.id, "S2", "old S1 response must not clear S2");
+  assert.equal(sameProfileActionCard._manualFeedbackVisible, true, "old S1 response must not close S2 UI");
+  assert.equal(sameProfileActionCard._notice, "", "old S1 response must not show stale success notice");
+
+
+  // View ordering is shared between background preview refreshes and explicit
+  // open_session/manual-feedback requests. Whichever request starts later owns
+  // the visible recommendation; an older response must never roll it back.
+  const oldOpenAfterRefreshCard = new Card();
+  oldOpenAfterRefreshCard._hass = { language: "de" };
+  oldOpenAfterRefreshCard._render = () => {};
+  oldOpenAfterRefreshCard._config = { entry_id: "entry" };
+  oldOpenAfterRefreshCard._preview = {
+    profile: { setup_complete: true },
+    recommendation: { marker: "initial", jacket_now: "light", jacket_later: "light" },
+    feedback: [],
+  };
+  const staleOpenResponse = deferred();
+  oldOpenAfterRefreshCard._send = async (type) => {
+    if (type === "jackenberater/open_session") return staleOpenResponse.promise;
+    if (type === "jackenberater/profiles") {
+      return { profiles: [], shared_account: false, entry_id: "entry", profile_revision: "r:1", watched_entities: [] };
+    }
+    if (type === "jackenberater/preview") {
+      return { profile: { setup_complete: true }, recommendation: { marker: "newer", jacket_now: "light", jacket_later: "light" }, feedback: [], profile_revision: "r:2" };
+    }
+    throw new Error(`unexpected ${type}`);
+  };
+  const oldOpenRequest = oldOpenAfterRefreshCard._openAdvice();
+  await Promise.resolve();
+  await oldOpenAfterRefreshCard._refresh();
+  assert.equal(oldOpenAfterRefreshCard._preview?.recommendation?.marker, "newer");
+  staleOpenResponse.resolve({
+    session: { id: "old-session" },
+    recommendation: { marker: "older-open", jacket_now: "light", jacket_later: "light" },
+    feedback: [], profile_revision: "r:1",
+  });
+  await oldOpenRequest;
+  assert.equal(
+    oldOpenAfterRefreshCard._preview?.recommendation?.marker,
+    "newer",
+    "older open_session response must not overwrite a later-started full refresh",
+  );
+  assert.notEqual(oldOpenAfterRefreshCard._session?.id, "old-session");
+
+  const oldRefreshAfterOpenCard = new Card();
+  oldRefreshAfterOpenCard._hass = { language: "de" };
+  oldRefreshAfterOpenCard._render = () => {};
+  oldRefreshAfterOpenCard._config = { entry_id: "entry" };
+  oldRefreshAfterOpenCard._preview = {
+    profile: { setup_complete: true },
+    recommendation: { marker: "initial", jacket_now: "light", jacket_later: "light" },
+    feedback: [],
+  };
+  const stalePreviewResponse = deferred();
+  oldRefreshAfterOpenCard._send = async (type) => {
+    if (type === "jackenberater/profiles") {
+      return { profiles: [], shared_account: false, entry_id: "entry", profile_revision: "r:1", watched_entities: [] };
+    }
+    if (type === "jackenberater/preview") return stalePreviewResponse.promise;
+    if (type === "jackenberater/open_session") {
+      return {
+        session: { id: "new-session" },
+        recommendation: { marker: "newer-open", jacket_now: "light", jacket_later: "light" },
+        feedback: [], profile_revision: "r:2",
+      };
+    }
+    throw new Error(`unexpected ${type}`);
+  };
+  const oldRefreshRequest = oldRefreshAfterOpenCard._refresh();
+  await Promise.resolve();
+  await oldRefreshAfterOpenCard._openAdvice();
+  assert.equal(oldRefreshAfterOpenCard._preview?.recommendation?.marker, "newer-open");
+  stalePreviewResponse.resolve({
+    profile: { setup_complete: true },
+    recommendation: { marker: "older-refresh", jacket_now: "light", jacket_later: "light" },
+    feedback: [], profile_revision: "r:1",
+  });
+  await oldRefreshRequest;
+  assert.equal(
+    oldRefreshAfterOpenCard._preview?.recommendation?.marker,
+    "newer-open",
+    "older background refresh must not overwrite a later-started open_session result",
+  );
+  assert.equal(oldRefreshAfterOpenCard._session?.id, "new-session");
+
+  const staleManualAfterRefreshCard = new Card();
+  staleManualAfterRefreshCard._hass = { language: "de" };
+  staleManualAfterRefreshCard._render = () => {};
+  staleManualAfterRefreshCard._config = { entry_id: "entry" };
+  staleManualAfterRefreshCard._manualFeedbackVisible = false;
+  staleManualAfterRefreshCard._preview = {
+    profile: { setup_complete: true },
+    recommendation: { marker: "initial", jacket_now: "light", jacket_later: "light" },
+    feedback: [],
+  };
+  const staleManualResponse = deferred();
+  staleManualAfterRefreshCard._send = async (type) => {
+    if (type === "jackenberater/open_session") return staleManualResponse.promise;
+    if (type === "jackenberater/profiles") {
+      return { profiles: [], shared_account: false, entry_id: "entry", profile_revision: "r:1", watched_entities: [] };
+    }
+    if (type === "jackenberater/preview") {
+      return { profile: { setup_complete: true }, recommendation: { marker: "manual-newer", jacket_now: "light", jacket_later: "light" }, feedback: [], profile_revision: "r:2" };
+    }
+    throw new Error(`unexpected ${type}`);
+  };
+  const oldManualRequest = staleManualAfterRefreshCard._prepareManualFeedback();
+  await Promise.resolve();
+  await staleManualAfterRefreshCard._refresh();
+  staleManualResponse.resolve({
+    session: { id: "stale-manual" },
+    recommendation: { marker: "manual-old", jacket_now: "light", jacket_later: "light" },
+    feedback: [], profile_revision: "r:1",
+  });
+  await oldManualRequest;
+  assert.equal(staleManualAfterRefreshCard._preview?.recommendation?.marker, "manual-newer");
+  assert.notEqual(staleManualAfterRefreshCard._session?.id, "stale-manual");
+  assert.equal(staleManualAfterRefreshCard._manualFeedbackVisible, false);
+
+  // open_session is an action snapshot, not a full profiles+preview snapshot.
+  // A newer action revision may update recommendation/session immediately, but
+  // it must not be marked as the fully applied profile/directory revision.
+  const partialRevisionCard = new Card();
+  partialRevisionCard._hass = { language: "de" };
+  partialRevisionCard._render = () => {};
+  partialRevisionCard._config = { entry_id: "entry" };
+  partialRevisionCard._profileRevision = "r:1";
+  partialRevisionCard._seenProfileRevision = "r:1";
+  partialRevisionCard._profiles = [{ id: "A", name: "A-old" }, { id: "B", name: "B-old" }];
+  partialRevisionCard._preview = {
+    profile: { setup_complete: true, total_feedback: 10, learning_progress: 0.5 },
+    recommendation: { marker: "old", jacket_now: "light", jacket_later: "light" },
+    feedback: [],
+  };
+  let partialRefreshSchedules = 0;
+  partialRevisionCard._scheduleStateRefresh = () => { partialRefreshSchedules += 1; };
+  partialRevisionCard._send = async (type) => {
+    if (type === "jackenberater/open_session") {
+      return {
+        session: { id: "action-session", feedback: null },
+        profile: { setup_complete: true, total_feedback: 11, learning_progress: 0.6 },
+        recommendation: { marker: "action-new", jacket_now: "light", jacket_later: "light" },
+        feedback: [],
+        profile_revision: "r:2",
+        directory_revision: "d:2",
+      };
+    }
+    throw new Error(`unexpected ${type}`);
+  };
+  await partialRevisionCard._openAdvice();
+  assert.equal(partialRevisionCard._preview?.recommendation?.marker, "action-new");
+  assert.equal(partialRevisionCard._preview?.profile?.total_feedback, 11, "action may apply returned profile metadata opportunistically");
+  assert.equal(partialRevisionCard._profileRevision, "r:1", "open_session must not mark a partial action snapshot as fully applied");
+  assert.equal(partialRevisionCard._seenProfileRevision, "r:2", "newer action revision should be remembered as seen");
+  assert.equal(partialRefreshSchedules, 1, "newer partial action revision must schedule a full snapshot refresh");
+  assert.deepEqual(
+    partialRevisionCard._profiles.map((item) => item.name),
+    ["A-old", "B-old"],
+    "open_session must not pretend it replaced the shared profile directory",
+  );
+
+  // Manual feedback uses the same partial-snapshot rule.
+  const partialManualCard = new Card();
+  partialManualCard._hass = { language: "de" };
+  partialManualCard._render = () => {};
+  partialManualCard._config = { entry_id: "entry" };
+  partialManualCard._profileRevision = "r:3";
+  partialManualCard._seenProfileRevision = "r:3";
+  partialManualCard._preview = {
+    profile: { setup_complete: true, total_feedback: 20 },
+    recommendation: { marker: "manual-old", jacket_now: "light", jacket_later: "light" },
+    feedback: [],
+  };
+  let manualRefreshSchedules = 0;
+  partialManualCard._scheduleStateRefresh = () => { manualRefreshSchedules += 1; };
+  partialManualCard._send = async (type) => {
+    if (type === "jackenberater/open_session") {
+      return {
+        session: { id: "manual-current", feedback: null },
+        profile: { setup_complete: true, total_feedback: 21 },
+        recommendation: { marker: "manual-action", jacket_now: "light", jacket_later: "light" },
+        feedback: [],
+        profile_revision: "r:4",
+      };
+    }
+    throw new Error(`unexpected ${type}`);
+  };
+  await partialManualCard._prepareManualFeedback();
+  assert.equal(partialManualCard._profileRevision, "r:3");
+  assert.equal(partialManualCard._seenProfileRevision, "r:4");
+  assert.equal(partialManualCard._manualFeedbackVisible, true);
+  assert.equal(manualRefreshSchedules, 1);
+
+  // Mutating actions are single-flight. A fast double click on Undo must send
+  // only one backend request, otherwise two historical learning changes could
+  // be reverted even though the button says singular "last learning change".
+  const undoSingleFlightCard = new Card();
+  undoSingleFlightCard._hass = { language: "de" };
+  undoSingleFlightCard._render = () => {};
+  undoSingleFlightCard._config = { entry_id: "entry" };
+  undoSingleFlightCard._selectedProfile = "A";
+  undoSingleFlightCard._requestGeneration = 1;
+  undoSingleFlightCard._refresh = async () => {};
+  undoSingleFlightCard._t = (key) => key;
+  const undoDone = deferred();
+  let undoCalls = 0;
+  undoSingleFlightCard._send = async (type) => {
+    if (type === "jackenberater/profile_maintenance") {
+      undoCalls += 1;
+      return undoDone.promise;
+    }
+    throw new Error(`unexpected ${type}`);
+  };
+  const undoFirst = undoSingleFlightCard._maintainProfile("undo");
+  const undoSecond = undoSingleFlightCard._maintainProfile("undo");
+  await Promise.resolve();
+  assert.equal(undoCalls, 1, "double-click Undo must send exactly one mutating request");
+  undoDone.resolve({ ok: true });
+  await Promise.all([undoFirst, undoSecond]);
+
+  // Feedback uses the same single-flight rule per session. The backend already
+  // rejects a duplicate, but the card should not emit the redundant request or
+  // replace a successful notice with "already submitted".
+  const feedbackSingleFlightCard = new Card();
+  feedbackSingleFlightCard._hass = { language: "de" };
+  feedbackSingleFlightCard._render = () => {};
+  feedbackSingleFlightCard._config = { entry_id: "entry" };
+  feedbackSingleFlightCard._selectedProfile = "A";
+  feedbackSingleFlightCard._requestGeneration = 1;
+  feedbackSingleFlightCard._refresh = async () => {};
+  feedbackSingleFlightCard._t = (key) => key;
+  const feedbackSession = {
+    id: "single-flight-session",
+    recommendation: { jacket_now: "light", jacket_later: "light" },
+  };
+  feedbackSingleFlightCard._session = feedbackSession;
+  const feedbackFlightDone = deferred();
+  let feedbackFlightCalls = 0;
+  feedbackSingleFlightCard._send = async (type) => {
+    if (type === "jackenberater/feedback") {
+      feedbackFlightCalls += 1;
+      return feedbackFlightDone.promise;
+    }
+    throw new Error(`unexpected ${type}`);
+  };
+  const feedbackFirst = feedbackSingleFlightCard._feedback(feedbackSession, "perfect", true);
+  const feedbackSecond = feedbackSingleFlightCard._feedback(feedbackSession, "perfect", true);
+  await Promise.resolve();
+  assert.equal(feedbackFlightCalls, 1, "double-click feedback must send exactly one request per session");
+  feedbackFlightDone.resolve({ ok: true });
+  await Promise.all([feedbackFirst, feedbackSecond]);
+  assert.equal(feedbackSingleFlightCard._notice, "submitted");
+
   console.log("frontend session contract OK");
 })().catch((err) => {
   console.error(err);

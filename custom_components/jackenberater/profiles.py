@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from datetime import datetime
+import hashlib
 import logging
 from typing import Any
 import uuid
@@ -45,6 +46,8 @@ from .time_utils import (
 
 _LOGGER = logging.getLogger(__name__)
 
+_SESSION_SCHEMA_VERSION = 5
+
 
 # Feedback undo must only touch state that one rating can actually train.
 # User/configuration state and session/cadence counters deliberately stay current.
@@ -86,6 +89,41 @@ def _feedback_learning_snapshot(model: PersonalModel) -> dict[str, Any]:
     """Return only fields a feedback rating is allowed to train."""
     raw = model.to_dict()
     return {name: deepcopy(raw[name]) for name in _FEEDBACK_UNDO_FIELDS}
+
+
+def _feedback_policy_signature(
+    model: PersonalModel,
+    recommendation: Recommendation,
+    *,
+    near_threshold: bool,
+    class_change: bool,
+    unusual_weather: bool,
+) -> dict[str, Any]:
+    """Return the session-reuse fields that define feedback/learning semantics.
+
+    A recent session may only be reused when reopening it would ask the same
+    feedback question and later train the same seasonal/model context.  The
+    exact clock time is intentionally not part of the signature so repeated
+    taps within a few minutes still deduplicate; calendar dates are included
+    because season weights are date based.
+    """
+
+    def _day(value: datetime | None) -> str | None:
+        return value.date().isoformat() if isinstance(value, datetime) else None
+
+    return {
+        "learning_enabled": bool(model.learning_enabled),
+        "confidence": round(float(recommendation.confidence), 3),
+        "near_threshold": bool(near_threshold),
+        "class_change": bool(class_change),
+        "unusual_weather": bool(unusual_weather),
+        # The opportunity counter controls cadence for a *new* opportunity,
+        # but is deliberately not part of session identity. Otherwise an
+        # unrelated session opened between A and a repeated A would defeat
+        # profile-wide 10-minute deduplication of the same real decision.
+        "observed_date": _day(recommendation.observed_at),
+        "later_date": _day(recommendation.later_at),
+    }
 
 
 def _normalize_feedback_learning_snapshot(raw: Any) -> dict[str, Any] | None:
@@ -144,6 +182,13 @@ class ProfileManager:
             f"{STORAGE_KEY_PREFIX}.{entry.entry_id}",
         )
         self._profiles: dict[str, dict[str, Any]] = {}
+        self._revision = 0
+        self._directory_revision = 0
+        self._profile_revisions: dict[str, int] = {}
+        # A fresh token for every loaded ProfileManager makes cross-device
+        # revision polling detect config-entry reloads even when integer
+        # revisions happen to restart at the same value.
+        self._runtime_generation = uuid.uuid4().hex
 
     async def async_load(self) -> None:
         raw = await self.store.async_load()
@@ -160,21 +205,128 @@ class ProfileManager:
     def profile_ids(self) -> list[str]:
         return list(self._profiles)
 
+    @property
+    def revision(self) -> int:
+        """Monotonic revision inside this ProfileManager runtime."""
+        return int(getattr(self, "_revision", 0))
+
+    @property
+    def revision_token(self) -> str:
+        """Backward-compatible global runtime token."""
+        return f"{self._runtime_generation}:{self.revision}"
+
+    @property
+    def directory_revision(self) -> int:
+        """Revision for profile-directory changes (create/delete/rename)."""
+        return int(getattr(self, "_directory_revision", 0))
+
+    @property
+    def directory_revision_token(self) -> str:
+        return f"{self._runtime_generation}:d:{self.directory_revision}"
+
+    def profile_revision(self, profile_id: str) -> int:
+        revisions = getattr(self, "_profile_revisions", None)
+        if not isinstance(revisions, dict):
+            revisions = {}
+            self._profile_revisions = revisions
+        return int(revisions.get(profile_id, 0))
+
+    def profile_revision_token(self, profile_id: str) -> str:
+        return f"{self._runtime_generation}:p:{self.profile_revision(profile_id)}"
+
+    def _session_revision_digest(
+        self, profile_id: str, now: datetime | None = None
+    ) -> str:
+        """Return a tiny dynamic digest for user-visible session state.
+
+        Session creation does not belong to the learned-model revision, and a
+        requested session becomes due merely because wall-clock time crosses
+        ``ready_at``.  Build the card-visible session marker from the bounded
+        session ring itself so another device notices both structural changes
+        and the pending->due transition without a background timer or store write.
+        """
+        current = now or dt_util.now()
+        parts: list[str] = []
+        raw = self._profiles.get(profile_id)
+        sessions = raw.get("sessions") if isinstance(raw, dict) else None
+        if not isinstance(sessions, list):
+            sessions = []
+        for session in sessions:
+            if session.get("feedback") is not None:
+                continue
+            if not _session_policy_is_current(session):
+                continue
+            expires = _parse_dt(session.get("expires_at"))
+            if expires is None or is_at_or_after(current, expires):
+                continue
+            ready = _parse_dt(session.get("ready_at"))
+            due = bool(
+                session.get("request_feedback")
+                and ready is not None
+                and is_at_or_after(current, ready)
+            )
+            parts.append(
+                f"{session.get('id', '')}:{int(bool(session.get('request_feedback')))}:{int(due)}"
+            )
+        payload = "|".join(parts).encode("utf-8")
+        return hashlib.sha256(payload).hexdigest()[:12]
+
+    def session_revision_token(
+        self, profile_id: str, now: datetime | None = None
+    ) -> str:
+        return f"{self._runtime_generation}:s:{self._session_revision_digest(profile_id, now)}"
+
+    def card_revision_token(
+        self, profile_id: str | None, *, include_directory: bool = False
+    ) -> str:
+        """Return the smallest reload-safe token relevant to one full card snapshot."""
+        parts = [self._runtime_generation]
+        if include_directory:
+            parts.append(f"d{self.directory_revision}")
+        if profile_id is not None:
+            parts.append(f"p{self.profile_revision(profile_id)}")
+            parts.append(f"s{self._session_revision_digest(profile_id)}")
+        return ":".join(parts)
+
+    @callback
+    def bump_volatile_profile_revision(self, profile_id: str) -> None:
+        """Notify cards about volatile per-profile state without persisting it.
+
+        Diagnostic simulation is intentionally runtime-only and must not emit a
+        normal profile-updated signal, because that signal clears simulations.
+        It still changes the preview, so bump only the in-memory revision token.
+        """
+        self._bump_scoped_revisions(profile_id=profile_id)
+
     def profile_name(self, profile_id: str) -> str:
         raw = self._profiles.get(profile_id, {})
         return str(raw.get("name") or "Home-Assistant-Nutzer")
 
     def get_model(self, profile_id: str) -> PersonalModel:
+        """Return the persisted model without causing any model mutation.
+
+        Reads such as profile lists, diagnostics and exports must be pure. In
+        particular, an admin/wall-tablet listing somebody else's profile must
+        never initialize or seed that person's seasons. Advice paths explicitly
+        call :meth:`prepare_model_for_advice` instead.
+        """
+        raw = self._profiles.get(profile_id)
+        if not isinstance(raw, dict):
+            return PersonalModel()
+        return PersonalModel.from_dict(raw.get("model"))
+
+    def prepare_model_for_advice(
+        self, profile_id: str, when: datetime | None = None
+    ) -> PersonalModel:
+        """Prepare exactly one actively advised profile for the current season."""
         raw = self._profiles.get(profile_id)
         if not isinstance(raw, dict):
             return PersonalModel()
         model = PersonalModel.from_dict(raw.get("model"))
-        # Initialize/seed each season at most once. If its whole transition was
-        # missed, prepare_seasons_for() catches that seed up on the first later
-        # access. Bootstrap metadata is persisted independently from evidence.
-        if model.prepare_seasons_for(dt_util.now()):
+        if model.prepare_seasons_for(when or dt_util.now()):
             raw["model"] = model.to_dict()
             self._schedule_save()
+            self._updated(profile_id)
         return model
 
     def get_profile_summary(self, profile_id: str) -> dict[str, Any]:
@@ -200,7 +352,9 @@ class ProfileManager:
         for profile_id in list(self._profiles):
             if profile_id not in directory:
                 del self._profiles[profile_id]
+                getattr(self, "_profile_revisions", {}).pop(profile_id, None)
                 changed = True
+                self._bump_scoped_revisions(directory=True)
                 async_dispatcher_send(
                     self.hass,
                     SIGNAL_PROFILE_DELETED.format(entry_id=self.entry.entry_id),
@@ -210,7 +364,12 @@ class ProfileManager:
             if self._profiles[profile_id].get("name") != directory[profile_id]:
                 self._profiles[profile_id]["name"] = directory[profile_id]
                 changed = True
-                self._updated(profile_id)
+                self._bump_scoped_revisions(profile_id=profile_id, directory=True)
+                async_dispatcher_send(
+                    self.hass,
+                    SIGNAL_PROFILE_UPDATED.format(entry_id=self.entry.entry_id),
+                    profile_id,
+                )
         if changed:
             self._schedule_save()
         return changed
@@ -232,15 +391,21 @@ class ProfileManager:
         if changed:
             self._schedule_save()
         if created:
+            self._bump_scoped_revisions(profile_id=profile_id, directory=True)
             async_dispatcher_send(
                 self.hass,
                 SIGNAL_PROFILE_CREATED.format(entry_id=self.entry.entry_id),
                 profile_id,
             )
         elif changed:
-            # Existing entities listen for profile updates so a later Home
-            # Assistant user rename can refresh their translated display name.
-            self._updated(profile_id)
+            # A Home Assistant user rename affects both this profile's own card
+            # and shared profile selectors, so bump both scopes.
+            self._bump_scoped_revisions(profile_id=profile_id, directory=True)
+            async_dispatcher_send(
+                self.hass,
+                SIGNAL_PROFILE_UPDATED.format(entry_id=self.entry.entry_id),
+                profile_id,
+            )
         return self.get_model(profile_id)
 
     async def async_setup_profile(
@@ -270,6 +435,16 @@ class ProfileManager:
         model = self.get_model(profile_id)
         model.learning_enabled = bool(enabled)
         self._profiles[profile_id]["model"] = model.to_dict()
+        if not model.learning_enabled:
+            # Pausing learning invalidates every unanswered feedback context.
+            # Merely muting request_feedback is not enough: after resume the old
+            # policy signature could otherwise match again inside the 10-minute
+            # reuse window and silently consume a fresh feedback opportunity.
+            for session in self._sessions(profile_id):
+                if session.get("feedback") is None:
+                    session["request_feedback"] = False
+                    session["policy_signature"] = None
+                    session["trainable"] = False
         self._schedule_save()
         self._updated(profile_id)
 
@@ -322,15 +497,57 @@ class ProfileManager:
         weather_context: dict[str, Any],
         learning_contexts: dict[str, dict[str, Any]],
         opened_by_user_id: str = "",
+        prepared_model: PersonalModel | None = None,
     ) -> dict[str, Any]:
         now = dt_util.now()
         raw = self._profiles[profile_id]
-        self._cleanup_profile(profile_id, now)
+        if self._cleanup_profile(profile_id, now):
+            # Persist expiry cleanup even when the function reuses an existing
+            # fresh session and returns early below.
+            self._schedule_save()
         # Cleanup replaces the stored list, so reacquire it afterwards.
         sessions = self._sessions(profile_id)
+        # Opening feedback for a real recommendation is an explicit use of this
+        # profile, so season bootstrap belongs here as well. This also keeps the
+        # persisted seed in place before any learning-before snapshot is taken.
+        model = (
+            prepared_model
+            if prepared_model is not None
+            else self.prepare_model_for_advice(profile_id, recommendation.observed_at)
+        )
+        # ``prepared_model`` intentionally freezes the recommendation-relevant
+        # learning state across forecast/calendar awaits.  Session cadence is a
+        # different concern: ``feedback_opportunities`` can change when another
+        # device opens an otherwise unrelated session without bumping the model
+        # revision.  Rebase only that session-local counter from persisted state
+        # immediately before policy/reuse evaluation.  ``async_open_session`` has
+        # no awaits after this point, so the merge/increment/store sequence stays
+        # atomic in the HA event loop and parallel stale snapshots cannot lose an
+        # opportunity or create duplicate identical sessions.
+        current_model = self.get_model(profile_id)
+        model.feedback_opportunities = current_model.feedback_opportunities
+        near_threshold = "near_threshold" in recommendation.reasons
+        class_change = recommendation.jacket_now != recommendation.jacket_later
+        unusual_weather = any(
+            key in recommendation.reasons
+            for key in ("wind", "wet", "work_location", "uncertain_conditions")
+        )
+        current_policy = _feedback_policy_signature(
+            model,
+            recommendation,
+            near_threshold=near_threshold,
+            class_change=class_change,
+            unusual_weather=unusual_weather,
+        )
 
-        # Reuse a very recent identical deliberate lookup instead of creating
-        # duplicate training candidates from repeated taps.
+        # Reuse one recent real-world decision profile-wide.  Answered current-
+        # schema sessions remain dedupe anchors so the same weather/jacket
+        # decision cannot be learned twice merely because the user closes and
+        # reopens the card.  If the decision is the same but feedback policy has
+        # changed, the old *unanswered* session is explicitly superseded before
+        # a fresh policy session is created; two trainable versions of one real
+        # decision must never coexist.
+        superseded_changed = False
         for session in reversed(sessions):
             created = _parse_dt(session.get("created_at"))
             if created is None:
@@ -340,21 +557,40 @@ class ProfileManager:
                 continue
             if age_seconds > 600:
                 break
-            if (
-                session.get("feedback") is None
-                and _session_context_matches(
-                    session, recommendation, weather_context, learning_contexts
-                )
-            ):
+
+            answered = session.get("feedback") is not None
+            if answered and session.get("session_schema_version") != _SESSION_SCHEMA_VERSION:
+                continue
+
+            same_decision = _session_context_matches(
+                session,
+                recommendation,
+                weather_context,
+                learning_contexts,
+                current_policy,
+                require_policy=False,
+            )
+            if not same_decision:
+                continue
+
+            if answered:
+                if superseded_changed:
+                    self._schedule_save()
                 return _public_session(session)
 
-        model = self.get_model(profile_id)
-        near_threshold = "near_threshold" in recommendation.reasons
-        class_change = recommendation.jacket_now != recommendation.jacket_later
-        unusual_weather = any(
-            key in recommendation.reasons
-            for key in ("wind", "wet", "work_location", "uncertain_conditions")
-        )
+            if _session_policy_is_current(session) and session.get("policy_signature") == current_policy:
+                if superseded_changed:
+                    self._schedule_save()
+                return _public_session(session)
+
+            # Same real decision, but stale/changed policy.  Kill the old
+            # unanswered learning ticket before creating the replacement.
+            session["request_feedback"] = False
+            session["policy_signature"] = None
+            session["trainable"] = False
+            session["superseded"] = True
+            superseded_changed = True
+
         if model.learning_enabled:
             model.feedback_opportunities += 1
         requested = should_request_feedback(
@@ -362,12 +598,17 @@ class ProfileManager:
             near_threshold=near_threshold,
             class_change=class_change,
             unusual_weather=unusual_weather,
-            decision_confidence=model.decision_confidence(
-                recommendation.jacket_now, recommendation.jacket_later
-            ),
+            decision_confidence=recommendation.confidence,
             opportunity_count=model.feedback_opportunities,
         )
         raw["model"] = model.to_dict()
+        stored_policy = _feedback_policy_signature(
+            model,
+            recommendation,
+            near_threshold=near_threshold,
+            class_change=class_change,
+            unusual_weather=unusual_weather,
+        )
 
         ready_at = real_add(now, FEEDBACK_MIN_DELAY)
         if (
@@ -384,10 +625,14 @@ class ProfileManager:
         expires_at = real_add(now, SESSION_EXPIRY)
         session = {
             "id": uuid.uuid4().hex[:12],
+            "session_schema_version": _SESSION_SCHEMA_VERSION,
             "created_at": now.isoformat(),
             "ready_at": ready_at.isoformat(),
             "expires_at": expires_at.isoformat(),
             "request_feedback": requested,
+            "policy_signature": stored_policy,
+            "trainable": bool(model.learning_enabled),
+            "superseded": False,
             "recommendation": recommendation.as_dict(),
             "weather": weather_context,
             "learning_contexts": learning_contexts,
@@ -403,8 +648,13 @@ class ProfileManager:
     def feedback_candidates(
         self, profile_id: str, *, opened_by_user_id: str | None = None
     ) -> list[dict[str, Any]]:
+        raw = self._profiles.get(profile_id, {})
+        model = PersonalModel.from_dict(raw.get("model") if isinstance(raw, dict) else None)
+        if not model.learning_enabled:
+            return []
         now = dt_util.now()
-        self._cleanup_profile(profile_id, now)
+        if self._cleanup_profile(profile_id, now):
+            self._schedule_save()
         candidates: list[dict[str, Any]] = []
         for session in reversed(self._sessions(profile_id)):
             if (
@@ -468,21 +718,57 @@ class ProfileManager:
             raise KeyError("session not found")
         if session.get("feedback") is not None:
             raise ValueError("feedback already submitted")
+        model = self.get_model(profile_id)
+        if not model.learning_enabled:
+            raise ValueError("learning_paused")
+        if session.get("trainable") is not True:
+            # A context created while learning was paused is permanently
+            # display-only. Resuming learning later must not retroactively turn
+            # that historic decision into training evidence.
+            raise ValueError("feedback_session_incompatible")
+        if not _session_policy_is_current(session):
+            # Temporary sessions from an older semantic/schema generation,
+            # superseded policy variants or explicitly invalidated sessions must
+            # never train the current model, even when an old client still holds
+            # their id.
+            raise ValueError("feedback_session_incompatible")
         now = dt_util.now()
         expires = _parse_dt(session.get("expires_at"))
-        if expires is not None and is_at_or_after(now, expires):
+        if expires is None:
+            raise ValueError("feedback_session_incompatible")
+        if is_at_or_after(now, expires):
             raise ValueError("feedback expired")
         if not voluntary:
             ready = _parse_dt(session.get("ready_at"))
             if not session.get("request_feedback") or ready is None or is_before(now, ready):
                 raise ValueError("feedback_not_ready")
 
-        model = self.get_model(profile_id)
         recommendation = session.get("recommendation", {})
         # “Perfect” on a recommendation that deliberately changed jacket class is
         # confirmation of the whole recommendation. Do not ask an extra question;
         # use the existing PHASE_ALL path so both relevant boundaries are learned.
         class_change = recommendation.get("jacket_now") != recommendation.get("jacket_later")
+        later_at = _parse_dt(recommendation.get("later_at"))
+        future_change_unexperienced = bool(
+            voluntary
+            and class_change
+            and later_at is not None
+            and is_before(now, later_at)
+        )
+        # Voluntary feedback means “rate what I am seeing now”. A future jacket
+        # switch cannot be confirmed before its timestamp has actually occurred.
+        # Normalize even direct API callers to the start context; the frontend
+        # mirrors this by not presenting later/all choices for such sessions.
+        if future_change_unexperienced:
+            phase = PHASE_START
+
+        # ``later``/``all`` only have semantic meaning when the recommendation
+        # actually crosses a jacket boundary. The normal card already enforces
+        # this; normalize direct WebSocket callers too so one stable recommendation
+        # can never be trained through two contexts by one feedback interaction.
+        if not class_change and phase in {PHASE_LATER, PHASE_ALL}:
+            phase = PHASE_START
+
         if rating == FEEDBACK_PERFECT and phase is None and class_change:
             phase = PHASE_ALL
         elif rating in {FEEDBACK_TOO_COLD, FEEDBACK_TOO_WARM} and phase is None and class_change:
@@ -688,21 +974,39 @@ class ProfileManager:
                 if normalized is not None and normalized != before:
                     session["learning_before"] = normalized
 
+            # Unanswered sessions are intentionally short-lived. Do not carry an
+            # old feedback/session semantic across an upgrade: legacy sessions
+            # without the current policy signature/schema could otherwise still
+            # appear as due feedback and train a model under stale context rules.
+            raw["sessions"] = [
+                session
+                for session in self._sessions(profile_id)
+                if session.get("feedback") is not None
+                or _session_policy_is_current(session)
+            ]
+
             self._cleanup_profile(profile_id, now)
 
-    def _cleanup_profile(self, profile_id: str, now: datetime) -> None:
+    def _cleanup_profile(self, profile_id: str, now: datetime) -> bool:
         sessions = self._sessions(profile_id)
+        before = list(sessions)
         kept: list[dict[str, Any]] = []
         for session in sessions:
+            unanswered = session.get("feedback") is None
+            if unanswered and not _session_policy_is_current(session):
+                continue
             expires = _parse_dt(session.get("expires_at"))
-            if (
-                session.get("feedback") is None
-                and expires
-                and is_at_or_after(now, expires)
-            ):
+            # An unanswered session without a valid expiry is incompatible
+            # storage, not an immortal feedback opportunity.
+            if unanswered and expires is None:
+                continue
+            if unanswered and is_at_or_after(now, expires):
                 continue
             kept.append(session)
-        self._profiles[profile_id]["sessions"] = _bounded_sessions(kept)
+        bounded = _bounded_sessions(kept)
+        changed = bounded != before
+        self._profiles[profile_id]["sessions"] = bounded
+        return changed
 
     def _cap_sessions(self, profile_id: str) -> None:
         # Requested, unanswered feedback candidates are protected from a burst of
@@ -725,7 +1029,27 @@ class ProfileManager:
         self.store.async_delay_save(lambda: {"profiles": self._profiles}, 5.0)
 
     @callback
+    def _bump_revision(self) -> None:
+        """Backward-compatible global revision for tests/diagnostics."""
+        self._revision = self.revision + 1
+
+    @callback
+    def _bump_scoped_revisions(
+        self, *, profile_id: str | None = None, directory: bool = False
+    ) -> None:
+        self._bump_revision()
+        if profile_id is not None:
+            revisions = getattr(self, "_profile_revisions", None)
+            if not isinstance(revisions, dict):
+                revisions = {}
+                self._profile_revisions = revisions
+            revisions[profile_id] = int(revisions.get(profile_id, 0)) + 1
+        if directory:
+            self._directory_revision = self.directory_revision + 1
+
+    @callback
     def _updated(self, profile_id: str) -> None:
+        self._bump_scoped_revisions(profile_id=profile_id)
         async_dispatcher_send(
             self.hass,
             SIGNAL_PROFILE_UPDATED.format(entry_id=self.entry.entry_id),
@@ -737,7 +1061,11 @@ def _public_session(session: dict[str, Any]) -> dict[str, Any]:
     result = deepcopy(session)
     result.pop("learning_before", None)
     result.pop("learning_contexts", None)
+    result.pop("policy_signature", None)
+    result.pop("session_schema_version", None)
     result.pop("opened_by_user_id", None)
+    result.pop("trainable", None)
+    result.pop("superseded", None)
     return result
 
 
@@ -777,6 +1105,20 @@ def _bounded_sessions(sessions: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [session for index, session in enumerate(eligible) if index in keep_indexes]
 
 
+def _session_policy_is_current(session: dict[str, Any]) -> bool:
+    """Return whether an unanswered session is safe for current feedback rules.
+
+    Sessions opened while learning was paused are display-only snapshots. They
+    must never become trainable later merely because learning was resumed.
+    """
+    return (
+        session.get("session_schema_version") == _SESSION_SCHEMA_VERSION
+        and isinstance(session.get("policy_signature"), dict)
+        and session.get("trainable") is True
+        and not session.get("superseded")
+    )
+
+
 def _optional_close(a: Any, b: Any, tolerance: float) -> bool:
     left = _safe_float(a)
     right = _safe_float(b)
@@ -790,11 +1132,20 @@ def _session_context_matches(
     recommendation: Recommendation,
     weather_context: dict[str, Any],
     learning_contexts: dict[str, dict[str, Any]],
+    policy_signature: dict[str, Any],
+    *,
+    require_policy: bool = True,
 ) -> bool:
     """Return whether reusing a recent session would train the same conditions."""
     old_rec = session.get("recommendation")
     old_learning = session.get("learning_contexts")
     if not isinstance(old_rec, dict) or not isinstance(old_learning, dict):
+        return False
+    if require_policy and session.get("policy_signature") != policy_signature:
+        # Legacy/unanswered sessions without the exact current feedback policy
+        # are deliberately not reused. Answered current-schema sessions use only
+        # decision context here: their role is to suppress duplicate learning,
+        # not to reopen the old feedback policy.
         return False
 
     new_rec = recommendation.as_dict()
@@ -809,6 +1160,8 @@ def _session_context_matches(
         "transient_override",
         "transient_direction",
         "transient_until",
+        "later_work_period",
+        "later_change_confirmed",
     )
     if any(old_rec.get(key) != new_rec.get(key) for key in exact_keys):
         return False
@@ -842,7 +1195,10 @@ def _session_context_matches(
 def _parse_dt(value: Any) -> datetime | None:
     if not isinstance(value, str):
         return None
-    parsed = dt_util.parse_datetime(value)
+    try:
+        parsed = dt_util.parse_datetime(value)
+    except (TypeError, ValueError):
+        return None
     if parsed is None:
         return None
     if parsed.tzinfo is None:

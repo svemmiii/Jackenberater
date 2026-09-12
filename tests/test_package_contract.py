@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).parents[1]
@@ -106,7 +107,7 @@ def test_frontend_registration_does_not_hide_unexpected_runtime_errors():
 
 
 def test_release_version_is_consistent_across_current_release_files():
-    version = "0.3.1"
+    version = "0.3.2"
     manifest = json.loads((INTEGRATION / "manifest.json").read_text(encoding="utf-8"))
     const_source = (INTEGRATION / "const.py").read_text(encoding="utf-8")
     init_source = (INTEGRATION / "__init__.py").read_text(encoding="utf-8")
@@ -118,11 +119,13 @@ def test_release_version_is_consistent_across_current_release_files():
     assert manifest["version"] == version
     assert f'INTEGRATION_VERSION = "{version}"' in const_source
     assert f"# JackenBerater v{version}" in readme
-    assert f"?v={version}&ui=2" in readme
+    revision_match = re.search(r'FRONTEND_CACHE_REVISION = "(\d+)"', init_source)
+    assert revision_match is not None
+    frontend_revision = revision_match.group(1)
+    assert f"?v={version}&ui={frontend_revision}" in readme
     assert f"JackenBerater v{version}" in context
     assert changelog.startswith(f"# Changelog\n\n## v{version}\n")
     assert f'value: "{version}"' in bug
-    assert 'FRONTEND_CACHE_REVISION = "2"' in init_source
     assert 'wanted = f"{base}?v={INTEGRATION_VERSION}&ui={FRONTEND_CACHE_REVISION}"' in init_source
 
 
@@ -153,6 +156,8 @@ def test_profile_deletion_has_runtime_and_registry_cleanup_contract():
     assert "SIGNAL_PROFILE_DELETED.format" in profiles_source
     assert 'runtime.setdefault("simulations", {}).pop(profile_id, None)' in sensor_source
     assert "registry.async_remove(entity_id)" in sensor_source
+    assert "entry.async_create_task(" in sensor_source
+    assert "hass.async_create_task(_async_remove())" not in sensor_source
     init_source = (INTEGRATION / "__init__.py").read_text(encoding="utf-8")
     assert "_async_remove_orphan_profile_diagnostics" in init_source
     assert "manager.sync_user_directory" in init_source
@@ -169,7 +174,7 @@ def test_user_card_does_not_expose_internal_effective_temperature():
 
 def test_bug_report_template_targets_current_release():
     bug = (ROOT / ".github" / "ISSUE_TEMPLATE" / "bug_report.yml").read_text(encoding="utf-8")
-    assert 'value: "0.3.1"' in bug
+    assert 'value: "0.3.2"' in bug
 
 
 def test_release_ci_covers_declared_minimum_current_and_latest_home_assistant():
@@ -202,3 +207,49 @@ def test_frontend_has_no_undocumented_fixed_profile_id_config_path():
     # profile_id remains a server message field for authenticated Shared/Admin
     # selection; only the old card-config shortcut is intentionally removed.
     assert "profile_id: this._selectedProfile" in frontend
+
+
+def test_release_hardening_invalidates_calendar_cache_and_documents_diagnostics_privacy():
+    init_source = (INTEGRATION / "__init__.py").read_text(encoding="utf-8")
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    assert "async_track_state_change_event" in init_source
+    assert 'runtime.setdefault("context_cache", {}).clear()' in init_source
+    assert 'context_cache_generation' in init_source
+    assert "Kontext-/Terminkalenders" in readme
+    assert "auf nur **1 Minute** begrenzt" in readme
+    assert "_CONTEXT_CACHE_TTL = timedelta(minutes=1)" in (INTEGRATION / "api.py").read_text(encoding="utf-8")
+    assert "Diagnose-Sensor ist standardmäßig deaktiviert" in readme
+    assert "vollständige persönliche Lernmodell" in readme
+    assert "vertrauenswürdigen Benutzern" in readme
+
+
+def test_diagnostics_entity_removal_clears_volatile_simulation_state():
+    sensor_source = (INTEGRATION / "sensor.py").read_text(encoding="utf-8")
+    assert "async def async_will_remove_from_hass" in sensor_source
+    assert 'simulations.pop(self.profile_id, None)' in sensor_source
+    assert 'self.manager.bump_volatile_profile_revision(self.profile_id)' in sensor_source
+
+
+def test_user_sync_is_guarded_against_unload_reload_race_and_profile_revision_api_exists():
+    init_source = (INTEGRATION / "__init__.py").read_text(encoding="utf-8")
+    api_source = (INTEGRATION / "api.py").read_text(encoding="utf-8")
+    frontend = (INTEGRATION / "frontend" / "jackenberater-card.js").read_text(encoding="utf-8")
+    assert 'runtime.get("unloading")' in init_source
+    assert 'runtime.get("profiles") is not manager' in init_source
+    assert 'runtime["unloading"] = True' in init_source
+    assert 'jackenberater/profile_revision' in api_source
+    assert 'profile_revision' in api_source
+    assert 'jackenberater/profile_revision' in frontend
+    assert '_checkProfileRevision' in frontend
+
+
+def test_unload_failure_restores_runtime_unloading_flag_and_revision_api_is_scoped():
+    init_source = (INTEGRATION / "__init__.py").read_text(encoding="utf-8")
+    api_source = (INTEGRATION / "api.py").read_text(encoding="utf-8")
+    profiles_source = (INTEGRATION / "profiles.py").read_text(encoding="utf-8")
+    assert 'if not ok:' in init_source
+    assert 'current["unloading"] = False' in init_source
+    assert 'profile_revision_token' in profiles_source
+    assert 'directory_revision_token' in profiles_source
+    assert '_revision_token_for_connection' in api_source
+    assert '"profile_revision": _revision_token_for_connection' in api_source

@@ -58,7 +58,11 @@ async def async_setup_entry(
             if entity_id is not None:
                 registry.async_remove(entity_id)
 
-        hass.async_create_task(_async_remove())
+        entry.async_create_task(
+            hass,
+            _async_remove(),
+            name=f"{DOMAIN} remove diagnostics for {profile_id}",
+        )
 
     for profile_id in manager.profile_ids:
         add(profile_id)
@@ -141,6 +145,15 @@ class ProfileDiagnosticsSensor(SensorEntity):
         model = simulation or self.manager.get_model(self.profile_id)
         return model_diagnostics(model, simulation_active=simulation is not None)
 
+    async def async_will_remove_from_hass(self) -> None:
+        # Simulation is volatile troubleshooting state owned by this entity.
+        # Removing/disabling the diagnostic entity must never leave a hidden
+        # simulation active in ws_preview or keep feedback blocked.
+        simulations = self.runtime.setdefault("simulations", {})
+        if simulations.pop(self.profile_id, None) is not None:
+            self.manager.bump_volatile_profile_revision(self.profile_id)
+        await super().async_will_remove_from_hass()
+
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
         self.async_on_remove(
@@ -174,10 +187,15 @@ class ProfileDiagnosticsSensor(SensorEntity):
             dict(new_state.attributes),
         )
         simulations = self.runtime.setdefault("simulations", {})
+        before = simulations.get(self.profile_id)
         if simulated is None:
             simulations.pop(self.profile_id, None)
         else:
             simulations[self.profile_id] = simulated
+        before_dict = before.to_dict() if hasattr(before, "to_dict") else None
+        after_dict = simulated.to_dict() if simulated is not None else None
+        if before_dict != after_dict:
+            self.manager.bump_volatile_profile_revision(self.profile_id)
         # Re-publish sanitized volatile values and the simulation marker. This
         # never touches ProfileManager or its persistent Store.
         self.async_write_ha_state()

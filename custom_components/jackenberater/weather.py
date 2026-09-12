@@ -1,6 +1,7 @@
 """Home Assistant weather normalization and lightweight forecast cache."""
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 import logging
 import math
@@ -25,6 +26,15 @@ from .models import WeatherPoint
 from .time_utils import instant_key
 
 _LOGGER = logging.getLogger(__name__)
+
+
+@dataclass(slots=True)
+class ForecastFetchResult:
+    """One hourly forecast fetch with transport/result success separated."""
+
+    points: list[WeatherPoint]
+    success: bool
+
 
 
 def _float(value: Any) -> float | None:
@@ -103,7 +113,10 @@ def _parse_dt(value: Any) -> datetime | None:
     if isinstance(value, datetime):
         result = value
     elif isinstance(value, str):
-        result = dt_util.parse_datetime(value)
+        try:
+            result = dt_util.parse_datetime(value)
+        except (TypeError, ValueError):
+            return None
     else:
         return None
     if result is None:
@@ -192,11 +205,45 @@ def normalize_forecast(
             )
         )
     result.sort(key=lambda item: instant_key(item.dt))
-    return result[:24]
+
+    # Providers occasionally emit the same real instant more than once (for
+    # example after timezone/DST normalization or transient API duplication).
+    # One instant must count only once for trend confirmation. If duplicates
+    # disagree, prefer the point carrying more usable provider fields; on an
+    # equal completeness score the later provider item wins, which also gives a
+    # deterministic policy for corrected duplicate rows.
+    def completeness(point: WeatherPoint) -> int:
+        return sum(
+            value is not None
+            for value in (
+                point.humidity,
+                point.wind_kmh,
+                point.gust_kmh,
+                point.cloud_coverage,
+                point.precipitation_probability,
+                point.precipitation_mm,
+                point.condition,
+            )
+        )
+
+    by_instant: dict[datetime, WeatherPoint] = {}
+    scores: dict[datetime, int] = {}
+    for point in result:
+        key = instant_key(point.dt)
+        score = completeness(point)
+        if key not in by_instant or score >= scores[key]:
+            by_instant[key] = point
+            scores[key] = score
+    return [by_instant[key] for key in sorted(by_instant)][:24]
 
 
-async def _fetch_hourly(hass: HomeAssistant, entity_id: str) -> list[WeatherPoint]:
-    """Use Home Assistant's public weather.get_forecasts action."""
+async def _fetch_hourly(hass: HomeAssistant, entity_id: str) -> ForecastFetchResult:
+    """Use Home Assistant's public weather.get_forecasts action.
+
+    An empty successful forecast is different from a transport/provider failure.
+    Callers use this distinction to retry failures quickly without pretending a
+    failed request produced a fresh empty forecast.
+    """
     try:
         response = await hass.services.async_call(
             "weather",
@@ -208,13 +255,22 @@ async def _fetch_hourly(hass: HomeAssistant, entity_id: str) -> list[WeatherPoin
         )
     except (HomeAssistantError, ValueError) as err:
         _LOGGER.debug("Hourly forecast unavailable for %s: %s", entity_id, err)
-        return []
+        return ForecastFetchResult([], False)
     if not isinstance(response, dict):
-        return []
+        return ForecastFetchResult([], False)
     payload = response.get(entity_id)
     if not isinstance(payload, dict):
-        return []
-    return normalize_forecast(hass, entity_id, payload.get("forecast"))
+        return ForecastFetchResult([], False)
+    raw_forecast = payload.get("forecast")
+    if not isinstance(raw_forecast, list):
+        return ForecastFetchResult([], False)
+    normalized = normalize_forecast(hass, entity_id, raw_forecast)
+    # A provider is allowed to return an actually empty forecast. A non-empty
+    # payload whose every row is invalid, however, is a malformed/failed fetch
+    # from JackenBerater's point of view and should use the short retry path.
+    if raw_forecast and not normalized:
+        return ForecastFetchResult([], False)
+    return ForecastFetchResult(normalized, True)
 
 
 class JackenWeatherCoordinator(DataUpdateCoordinator[dict[str, Any]]):
@@ -232,14 +288,18 @@ class JackenWeatherCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     async def _async_update_data(self) -> dict[str, Any]:
         home_entity = str(self.entry.data[CONF_WEATHER])
-        home = await _fetch_hourly(self.hass, home_entity)
+        home_result = await _fetch_hourly(self.hass, home_entity)
+        home = home_result.points
 
         work_enabled = self.entry.data.get(CONF_WORK_MODE) != WORK_MODE_NONE
         work_entity = self.entry.data.get(CONF_WORK_WEATHER) if work_enabled else None
+        work_result = ForecastFetchResult([], True)
         work: list[WeatherPoint] = []
         if isinstance(work_entity, str) and work_entity and work_entity != home_entity:
-            work = await _fetch_hourly(self.hass, work_entity)
+            work_result = await _fetch_hourly(self.hass, work_entity)
+            work = work_result.points
         elif work_entity == home_entity:
+            work_result = ForecastFetchResult(list(home), home_result.success)
             work = list(home)
 
         # The recommendation layer decides which current location is relevant.
@@ -253,8 +313,16 @@ class JackenWeatherCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if not home_usable and not work_usable:
             raise UpdateFailed("No configured weather source is currently usable")
 
+        updated = dt_util.now()
+        configured_results = [home_result]
+        if isinstance(work_entity, str) and work_entity and work_entity != home_entity:
+            configured_results.append(work_result)
         return {
             "home_forecast": home,
             "work_forecast": work,
-            "updated": dt_util.now(),
+            "home_forecast_success": home_result.success,
+            "work_forecast_success": work_result.success,
+            "forecast_fetch_failed": any(not result.success for result in configured_results),
+            "updated": updated,
         }
+

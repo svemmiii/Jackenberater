@@ -57,6 +57,7 @@ class Recommendation:
     current_gust_kmh: float | None
     current_condition: str | None
     transition_penalty_c: float
+    observed_at: datetime | None = None
     current_wind_penalty_c: float = 0.0
     later_temperature_c: float | None = None
     later_wind_kmh: float | None = None
@@ -84,12 +85,14 @@ class Recommendation:
     seasonal_adjustment_c: float = 0.0
     simulation_active: bool = False
     work_forecast_coverage: str = "not_applicable"
+    later_work_period: str = "not_applicable"
+    later_change_confirmed: bool = True
     context_calendar_status: str = "not_configured"
     vacation_calendar_status: str = "not_applicable"
 
     def as_dict(self) -> dict[str, Any]:
         result = asdict(self)
-        for key in ("later_at", "work_start", "work_end", "transient_until"):
+        for key in ("observed_at", "later_at", "work_start", "work_end", "transient_until"):
             value = result.get(key)
             if isinstance(value, datetime):
                 result[key] = value.isoformat()

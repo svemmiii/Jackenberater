@@ -1,4 +1,4 @@
-# JackenBerater v0.3.1
+# JackenBerater v0.3.2
 
 JackenBerater ist eine Home-Assistant-Integration für persönliche Jackenempfehlungen. Sie verwendet aktuelle Wetterdaten, den Forecast und optional persönliche Rückmeldungen.
 
@@ -52,7 +52,7 @@ Jeder normale Home-Assistant-Benutzer hat sein eigenes Lernprofil. Beim ersten E
 - Zu warm
 - Nicht genutzt
 
-Das allgemeine Profil ist der ganzjährige persönliche Grundwert. Winter, Frühling, Sommer und Herbst besitzen daneben jeweils einen eigenen Offset. Normales thermisches Feedback verändert nach der Initialisierung nur die gerade beteiligte Jahreszeit; während der 30-tägigen Überblendung um den meteorologischen Saisonwechsel lernen ausschließlich die beiden benachbarten Saisonanker. Die saisonale Lernrate richtet sich nach der eigenen echten Evidenz der jeweiligen Jahreszeit und bleibt auch nach vielen Jahren reaktionsfähig.
+Das allgemeine Profil ist der ganzjährige persönliche Grundwert. Winter, Frühling, Sommer und Herbst besitzen daneben jeweils einen eigenen Offset. Normales thermisches Feedback verändert nach der Initialisierung nur die gerade beteiligte Jahreszeit; während der rund 30-tägigen Überblendung um den meteorologischen Saisonwechsel lernen ausschließlich die beiden benachbarten Saisonanker. Die saisonale Lernrate richtet sich nach der eigenen echten Evidenz der jeweiligen Jahreszeit und bleibt auch nach vielen Jahren reaktionsfähig.
 
 Beim allerersten Übergang in eine noch unbekannte Jahreszeit übernimmt sie einmalig nur den Offset der direkten Vorgängersaison als Startwert. Wird die komplette 30-Tage-Übergangszone verpasst, wird dieses einmalige Seeding beim ersten späteren Zugriff in der neuen Saison nachgeholt. Evidenz, Statistik und Lernhistorie werden nie mitkopiert; in späteren Jahren verwendet die Saison ausschließlich ihren eigenen zuletzt gelernten Zustand. Wurden mehrere ganze Jahreszeiten übersprungen und ist die direkte Vorgängersaison selbst unbekannt, wird keine künstliche Seed-Kette erzeugt: Nur die aktuell erreichte Saison startet dann neutral bei 0 relativ zu Main. Erst wenn alle vier Jahreszeiten ausreichend eigene Evidenz besitzen und ihre Offsets denselben gemeinsamen positiven oder negativen Sockel zeigen, wird dieser gemeinsame Anteil verlustfrei in den ganzjährigen Grundwert verschoben. `Main + Saisonoffset` bleibt dadurch für jede Jahreszeit unverändert. Bestehende v0.3.0-Profile werden beim Laden automatisch in dieses Modell migriert; synthetische Saisonwerte ohne eigene Evidenz werden dabei nicht als echte Saisonerfahrung übernommen.
 
@@ -64,7 +64,7 @@ Der interne thermische Rechenwert bleibt Teil der Berechnung, wird aber nicht al
 
 ## Wandtablet / Shared-Konto
 
-Ein als Shared-Konto freigegebener Home-Assistant-Benutzer wählt vor der Beratung ein vorhandenes Personenprofil aus.
+Ein als Shared-Konto freigegebener Home-Assistant-Benutzer wählt vor der Beratung ein vorhandenes Personenprofil aus. Konten, die aktuell selbst als Shared-/Steuerkonto konfiguriert sind, werden dabei nicht als beratbare Person angeboten; ihr eventuell früher gelerntes persönliches Profil bleibt nur konserviert und erscheint automatisch wieder, wenn der Shared-Status später entfernt wird.
 
 - Die Auswahl wird lokal im Browser gespeichert.
 - Details werden nur für das ausgewählte Profil geöffnet.
@@ -93,19 +93,25 @@ title: Jacke heute
 
 Bei vollständig YAML-verwaltetem Lovelace muss die Ressource manuell eingetragen werden:
 
-`/jackenberater/frontend/jackenberater-card.js?v=0.3.1&ui=2`
+`/jackenberater/frontend/jackenberater-card.js?v=0.3.2&ui=13`
+
+Nach einem JackenBerater-Update sollte die Lovelace-Seite einmal vollständig neu geladen werden. Bereits registrierte Browser-Custom-Elements können innerhalb derselben JavaScript-Session technisch nicht durch eine neu geladene Klasse ersetzt werden; der versionsgebundene Ressourcenpfad verhindert dabei normale Cache-Probleme.
 
 Die beiden aufklappbaren Bereiche der Karte sind gegenseitig exklusiv: Entweder sind die Empfehlungsdetails oder das Infofeld geöffnet, nicht beide gleichzeitig.
 
 ## Arbeitskontext
 
-Wenn eine Arbeitswetterquelle eingerichtet ist, kann JackenBerater für geplante Arbeitszeiten das Wetter am Arbeitsort berücksichtigen. Das aktuelle Arbeitswetter wird während der tatsächlichen Arbeitszeit verwendet. Außerhalb davon bleibt Zuhause die aktuelle Wetterquelle.
+Wenn eine Arbeitswetterquelle eingerichtet ist, kann JackenBerater für geplante Arbeitszeiten das Wetter am Arbeitsort berücksichtigen. Das aktuelle Arbeitswetter wird während der tatsächlichen Arbeitszeit verwendet. Außerhalb davon bleibt Zuhause die aktuelle Wetterquelle. Für die Planung gilt weiterhin der ±30-Minuten-Puffer; nach dem echten Schichtende wird dieser ausdrücklich als Puffer und nicht als laufende Arbeitszeit bezeichnet. Bei stündlichen Forecasts darf ein ausreichend frischer Forecastanker ein kurzes Restfenster bis zum Pufferende abdecken, damit zum Feierabend nicht fälschlich „Arbeitsforecast fehlt“ erscheint.
+
+State-Änderungen des Kontext-/Terminkalenders oder Abwesenheitskalenders invalidieren den Arbeitskontext-Cache unmittelbar. Home Assistant garantiert allerdings nicht bei jeder Kalender-CRUD-Änderung sofort einen Entity-State-Change. Deshalb ist der JackenBerater-eigene Cache zusätzlich auf nur **1 Minute** begrenzt; providerseitige Aktualisierungsintervalle von Home Assistant bzw. der jeweiligen Kalenderintegration können unabhängig davon weiterhin gelten.
 
 Die Arbeitszone dient nur als Name für die Anzeige. Sie wird nicht für Standorttracking oder Anwesenheit verwendet.
 
 ## Daten
 
 JackenBerater speichert nur kompakte Profil- und Sessiondaten in Home Assistant. Es wird keine langfristige Wetterhistorie und kein Bewegungsprofil angelegt.
+
+Der Diagnose-Sensor ist standardmäßig deaktiviert und vom Recorder ausgeschlossen. Wird er von einem Administrator bewusst aktiviert, enthalten seine Attribute das vollständige persönliche Lernmodell des jeweiligen Profils. Home-Assistant-Berechtigungen gelten für die Entity als Ganzes und nicht für einzelne Attribute; Zugriff auf diesen Diagnose-Sensor sollte deshalb nur vertrauenswürdigen Benutzern gewährt werden.
 
 ## Hinweis
 

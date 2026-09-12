@@ -146,9 +146,11 @@ def test_young_profile_keeps_clear_hot_advice_reachable():
 
 def test_mature_confident_profile_can_hide_clear_hot_advice():
     model = PersonalModel.from_answers(3, 3, 3, 3)
+    observed = point(0, 28, condition="sunny").dt
     for _ in range(30):
         learning.apply_feedback(
-            model, rating=const.FEEDBACK_PERFECT, jacket=const.JACKET_NONE
+            model, rating=const.FEEDBACK_PERFECT, jacket=const.JACKET_NONE,
+            observed_at=observed,
         )
     rec = engine.build_recommendation(
         point(0, 28, condition="sunny"),
@@ -1205,7 +1207,9 @@ def test_v031_season_overlap_blends_one_month_smoothly_without_extra_anchor():
     after = learning._season_weights(datetime(2026, 3, 10, 12, tzinfo=timezone.utc))
     assert before["winter"] > before["spring"]
     assert after["spring"] > after["winter"]
-    assert learning._season_weights(datetime(2026, 2, 14, 12, tzinfo=timezone.utc)) == {"winter": 1.0}
+    edge = learning._season_weights(datetime(2026, 2, 14, 12, tzinfo=timezone.utc))
+    assert set(edge) == {"winter", "spring"}
+    assert edge["winter"] > edge["spring"]
     assert learning._season_weights(datetime(2026, 3, 16, 12, tzinfo=timezone.utc)) == {"spring": 1.0}
 
 
@@ -1752,3 +1756,140 @@ def test_v031_late_seed_can_change_first_recommendation_before_any_feedback():
 
     assert model.winter_bias_c == pytest.approx(1.0)
     assert with_late_seed.jacket_now == const.JACKET_LIGHT
+
+
+def test_seeded_active_season_without_own_evidence_cannot_hide_mature_card():
+    model = PersonalModel.from_answers(3, 3, 3, 3)
+    model.total_feedback = 100
+    model.general_stat = learning.RunningStat(samples=100, weight_sum=100.0)
+    model.light_stat = learning.RunningStat(samples=100, weight_sum=100.0)
+    model.warm_stat = learning.RunningStat(samples=100, weight_sum=100.0)
+    model.winter_stat = learning.RunningStat(samples=100, weight_sum=100.0)
+    model.autumn_season_initialized = True
+    model.autumn_bias_c = 1.0
+    model.autumn_season_stat = learning.RunningStat(samples=20, weight_sum=20.0)
+    model.winter_season_initialized = True
+    model.winter_seeded_from = "autumn"
+    model.winter_bias_c = 1.0
+    model.winter_season_stat = learning.RunningStat()
+
+    now = datetime(2026, 1, 10, 12, tzinfo=timezone.utc)
+    current = WeatherPoint(dt=now, temperature_c=25.0, wind_kmh=0.0, condition="cloudy")
+    forecast = [
+        WeatherPoint(dt=now + timedelta(hours=hour), temperature_c=25.0, wind_kmh=0.0, condition="cloudy")
+        for hour in range(1, 10)
+    ]
+    rec = engine.build_recommendation(
+        current, forecast, model,
+        indoor_temperature_c=21.0,
+        base_horizon_hours=9,
+        max_horizon_hours=9,
+    )
+    assert rec.confidence < 0.65
+    assert rec.display_mode != const.DISPLAY_HIDDEN
+
+
+def test_wind_penalty_is_monotonic_through_low_wind_transition():
+    assert engine._wind_penalty(11.02, 4.64) >= engine._wind_penalty(11.02, 4.17)
+    for temp_steps in range(-60, 40):
+        temp = temp_steps * 0.5
+        previous = engine._wind_penalty(temp, 0.0)
+        for wind_steps in range(1, 401):
+            wind = wind_steps * 0.25
+            current = engine._wind_penalty(temp, wind)
+            assert current + 1e-12 >= previous, (temp, wind, previous, current)
+            previous = current
+
+
+def test_blocked_warm_threshold_does_not_accumulate_hidden_evidence():
+    model = PersonalModel.from_answers(3, 3, 3, 3)
+    model.general_stat = learning.RunningStat(samples=20, weight_sum=20.0)
+    model.light_threshold_delta_c = -3.0  # effective light threshold = 15.0
+    model.warm_threshold_delta_c = 0.5    # effective warm threshold = 12.5, exactly spacing cap
+    before_delta = model.warm_threshold_delta_c
+    before_weight = model.warm_stat.weight_sum
+    learning.apply_feedback(
+        model,
+        rating=const.FEEDBACK_TOO_COLD,
+        jacket=const.JACKET_LIGHT,
+        apply_general=False,
+        observed_at=datetime(2026, 1, 10, 12, tzinfo=timezone.utc),
+    )
+    assert model.warm_threshold_delta_c == before_delta
+    assert model.warm_stat.weight_sum == before_weight
+
+
+def test_season_overlap_contains_exactly_thirty_active_calendar_dates():
+    start = datetime(2026, 2, 1, 12, tzinfo=timezone.utc)
+    mixed = []
+    for offset in range(60):
+        when = start + timedelta(days=offset)
+        if len(learning._season_weights(when)) == 2:
+            mixed.append(when.date())
+    assert len(mixed) == 30
+    assert mixed[0].isoformat() == "2026-02-14"
+    assert mixed[-1].isoformat() == "2026-03-15"
+
+
+
+def test_zero_evidence_season_with_material_overlap_weight_prevents_hidden_card():
+    model = PersonalModel.from_answers(3, 3, 3, 3)
+    model.total_feedback = 100
+    model.general_stat = learning.RunningStat(samples=100, weight_sum=100.0)
+    model.light_stat = learning.RunningStat(samples=100, weight_sum=100.0)
+    model.warm_stat = learning.RunningStat(samples=100, weight_sum=100.0)
+    model.winter_stat = learning.RunningStat(samples=100, weight_sum=100.0)
+    model.winter_season_initialized = True
+    model.winter_season_stat = learning.RunningStat(samples=30, weight_sum=30.0)
+    model.spring_season_initialized = True
+    model.spring_seeded_from = "winter"
+    model.spring_season_stat = learning.RunningStat()
+
+    now = datetime(2026, 3, 1, 12, tzinfo=timezone.utc)
+    current = WeatherPoint(dt=now, temperature_c=25.0, wind_kmh=0.0, condition="cloudy")
+    forecast = [
+        WeatherPoint(dt=now + timedelta(hours=hour), temperature_c=25.0, wind_kmh=0.0, condition="cloudy")
+        for hour in range(1, 10)
+    ]
+    rec = engine.build_recommendation(
+        current, forecast, model,
+        indoor_temperature_c=21.0,
+        base_horizon_hours=9,
+        max_horizon_hours=9,
+    )
+    assert rec.confidence >= 0.65  # weighted confidence alone would permit hiding
+    assert learning._season_weights(now)["spring"] >= 0.10
+    assert model.spring_season_stat.weight_sum == 0.0
+    assert rec.display_mode != const.DISPLAY_HIDDEN
+
+
+def test_loading_legacy_hidden_threshold_excess_canonicalizes_without_effective_change():
+    source = PersonalModel.from_answers(3, 3, 3, 3)
+    raw = source.to_dict()
+    raw["light_threshold_delta_c"] = -3.0
+    raw["warm_threshold_delta_c"] = 4.0
+    raw["warm_stat"] = {"samples": 80, "weight_sum": 80.0, "mean": 0.0, "m2": 0.0}
+    raw["general_stat"] = {"samples": 20, "weight_sum": 20.0, "mean": 0.0, "m2": 0.0}
+
+    # Legacy effective boundaries before canonicalization.
+    legacy_light = const.BASE_LIGHT_THRESHOLD_C - 3.0
+    legacy_warm = min(const.BASE_WARM_THRESHOLD_C + 4.0, legacy_light - 2.5)
+
+    model = PersonalModel.from_dict(raw)
+    light, warm, _winter = learning._model_thresholds(model)
+    assert light == pytest.approx(legacy_light)
+    assert warm == pytest.approx(legacy_warm)
+    assert model.warm_threshold_delta_c == pytest.approx(legacy_warm - const.BASE_WARM_THRESHOLD_C)
+    assert model.warm_stat.weight_sum == 80.0
+
+    before_weight = model.warm_stat.weight_sum
+    before_warm = warm
+    learned = learning.apply_feedback(
+        model,
+        rating=const.FEEDBACK_TOO_COLD,
+        jacket=const.JACKET_LIGHT,
+        apply_general=False,
+    )
+    assert learning._model_thresholds(model)[1] == pytest.approx(before_warm)
+    assert model.warm_stat.weight_sum == before_weight
+    assert learned is False

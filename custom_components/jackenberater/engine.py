@@ -234,6 +234,7 @@ def build_recommendation(
     later_at: datetime | None = None
     later_point: WeatherPoint | None = None
     later_result: ThermalResult | None = None
+    later_change_confirmed = True
 
     # Clothing has to survive the relevant period. Prefer the warmest class that
     # is expected later. If conditions become milder, report a lighter class only
@@ -271,6 +272,7 @@ def build_recommendation(
                         later_at = point.dt
                         later_point = point
                         later_result = result
+                        later_change_confirmed = len(suffix) >= 2
                         found = True
                         break
                 if found:
@@ -314,6 +316,7 @@ def build_recommendation(
                 later_at = work_target_point.dt
                 later_point = work_target_point
                 later_result = work_target_result
+                later_change_confirmed = True
         latest_work = max(
             (p.dt for p in work_points), default=None, key=instant_key
         )
@@ -342,6 +345,7 @@ def build_recommendation(
         later_point = None
         later_result = None
         later_context = "home"
+        later_change_confirmed = True
 
     rain_status = _rain_status(current, horizon_points) if rain_advice else RAIN_NONE
     if rain_advice and work_points:
@@ -366,7 +370,12 @@ def build_recommendation(
     ) <= 1.5
     unusual_weather = any(result.wind_penalty_c >= 1.5 for result in feedback_results)
 
-    decision_confidence = model.decision_confidence(jacket_now, jacket_later)
+    decision_confidence = model.decision_confidence(
+        jacket_now,
+        jacket_later,
+        observed_at=current.dt,
+        later_at=later_point.dt if later_point is not None else None,
+    )
     # Coverage is measured against the horizon we intended to evaluate, not
     # merely against the last cached point that happened to be available.
     # Otherwise one stale +1 h point would incorrectly report "complete".
@@ -386,6 +395,15 @@ def build_recommendation(
             and decision_confidence >= 0.65
             and forecast_coverage_complete
             and transient is None
+            # A seeded/young seasonal anchor with a material share of the
+            # recommendation must remain reachable for deliberate feedback.
+            # Weighted confidence alone can otherwise let a mature neighbouring
+            # season hide a 0-evidence anchor during the overlap.
+            and not model.has_low_evidence_season_anchor(current.dt)
+            and not (
+                later_point is not None
+                and model.has_low_evidence_season_anchor(later_point.dt)
+            )
         ),
     )
 
@@ -426,6 +444,7 @@ def build_recommendation(
         current_gust_kmh=round(current.gust_kmh, 1) if current.gust_kmh is not None else None,
         current_condition=current.condition,
         transition_penalty_c=current_result.transition_penalty_c,
+        observed_at=current.dt,
         current_wind_penalty_c=current_result.wind_penalty_c,
         later_temperature_c=(
             round(later_point.temperature_c, 1) if later_point is not None else None
@@ -463,6 +482,7 @@ def build_recommendation(
         transient_burden=(round(transient_burden, 2) if transient_burden is not None else None),
         instant_jacket=instant_jacket,
         seasonal_adjustment_c=current_result.seasonal_adjustment_c,
+        later_change_confirmed=later_change_confirmed,
     )
 
 
@@ -687,29 +707,42 @@ def _smoothstep(edge0: float, edge1: float, value: float) -> float:
 
 
 def _cold_wind_penalty(temp_c: float, wind_kmh: float) -> float:
-    """Cold-range wind penalty with a smooth low-speed transition.
+    """Cold-range wind penalty with a monotonic low-speed transition.
 
-    Environment and Climate Change Canada documents a separate low-wind
-    equation below roughly 5 km/h. Blending the low- and regular-speed forms
-    around that boundary avoids a sensor-noise step at 4.8/5 km/h.
+    The low-wind and regular ECCC-inspired equations do not meet with identical
+    slopes around 5 km/h. A direct weighted blend can therefore dip slightly as
+    wind increases. Interpolate between fixed monotonic endpoints instead, then
+    continue with a non-decreasing regular curve. More wind can never reduce the
+    penalty.
     """
     if wind_kmh <= 0.0:
         return 0.0
 
-    low_wind_chill = temp_c + ((-1.59 + 0.1345 * temp_c) / 5.0) * wind_kmh
-    low_penalty = max(0.0, temp_c - low_wind_chill)
+    def low_penalty(speed: float) -> float:
+        low_wind_chill = temp_c + ((-1.59 + 0.1345 * temp_c) / 5.0) * speed
+        return max(0.0, temp_c - low_wind_chill)
 
-    v16 = max(0.1, wind_kmh) ** 0.16
-    regular_wind_chill = (
-        13.12
-        + 0.6215 * temp_c
-        - 11.37 * v16
-        + 0.3965 * temp_c * v16
-    )
-    regular_penalty = max(0.0, temp_c - regular_wind_chill)
+    def regular_penalty(speed: float) -> float:
+        v16 = max(0.1, speed) ** 0.16
+        regular_wind_chill = (
+            13.12
+            + 0.6215 * temp_c
+            - 11.37 * v16
+            + 0.3965 * temp_c * v16
+        )
+        return max(0.0, temp_c - regular_wind_chill)
 
-    speed_blend = _smoothstep(4.0, 6.0, wind_kmh)
-    return min(8.0, low_penalty * (1.0 - speed_blend) + regular_penalty * speed_blend)
+    if wind_kmh <= 4.0:
+        return min(8.0, low_penalty(wind_kmh))
+
+    low_anchor = low_penalty(4.0)
+    regular_anchor = regular_penalty(6.0)
+    transition_target = max(low_anchor, regular_anchor)
+    if wind_kmh < 6.0:
+        blend = _smoothstep(4.0, 6.0, wind_kmh)
+        return min(8.0, low_anchor + (transition_target - low_anchor) * blend)
+
+    return min(8.0, max(transition_target, regular_penalty(wind_kmh)))
 
 
 def _wind_penalty(temp_c: float, wind_kmh: float) -> float:
