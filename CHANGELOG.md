@@ -1,5 +1,31 @@
 # Changelog
 
+## v0.4.1
+
+### Feuchte, Taupunkt und Strahlungspotenzial
+
+- Warm-feuchte Bedingungen werden nicht mehr nur über relative Luftfeuchtigkeit bewertet: JackenBerater leitet intern den **Taupunkt** aus Temperatur + rF ab und nutzt ihn als Feuchtegehalts-/Schwülesignal.
+- Die warme Feuchtewirkung blendet temperaturabhängig ein; hohe relative Feuchte in kalter Luft wird dadurch nicht mit schwüler Wärme verwechselt. Der kleine kalt-feuchte Komforteffekt bleibt separat und stark begrenzt.
+- Neues getrenntes Lernmodell für `humidity_warm_bias_c` / `humidity_warm_stat` und `humidity_cold_bias_c` / `humidity_cold_stat`. Da hierfür kein Setup-Prior existiert, dürfen Feuchte-/Solar-Spezialkanäle bereits ab der ersten klar relevanten Bewertung vorsichtig eigene Evidenz sammeln; trockene Wetterlagen bleiben davon unberührt.
+- Klare Schwüle-/Strahlungsursachen werden vor dem bisherigen `keine Jacke + zu warm`-No-op bzw. dem direkten Pullover-Too-Warm-Pfad attribuiert. Dadurch kann ein schwüler Tag die Feuchteempfindlichkeit lernen, ohne automatisch die globale Pullovergrenze zu verschieben.
+- Sonnige Wetterlagen werden als **konservatives Strahlungspotenzial** modelliert, nicht als garantierte direkte Sonne. Vorhandene Bewölkungsdaten dämpfen das Potenzial.
+- `partlycloudy` bleibt ohne zusätzliche sichere Tageslicht-/Expositionsinformation thermisch neutral. Damit gibt es weder einen Nacht-Sonnenbonus noch einen harten Outfit-Sprung an einer einzelnen Bewölkungsgrenze.
+- Neues langsames Solarlernen über `solar_bias_c` / `solar_stat`; es wird nur bei einem starken `sunny`-Signal aktiviert. Persönliche Solarwirkung kann dadurch steigen oder sinken, direkte Sonne wird aber nie behauptet und ein Sonnenzustand kann durch Lernen nicht zu einem Kühlungseffekt werden.
+- Sind mehrere Wetter-Spezialfaktoren gleichzeitig aktiv, teilen sie sich die Lernstärke. Ein einzelnes Feedback kann damit nicht Schwüle und Sonne jeweils mit voller Stärke attribuieren.
+- Die Karte zeigt verfügbare relative Luftfeuchte zusammen mit der aktuellen Temperatur; Begründungen unterscheiden schwül-warme und kalt-feuchte Wirkung.
+
+### Session-, Storage- und Release-Hardening
+
+- Feedback-Learning-Contract friert neben den Feuchte-/Solar-Gates jetzt auch die quantisierte tatsächliche Spezialisten-Relevanz und deren geteilte Lernstärke ein. Ändert sich diese Semantik relevant, wird ein unbeantworteter Snapshot ersetzt, behält aber dieselbe `opportunity_count`; Transient-Feedback trainiert diese Wetterkanäle nicht zusätzlich.
+- `PHASE_LATER`-Feedback mit `boundary_only=True` trainiert Feuchte-/Solar-Spezialisten nicht mehr. Eine Bewertung des späteren Jackenwechsels verändert damit ausschließlich die dafür bestimmte Jackengrenze und deutet die Bewertung nicht zusätzlich als Aussage über Schwüle oder Strahlung um.
+- Materiell aktives Feuchte-/Solarwetter bleibt bei noch nicht eingelerntem Spezialisten mindestens **kompakt sichtbar**, auch wenn ein reifes Profil die stabile Keine-Jacke-Situation sonst vollständig ausblenden würde. Nach mindestens drei eigenen Evidenzpunkten des betroffenen Spezialisten darf die normale Hide-Logik wieder greifen.
+- Der sichtbare Lernfortschritt kann beim Upgrade von v0.4.0 auf v0.4.1 leicht sinken, weil drei neue lernbare Spezialkanäle in die Breitenmetrik aufgenommen wurden. Dabei wird **keine bestehende Lernerfahrung gelöscht oder zurückgesetzt**; das Modell besitzt lediglich neue Bereiche, die zunächst noch keine eigene Evidenz haben.
+- Temporäres Feedback-Session-Schema auf **v16** erhöht, damit offene Sessions keine ältere Feuchte-/Solar-Lernstärke weiterverwenden.
+- Beschädigte persistierte Sessionlisten werden elementweise gehärtet: Nicht-Dict-Einträge wie `null`, Zahlen oder Strings werden verworfen statt später bei `session.get(...)` zu crashen.
+- Frontend-Cache auf `ui=18` erhöht.
+- Reproduzierbarer HA-Runtime-Current-Pin auf `pytest-homeassistant-custom-component==0.13.365` aktualisiert; Minimum- und unpinned-Latest-Jobs bleiben erhalten.
+- Lokaler HA-unabhängiger Prüfstand für v0.4.1: **388 / 388 Python-Tests** plus Frontend-Session-Vertrag, Python-Compilecheck, JS-Syntaxcheck sowie JSON-/YAML-Validierung.
+
 ## v0.4.0
 
 ### Pullover / Midlayer
@@ -38,7 +64,7 @@
 - Ist der Nutzer nachweislich im aktiven Arbeitsfenster und aktuelle Work-Weather-Daten liegen vor, setzt der API-Fallback nun neben `source=work`/`work_context=true` auch `stay_context=work`, selbst wenn zukünftige Work-Forecastpunkte fehlen.
 - Storage-Hardening: nicht-endliche Setup-Antworten (`inf`) fallen ohne `OverflowError` auf den neutralen Wert zurück; beschädigte `*_seeded_from`-Werte werden nur noch als Saisonname übernommen, wenn sie tatsächlich Strings sind.
 - Lokaler HA-unabhängiger Prüfstand für diesen v0.4.0-Stand: **362 / 362 Python-Tests** plus Frontend-Vertragstest.
-- Reproduzierbarer `ha-runtime-smoke`-CI-Pin auf den aktuell veröffentlichten Testhelper `pytest-homeassistant-custom-component==0.13.364` gesetzt; der separate Minimum-HA-Job bleibt unverändert auf seinem 2026.6-Vertrag und `ha-runtime-latest` bleibt unpinned.
+- Reproduzierbarer `ha-runtime-smoke`-CI-Pin für diesen damaligen v0.4.0-Prüfstand auf `pytest-homeassistant-custom-component==0.13.364` gesetzt; der separate Minimum-HA-Job bleibt unverändert auf seinem 2026.6-Vertrag und `ha-runtime-latest` bleibt unpinned.
 - Frontend-Cache auf `ui=17` erhöht.
 
 ## v0.3.2
@@ -86,8 +112,8 @@
 - Ein erstmals gesehener Revision-Token bei noch leerem Kartenstand wird nur als gesehen, nicht als angewendet markiert; erst ein erfolgreicher Full-Refresh setzt die applied revision.
 - Teil-Abwesenheits-Wiedereinstieg gehärtet: echte Arbeitszeit hat bei überlappenden Split-Window-Puffern Vorrang, sodass exakt am Wiederbeginn nicht fälschlich „Rund um deine Arbeit“ erscheint.
 - Beschädigte/unlesbare `expires_at`-Werte machen unbeantwortete Feedbacksessions nicht mehr unbefristet: Cleanup verwirft sie und `async_feedback()` lehnt verbliebene/injizierte Reste defensiv ab.
-- Vorherige Frontend-Hardening-Runde erhöhte die Cache-Revision auf `ui=7`; aktueller Stand ist `ui=17`.
-- Frontend-Cachevertrag korrigiert: In der vorherigen Hardening-Runde verwendeten Runtime und Dokumentation beide `ui=6`; die damalige Runde stand auf `ui=7`; aktueller Stand ist `ui=17`; der Package-Test liest die Runtime-Konstante aus und vergleicht sie direkt mit der README statt widersprüchliche Zahlen separat festzuschreiben.
+- Vorherige Frontend-Hardening-Runde erhöhte die Cache-Revision auf `ui=7`; der v0.4.0-Stand war `ui=17`.
+- Frontend-Cachevertrag korrigiert: In der vorherigen Hardening-Runde verwendeten Runtime und Dokumentation beide `ui=6`; die damalige Runde stand auf `ui=7`; der v0.4.0-Stand war `ui=17`; der Package-Test liest die Runtime-Konstante aus und vergleicht sie direkt mit der README statt widersprüchliche Zahlen separat festzuschreiben.
 - Frontend-Lifecycle gehärtet: wiederholtes `setConfig()` räumt Revision-Intervalle und Pending-Refresh-Timeouts vor dem Reset auf und startet bei verbundener Karte genau einen neuen Revision-Poll; beim Entfernen bleiben keine Timer verwaist.
 - WebSocket-User-Sync besitzt denselben Unload/Reload-Schutz wie der periodische Sync und verwirft sein Ergebnis, wenn während `async_get_users()` der Runtime-Manager ersetzt wurde.
 - Kalender- und Session-Zeitparser fangen unmögliche Datumswerte (`ValueError`/`TypeError`) ab, statt Provider-/Storage-Randfälle bis zum gesamten Request bzw. Manager-Load durchschlagen zu lassen.
@@ -99,7 +125,7 @@
 - Zweitgeräte-Synchronisierung verbessert: Profiländerungen wie Feedback, Pause/Resume, Undo oder Reset erhöhen einen leichten Runtime-Revision-Token. Bereits geöffnete Karten prüfen nur diesen Token kurzzyklisch und laden die vollständige Vorschau erst bei echter Änderung neu.
 - Forecast-Provider-Härtung: unmögliche Datumswerte werden verworfen statt `ValueError` auszulösen; ein nichtleerer Forecast, dessen sämtliche Zeilen ungültig sind, gilt als fehlgeschlagener Fetch und nutzt den kurzen Retry-Pfad.
 - Periodischer User-Verzeichnis-Sync ist gegen Unload/Reload-Races abgesichert: ein bereits wartender alter Callback darf nach Austausch des Runtime-Managers keine Profiländerung oder delayed save mehr auslösen.
-- Frühere Frontend-Hardening-Runde erhöhte die Cache-Revision auf `ui=6`; aktuelle Revision ist `ui=17`.
+- Frühere Frontend-Hardening-Runde erhöhte die Cache-Revision auf `ui=6`; der v0.4.0-Stand war `ui=17`.
 - Session-Reuse besitzt jetzt eine Lern-/Feedback-Policy-Signatur. Innerhalb der 10-Minuten-Deduplizierung werden Sessions nur wiederverwendet, wenn Lernstatus, Recommendation-Confidence, Threshold-/Unusual-Policy und der saisonal relevante Beobachtungstag identisch geblieben sind; reine Cadence-Zähler sind keine Entscheidungsidentität.
 - Freiwilliges Sofort-Feedback kann einen noch zukünftigen Jackenwechsel nicht mehr lernen: vor `later_at` werden `Perfekt`, `later` und `all` serverseitig auf den tatsächlich erlebten Startzustand begrenzt.
 - Forecast-Abrufe unterscheiden jetzt technisch fehlgeschlagene `weather.get_forecasts`-Calls von erfolgreich leeren Forecasts. Fehlgeschlagene Quellen werden nicht als frischer leerer Forecast konsumiert und nach kurzem Backoff erneut versucht.
@@ -107,7 +133,7 @@
 - „Lernen pausieren“ deaktiviert offene Feedbackaufforderungen; Feedback wird während der Pause serverseitig mit `learning_paused` abgewiesen und nicht als erfolgreich übernommene Bewertung markiert.
 - Der exakte Engine-Beobachtungszeitpunkt wird als `Recommendation.observed_at` bis in den Start-Lernkontext übernommen; ein zweites `now()` kann Feedback nicht mehr über Mitternacht in einen anderen Saisonmix verschieben.
 - Diagnose-Simulationen werden beim Entfernen/Deaktivieren der Diagnose-Entity explizit aus dem Runtime-State entfernt.
-- Lovelace reagiert nur noch auf tatsächlich relevante Wetter-/Kalender-/Temperatur-Stateänderungen statt auf beliebige HA-Stateupdates; damalige Frontend-Cache-Revision `ui=6`; aktueller Stand `ui=17`.
+- Lovelace reagiert nur noch auf tatsächlich relevante Wetter-/Kalender-/Temperatur-Stateänderungen statt auf beliebige HA-Stateupdates; damalige Frontend-Cache-Revision `ui=6`; der v0.4.0-Stand war `ui=17`.
 - Saisonbewusste Empfehlungs-Confidence wird für die Feedback-Entscheidung unverändert wiederverwendet; eine neue Saison kann dadurch nicht mehr auf der Karte als unsicher erscheinen, während das Session-System sie intern fälschlich als nahezu vollständig gelernt behandelt.
 - Während der Saisonüberblendung verhindert jeder saisonale Anker mit mindestens 10 % Einfluss und weniger als 1,0 eigener Real-Evidenz vollständiges `hidden`; reife Nachbarsaisons können eine neue Saison dadurch nicht mehr unsichtbar überstimmen.
 - Persistierte alte Threshold-Rohwerte werden beim Laden auf ihre tatsächlich wirksamen Grenzen canonicalisiert. Verdeckte v0.3.1-Überhänge bleiben damit wirkungsgleich, können aber keine neue Scheinevidenz mehr erzeugen. Threshold-Lernen zählt zusätzlich nur noch Bewegungen, die die effektiv verwendete Grenze wirklich verändern.
@@ -116,7 +142,7 @@
 - Kalendercache besitzt einen Generation-Counter; ein bereits laufender älterer Kalenderrequest darf einen zwischenzeitlich invalidierten Cache nicht wieder mit veralteten Daten befüllen. State-Events invalidieren weiterhin sofort; der JackenBerater-eigene TTL wurde zusätzlich von 15 Minuten auf 1 Minute verkürzt, damit fehlende CRUD-State-Signale keine lange eigene Stale-Phase verursachen.
 - Session-Ablaufbereinigung wird auch im Early-Return-Reuse-Pfad von `async_open_session()` persistent vorgemerkt.
 - Widersprüchliche Forecast-Dubletten werden pro UTC-Instant deterministisch auf den vollständigsten Datenpunkt reduziert; bei gleicher Vollständigkeit gewinnt der spätere Providereintrag.
-- Browser-Dokumentation weist auf vollständiges Neuladen nach Frontend-Updates hin; die Frontend-Cache-Revision wurde zunächst auf `ui=4` erhöht; die vorherige Hardening-Runde verwendete `ui=6`, die aktuelle `ui=17`.
+- Browser-Dokumentation weist auf vollständiges Neuladen nach Frontend-Updates hin; die Frontend-Cache-Revision wurde zunächst auf `ui=4` erhöht; die vorherige Hardening-Runde verwendete `ui=6`, der v0.4.0-Stand `ui=17`.
 - Kommentar/Dokumentation der Saisonüberblendung präzisiert: 30 aktive Kalendertage entsprechen dem halboffenen Bereich von 15 Tagen vor bis 14 Tagen nach dem meteorologischen Wechsel.
 - Arbeitsforecast-Coverage am Schicht-/Pufferende korrigiert: kurze Restfenster dürfen von einem ausreichend frischen Forecastanker abgedeckt werden; vollständig vergangene Fenster sind `not_applicable` statt `missing`.
 - Echte Schichtgrenzen bleiben während des ±30-Minuten-Planungspuffers erhalten; das Frontend unterscheidet explizit zwischen tatsächlicher Arbeitszeit und Puffer.
@@ -143,7 +169,7 @@
 - Mehrere vollständig übersprungene Saisons sind jetzt bewusst definiert: Ist die direkte Vorgängersaison unbekannt, wird **keine** rückwirkende Seed-Kette erfunden. Die aktuell erreichte Saison startet neutral und lernt ab dort selbst.
 - Der alte undokumentierte Lovelace-`profile_id`-Shortcut wurde aus der Karte entfernt. Profilwahl erfolgt ausschließlich über den serverseitig authentifizierten Eigenprofil-/Shared-/Admin-Pfad.
 - README dokumentiert die aktuelle HACS-Installation ausdrücklich als Custom Repository und beschreibt Shared-Rechte präzise für nicht-administrative Shared-Konten.
-- CI-Härtung: Runtime-Smoke zusätzlich gegen die deklarierte Mindestversion Home Assistant 2026.6.0 (`pytest-homeassistant-custom-component==0.13.336`) und gegen den jeweils neuesten verfügbaren HA-Teststack; der reproduzierbare aktuelle Job verwendet den aktuell veröffentlichten Testhelper `0.13.364`.
+- CI-Härtung: Runtime-Smoke zusätzlich gegen die deklarierte Mindestversion Home Assistant 2026.6.0 (`pytest-homeassistant-custom-component==0.13.336`) und gegen den jeweils neuesten verfügbaren HA-Teststack; der damals reproduzierbare Current-Job verwendete `0.13.364` (ab v0.4.1: `0.13.365`).
 - Saisonmodell auf Version 4 umgestellt: Winter, Frühling, Sommer und Herbst sind echte eigenständige Offsets zum ganzjährigen `general_offset_c`; normales saisonales Feedback verschiebt Main nicht mehr direkt und rezentriert keine unbeteiligten Jahreszeiten.
 - Saisonlernen verwendet die jeweils eigene reale Saison-Evidenz für die Lernrate. Hohe Evidenz verfeinert die Schritte, friert das Modell aber nie vollständig ein; Saisonoffsets besitzen jetzt einen Bereich von **-4,0 bis +4,0 °C**.
 - Die bestehende 30-Tage-Smoothstep-Überblendung bleibt erhalten. Feedback in Übergängen trainiert ausschließlich die beiden Nachbarsaisons, verteilt reale Evidenz mit Summe 1,0 und normalisiert den Parameter-Schritt so, dass ein 50/50-Übergang den effektiven Lernschritt nicht halbiert.

@@ -43,7 +43,10 @@ const JB_I18N = {
     feedbackCount: "Bewertungen",
     windReason: "Wind kühlt die Situation zusätzlich ab.",
     transitionReason: "Der Wechsel von drinnen nach draußen wirkt in den ersten Minuten kühler.",
-    sunReason: "Sonne mildert das Kältegefühl etwas.",
+    sunReason: "Die Wetterlage bietet erhöhtes Sonnen-/Strahlungspotenzial; der Berater rechnet damit bewusst nur vorsichtig.",
+    humidWarmReason: "Hoher Taupunkt bzw. schwüle Luft lässt warme Bedingungen belastender wirken.",
+    humidColdReason: "Sehr feuchte Kaltluft wird vorsichtig als etwas kühler bewertet.",
+    humidityShort: "rF",
     wetReason: "Nasses Wetter erhöht den Wärmeverlust.",
     personalReason: "Dein bisheriges Wärmeprofil verschiebt die Empfehlung.",
     forecastReason: "Im betrachteten Zeitraum ändert sich die sinnvolle Jackenstufe.",
@@ -155,7 +158,10 @@ const JB_I18N = {
     feedbackCount: "Ratings",
     windReason: "Wind makes the conditions feel colder.",
     transitionReason: "The indoor-to-outdoor change feels cooler during the first minutes.",
-    sunReason: "Sunshine softens the cold sensation somewhat.",
+    sunReason: "The weather has elevated solar/radiation potential; the advisor intentionally applies it conservatively.",
+    humidWarmReason: "A high dew point / muggy air makes warm conditions feel more demanding.",
+    humidColdReason: "Very damp cold air is conservatively treated as slightly cooler.",
+    humidityShort: "RH",
     wetReason: "Wet weather increases heat loss.",
     personalReason: "Your learned comfort profile shifts this recommendation.",
     forecastReason: "The useful jacket level changes during the forecast window.",
@@ -1072,6 +1078,8 @@ class JackenBeraterCard extends HTMLElement {
       wind: this._t("windReason"),
       transition: this._t("transitionReason"),
       sun: this._t("sunReason"),
+      humid_warm: this._t("humidWarmReason"),
+      humid_cold: this._t("humidColdReason"),
       wet: this._t("wetReason"),
       personal: this._t("personalReason"),
       forecast_change: this._t("forecastReason"),
@@ -1348,7 +1356,7 @@ class JackenBeraterCard extends HTMLElement {
     return `<div class="jb-panel">
       ${rec.simulation_active ? `<div class="jb-info-note jb-warning"><ha-icon icon="mdi:flask-outline"></ha-icon>${jbEscape(this._t("simulationWarning"))}</div>` : ""}
       ${rain}
-      <div class="jb-metrics"><span>${rec.current_temperature_c ?? "–"} °C</span><span>${rec.current_wind_kmh != null ? `${rec.current_wind_kmh} km/h${rec.current_gust_kmh != null && rec.current_gust_kmh > rec.current_wind_kmh ? ` · ${this._t("gusts")} ${rec.current_gust_kmh} km/h` : ""}` : (rec.current_gust_kmh != null ? `${this._t("gusts")} ${rec.current_gust_kmh} km/h` : "–")}</span><span>${rec.horizon_hours > 0 ? `${rec.horizon_hours} h` : this._t("nowOnly")}</span></div>
+      <div class="jb-metrics"><span>${rec.current_temperature_c ?? "–"} °C${rec.current_humidity != null ? ` · ${rec.current_humidity} % ${this._t("humidityShort")}` : ""}</span><span>${rec.current_wind_kmh != null ? `${rec.current_wind_kmh} km/h${rec.current_gust_kmh != null && rec.current_gust_kmh > rec.current_wind_kmh ? ` · ${this._t("gusts")} ${rec.current_gust_kmh} km/h` : ""}` : (rec.current_gust_kmh != null ? `${this._t("gusts")} ${rec.current_gust_kmh} km/h` : "–")}</span><span>${rec.horizon_hours > 0 ? `${rec.horizon_hours} h` : this._t("nowOnly")}</span></div>
       ${rec.work_context && rec.work_jacket ? `<div class="jb-context"><ha-icon icon="mdi:briefcase-outline"></ha-icon>${jbEscape(rec.work_name || this._t("work"))}: ${this._outfitLabel(rec, rec.work_jacket)}</div>` : ""}
       ${reasons.length ? `<div class="jb-section-title">${this._t("why")}</div><ul class="jb-reasons">${reasons.map(x => `<li>${jbEscape(x)}</li>`).join("")}</ul>` : ""}
       ${!this._autoShared || this._isAdmin ? `<div class="jb-learning"><span>${this._t("confidence")}: ${Math.round((profile.learning_progress ?? profile.confidence ?? 0) * 100)} %</span><span>${this._t("feedbackCount")}: ${profile.total_feedback || 0}</span></div>` : ""}
@@ -1373,7 +1381,7 @@ class JackenBeraterCard extends HTMLElement {
     const voluntary = manual ? "true" : "false";
     return `<div class="jb-feedback" data-session="${jbEscape(session.id)}">
       <div class="jb-feedback-time">${jbEscape(title)}</div>
-      <div class="jb-feedback-rec">${jbEscape(this._feedbackRecommendationText(rec))}<span>${weather.temperature_c ?? rec.current_temperature_c ?? "–"} °C${weather.wind_kmh != null ? ` · ${weather.wind_kmh} km/h` : ""}</span></div>
+      <div class="jb-feedback-rec">${jbEscape(this._feedbackRecommendationText(rec))}<span>${weather.temperature_c ?? rec.current_temperature_c ?? "–"} °C${weather.humidity != null ? ` · ${weather.humidity} % ${this._t("humidityShort")}` : ""}${weather.wind_kmh != null ? ` · ${weather.wind_kmh} km/h` : ""}</span></div>
       <label class="jb-unusual"><input type="checkbox" data-unusual> ${this._t("unusualDay")}</label>
       <div class="jb-feedback-buttons">
         <button data-feedback="too_cold" data-voluntary="${voluntary}" ${this._mutationFlightActive(`feedback:${session.id}`) ? "disabled" : ""}>🥶 ${this._t("tooCold")}</button>

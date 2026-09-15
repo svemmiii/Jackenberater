@@ -38,6 +38,7 @@ from .const import (
 )
 from .learning import (
     PersonalModel,
+    _environment_specialist_semantics,
     _feedback_bootstrap_mode,
     _perfect_threshold_attribute,
     _season_weights,
@@ -55,7 +56,7 @@ from .time_utils import (
 
 _LOGGER = logging.getLogger(__name__)
 
-_SESSION_SCHEMA_VERSION = 14
+_SESSION_SCHEMA_VERSION = 16
 
 
 # Feedback undo must only touch state that one rating can actually train.
@@ -63,6 +64,9 @@ _SESSION_SCHEMA_VERSION = 14
 _FEEDBACK_UNDO_FIELDS = (
     "general_offset_c",
     "wind_bias_c",
+    "humidity_warm_bias_c",
+    "humidity_cold_bias_c",
+    "solar_bias_c",
     "transition_bias_c",
     "transient_tolerance",
     "winter_bias_c",
@@ -83,6 +87,9 @@ _FEEDBACK_UNDO_FIELDS = (
     "pullover_threshold_delta_c",
     "general_stat",
     "wind_stat",
+    "humidity_warm_stat",
+    "humidity_cold_stat",
+    "solar_stat",
     "transition_stat",
     "transient_stat",
     "winter_season_stat",
@@ -884,6 +891,8 @@ class ProfileManager:
                 jacket=str(target.get("jacket") or recommendation.get("jacket_now") or "none"),
                 wind_kmh=_safe_float(target.get("wind_kmh")),
                 wind_penalty_c=_safe_float(target.get("wind_penalty_c")),
+                humidity_base_adjustment_c=_safe_float(target.get("humidity_base_adjustment_c")),
+                solar_base_gain_c=_safe_float(target.get("solar_base_gain_c")),
                 transition_penalty_c=_safe_float(target.get("transition_penalty_c")) or 0.0,
                 effective_c=_safe_float(target.get("effective_c")),
                 phase=target_phase,
@@ -1034,6 +1043,13 @@ class ProfileManager:
         sessions = raw.setdefault("sessions", [])
         if not isinstance(sessions, list):
             raw["sessions"] = sessions = []
+            return sessions
+        # Persistent storage can be edited/corrupted independently of the
+        # integration. Every caller expects dict-like sessions, so normalize a
+        # mixed list once instead of allowing ``session.get`` to crash cleanup.
+        sanitized = [session for session in sessions if isinstance(session, dict)]
+        if len(sanitized) != len(sessions):
+            raw["sessions"] = sessions = sanitized
         return sessions
 
     def _find_session(self, profile_id: str, session_id: str) -> dict[str, Any] | None:
@@ -1253,6 +1269,9 @@ def _learning_context_contract(
     if transient_active:
         perfect_boundary = None
         wind_learning = False
+        humidity_warm_learning = False
+        humidity_cold_learning = False
+        solar_learning = False
         transition_learning = False
         season_weights: dict[str, float] = {}
     else:
@@ -1263,10 +1282,31 @@ def _learning_context_contract(
             not bootstrap_mode
             and (_safe_float(context.get("wind_penalty_c")) or 0.0) >= 0.5
         )
+        humidity_base = _safe_float(context.get("humidity_base_adjustment_c")) or 0.0
+        solar_base = _safe_float(context.get("solar_base_gain_c")) or 0.0
+        # Humidity/solar have no setup prior. Let them collect their own small
+        # specialist signal from the first relevant rating instead of forcing an
+        # early muggy/sunny miss into ordinary garment/season learning.
+        humidity_warm_learning = humidity_base >= 0.35
+        humidity_cold_learning = humidity_base <= -0.20
+        # Solar is deliberately learned only from the strong provider signal.
+        # ``partlycloudy`` is thermally neutral without an explicit daylight/
+        # exposure signal and therefore never trains a personal solar preference.
+        solar_learning = (
+            str(context.get("condition") or "").lower() == "sunny"
+            and solar_base >= 0.75
+        )
         transition_learning = (
             not bootstrap_mode
             and bool(transition_relevant)
             and (_safe_float(context.get("transition_penalty_c")) or 0.0) >= 0.8
+        )
+        specialist_semantics = _environment_specialist_semantics(
+            humidity_base_adjustment_c=humidity_base,
+            solar_base_gain_c=solar_base,
+            warm_humidity_active=humidity_warm_learning,
+            cold_humidity_active=humidity_cold_learning,
+            solar_active=solar_learning,
         )
         observed_at = _parse_dt(context.get("observed_at"))
         season_weights = (
@@ -1276,6 +1316,19 @@ def _learning_context_contract(
     return {
         "perfect_boundary": perfect_boundary,
         "wind_learning": wind_learning,
+        "humidity_warm_learning": humidity_warm_learning,
+        "humidity_cold_learning": humidity_cold_learning,
+        "solar_learning": solar_learning,
+        **(
+            specialist_semantics
+            if not transient_active
+            else {
+                "humidity_warm_relevance": 0.0,
+                "humidity_cold_relevance": 0.0,
+                "solar_relevance": 0.0,
+                "environment_specialist_share": 1.0,
+            }
+        ),
         "transition_learning": transition_learning,
         "season_weights": season_weights,
         "pullover_learning": top_layer == TOP_PULLOVER,

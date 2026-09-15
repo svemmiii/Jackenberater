@@ -4,7 +4,7 @@ Dieses lokale Projekt wurde ursprünglich am 2. September 2026 aus dem ChatGPT-P
 
 - Quellprojekt: https://chatgpt.com/g/g-p-6a983d3dc0288191b241cbfcd430cacf-jackenberater/project
 - Übernommener Chat: „Kältegefühl Tracken“
-- Aktueller Entwicklungsstand: **JackenBerater v0.4.0**
+- Aktueller Entwicklungsstand: **JackenBerater v0.4.1**
 - CI prüft den deklarierten Mindeststand Home Assistant 2026.6.0, einen reproduzierbar gepinnten aktuellen Stand und zusätzlich den jeweils neuesten verfügbaren HA-Teststack unter Python 3.14.
 
 ## Zweck
@@ -44,8 +44,10 @@ JackenBerater erzeugt aus aktuellem Wetter, stündlichem Forecast, persönlichem
 
 ## Letzter lokal verifizierter Prüfstand
 
-- **362 / 362 Python-Tests bestanden** (`pytest -q tests --ignore=tests/ha_runtime`)
-- Neue v0.4.0-Regressionen decken die Pullover-Schicht zusätzlich gegen kurzfristige Indoor→Outdoor-Übergangskälte, Forecast-Lücken vor dem ersten Zukunftspunkt, falsche Jackengrenzen-Evidenz bei `Pullover + Jacke`, verschobene Pullover-Transientgrenzen in beide Richtungen, korrekte Lernattribution bei `Pullover + keine Jacke + transient` sowie reine `pullover_reason`-Änderungen ohne neue Lernsession, das vollständige Abtrainieren von Warming-/Cooling-Transient-Overrides einschließlich des 0-Grad-Minuten-Grenzfalls, reine `weather.condition`-Labelwechsel und reine `rain_status`-Hinweiswechsel ohne neue Lernsession, reine Work-/Kontextmetadatenwechsel, den realistischen Fall eines nachträglich verfügbaren Work-Forecasts bei unverändertem Outfit sowie Lernsemantik-Grenzen bei `14,8 → 15,2 °C`, Wind-Malus `0,4 → 0,6` und Transition-Malus `0,7 → 0,9` ab; zusätzlich sind Transient-/Bootstrap-Fälle gegen semantisch wirkungslose Grenzrefreshes sowie Confidence-Änderungen innerhalb bzw. über die `< 0,55`-Policygrenze abgesichert. Setup-Speichern ist außerdem Single-Flight gegen Doppelklick. Der v13-Learning-Contract friert die Lernbedeutung einer Session unveränderlich ein: Bootstrap/Mature, `Perfekt`-Grenzziel, Wind-/Transition-Aktivierung und Saisongewichte werden beim Öffnen gespeichert und beim späteren Feedback tatsächlich durchgesetzt. `PHASE_ALL` kann dadurch innerhalb einer Bewertung nicht die Lernphase wechseln. Die Active-Learning-Policy dedupliziert nach dem tatsächlichen Ergebnis `informative_feedback` statt nach einzelnen OR-Ursachen; identische Saisongewichte über Mitternacht bleiben dieselbe Lernsemantik. Frontend-Mutation-Flights sind zusätzlich an Config-/Profil-/Generation gebunden, sodass alte Setup-/Maintenance-Requests einen neuen Kontext weder blockieren noch entsperren können. Der aktuelle v14-Stand bindet zusätzlich jede Active-Learning-Opportunity an die reale Entscheidung: beantwortete identische Entscheidungen bleiben 10 Minuten Dedupe-Anker, während semantische Snapshot-Replacements ihre ursprüngliche `opportunity_count` erben. Pausierte Display-Sessions werden innerhalb derselben Pause wiederverwendet, bleiben nach Resume aber dauerhaft untrainierbar. Active-Work setzt im Fallback konsistent `stay_context=work`; beschädigte `inf`-/`seeded_from`-Storagewerte werden defensiv normalisiert.
+- **388 / 388 Python-Tests bestanden** (`pytest -q tests --ignore=tests/ha_runtime`)
+- Neue v0.4.0-Regressionen decken die Pullover-Schicht zusätzlich gegen kurzfristige Indoor→Outdoor-Übergangskälte, Forecast-Lücken vor dem ersten Zukunftspunkt, falsche Jackengrenzen-Evidenz bei `Pullover + Jacke`, verschobene Pullover-Transientgrenzen in beide Richtungen, korrekte Lernattribution bei `Pullover + keine Jacke + transient` sowie reine `pullover_reason`-Änderungen ohne neue Lernsession, das vollständige Abtrainieren von Warming-/Cooling-Transient-Overrides einschließlich des 0-Grad-Minuten-Grenzfalls, reine `weather.condition`-Labelwechsel und reine `rain_status`-Hinweiswechsel ohne neue Lernsession, reine Work-/Kontextmetadatenwechsel, den realistischen Fall eines nachträglich verfügbaren Work-Forecasts bei unverändertem Outfit sowie Lernsemantik-Grenzen bei `14,8 → 15,2 °C`, Wind-Malus `0,4 → 0,6` und Transition-Malus `0,7 → 0,9` ab; zusätzlich sind Transient-/Bootstrap-Fälle gegen semantisch wirkungslose Grenzrefreshes sowie Confidence-Änderungen innerhalb bzw. über die `< 0,55`-Policygrenze abgesichert. Setup-Speichern ist außerdem Single-Flight gegen Doppelklick. Der v13-Learning-Contract friert die Lernbedeutung einer Session unveränderlich ein: Bootstrap/Mature, `Perfekt`-Grenzziel, Wind-/Transition-Aktivierung und Saisongewichte werden beim Öffnen gespeichert und beim späteren Feedback tatsächlich durchgesetzt. `PHASE_ALL` kann dadurch innerhalb einer Bewertung nicht die Lernphase wechseln. Die Active-Learning-Policy dedupliziert nach dem tatsächlichen Ergebnis `informative_feedback` statt nach einzelnen OR-Ursachen; identische Saisongewichte über Mitternacht bleiben dieselbe Lernsemantik. Frontend-Mutation-Flights sind zusätzlich an Config-/Profil-/Generation gebunden, sodass alte Setup-/Maintenance-Requests einen neuen Kontext weder blockieren noch entsperren können. Der v14-Stand bindete zusätzlich jede Active-Learning-Opportunity an die reale Entscheidung: beantwortete identische Entscheidungen bleiben 10 Minuten Dedupe-Anker, während semantische Snapshot-Replacements ihre ursprüngliche `opportunity_count` erben. Pausierte Display-Sessions werden innerhalb derselben Pause wiederverwendet, bleiben nach Resume aber dauerhaft untrainierbar. Active-Work setzt im Fallback konsistent `stay_context=work`; beschädigte `inf`-/`seeded_from`-Storagewerte werden defensiv normalisiert.
+- Neue v0.4.1-Regressionen prüfen Taupunkt-/Schwüleberechnung, trockene Gegenfälle, getrennte Warm-/Kaltfeuchte-Persistenz, langsames Solarlernen, neutrales `partlycloudy` ohne sichere Tageslicht-/Expositionsinformation, Priorisierung des Feuchtekanals bei `Pullover + keine Jacke + zu warm`, unverändertes Pulloverlernen unter trockenen Bedingungen, geteilte Lernstärke bei gleichzeitig aktiver Schwüle + Sonne, eingefrorene/quantisierte Specialist-Relevanz mit Opportunity-erhaltendem Snapshot-Replacement, Kaltfeuchte `zu kalt`/`zu warm`/`perfekt`, `PHASE_LATER`/`boundary_only` ohne Feuchte-/Solar-Doppellernen, Sichtbarkeit materiell aktiver Spezialisten mit <3 eigener Evidenz sowie defensive Bereinigung nicht-dictförmiger Session-Storageeinträge und beschädigter Specialist-Contract-Werte.
+
 
 - Shared-Recovery/Lifecycle-Runde: `profiles` kann eine nach Rechteentzug stale Fremdprofil-Auswahl sicher auf den eigenen Scope zurückführen; Content-Endpunkte bleiben strikt geschützt.
 - WebSocket-Runtime-Ownership: Requests werden während `unloading`/nicht geladenem Config Entry abgelehnt und nach langen `await`s gegen Runtime- und `ProfileManager`-Identität geprüft, damit alte Manager nach Reload keine Sessions/Saves mehr erzeugen.
@@ -70,6 +72,19 @@ Eine Jackenstufe soll nicht wegen eines winzigen Zeitfensters zur Hauptempfehlun
 - Der Forecast-Coordinator erhält den `ConfigEntry` explizit und die automatisch verwaltete Lovelace-Ressource wird beim endgültigen Entfernen des Eintrags aufgeräumt.
 
 
+## v0.4.1 Feuchte / Taupunkt / Strahlung
+
+- Warm-feuchte Luft verwendet intern Taupunkt statt bloßer relativer Feuchte als primäres Schwülesignal; die Wirkung blendet temperaturabhängig ein und ist keine offizielle Heat-Index-/UTCI-Ausgabe.
+- Persönliches Lernen ist in `humidity_warm_*` und `humidity_cold_*` getrennt, damit Sommer-Schwüle und der kleine Kaltfeuchte-Effekt nicht dieselbe Lerndimension teilen.
+- Solar wird als meteorologisches Strahlungspotenzial verstanden. `sunny` + Bewölkung liefert einen konservativen thermischen Beitrag; `partlycloudy` bleibt ohne zusätzliche sichere Tageslicht-/Expositionsinformation thermisch neutral.
+- `solar_bias_c` / `solar_stat` lernen absichtlich langsam und nur bei starkem `sunny`-Signal, weil Weather-Daten keine tatsächliche persönliche Sonnen-/Schattenexposition kennen.
+- Klare Feuchte-/Solarursachen können auch bei `keine Jacke + zu warm` lernen. Bei `Pullover + keine Jacke + zu warm` hat ein klar aktiver Wetter-Spezialkanal Vorrang vor einer globalen Pulloververschiebung; trockene/schattige Fälle trainieren weiterhin die Pullovergrenze.
+- Mehrere gleichzeitig aktive Umwelt-Spezialkanäle teilen die Lernstärke. Transient-Feedback bleibt separat und trainiert Feuchte/Solar nicht zusätzlich.
+- Session-Schema v16 friert die neuen Umwelt-Lerngates **und deren quantisierte tatsächliche Lernrelevanz/Share** pro Feedbacksession ein. Relevante Änderungen ersetzen nur den Snapshot und übernehmen dieselbe Opportunity-Nummer.
+- Reines `PHASE_LATER`-Boundary-Feedback ist ausschließlich Jackengrenzen-Feedback; selbst bei schwül/sonnigem späterem Wetter bleiben `humidity_*`- und `solar_*`-Spezialisten dabei eingefroren.
+- Ist ein materieller Feuchte-/Solar-Spezialist noch unter 3 Evidenzpunkten, verhindert dieser konkrete Early-Learning-Bedarf vollständiges `hidden`; die Karte bleibt mindestens kompakt erreichbar.
+- Die Lernfortschrittsanzeige umfasst ab v0.4.1 drei zusätzliche Spezialkanäle. Deshalb kann ein migriertes v0.4.0-Profil prozentual leicht zurückgehen, ohne dass alte Evidenz verloren geht.
+
 ## v0.4.0 Pullover / Midlayer
 
 - Hosen-/Shorts-Idee bewusst verworfen; v0.4.0 erweitert ausschließlich den Oberkörper um `Shirt` vs. `Pullover`.
@@ -84,9 +99,9 @@ Eine Jackenstufe soll nicht wegen eines winzigen Zeitfensters zur Hauptempfehlun
 - Die 10-Minuten-Deduplizierung besitzt zusätzlich eine diskrete Lernsemantik-Signatur. Praktisch gleiche Wetterwerte dürfen nur dann denselben Snapshot wiederverwenden, wenn `Perfekt` dieselbe Jackengrenze bestätigen würde und die Wind-/Transition-Lerngates sowie die Pullover-/Transient-Attribution gleich bleiben. Bei geänderter Lernsemantik wird eine alte unbeantwortete Session superseded, bevor der aktuelle Snapshot trainierbar wird; dadurch kann Feedback nie auf einen nur numerisch nahen, fachlich aber anders lernenden Altzustand fallen.
 - Die Lernsemantik-Signatur spiegelt die Early-Return-Reihenfolge von `apply_feedback()`: Ein aktiver Transient blendet für die Session-Identität normale Boundary-/Wind-/Transition-Lernpfade aus; während Bootstrap bleiben Wind/Transition ebenfalls semantisch inaktiv. Die Feedback-Policy verwendet keine rohe Confidence mehr, sondern die tatsächliche `< 0,55`-Schwelle und den Bootstrap-Zustand. Semantisch wirkungslose Refreshes verändern dadurch weder Session noch Feedback-Cadence.
 - Die persönliche `transient_tolerance` kann von 1,0 bis auf 0,0 sinken. `0,0` ist ein explizites Veto in der Engine, sodass konsistentes Gegenfeedback die Kurzzeitglättung auch bei exakt 0 Grad-Minuten Belastung vollständig abschalten kann.
-- Temporäres Feedback-Session-Schema v0.4.0: v14.
+- Temporäres Feedback-Session-Schema v0.4.1: v16.
 - Frontend zeigt Kombinationen wie `Pullover + Winterjacke`; spätere Forecast-Hinweise nennen nur die zusätzlich mitzunehmende Jacke.
-- Frontend-Cache v0.4.0: `ui=17`.
+- Frontend-Cache v0.4.1: `ui=18`.
 
 ## v0.3.2 Release-Hardening
 
@@ -102,9 +117,9 @@ Eine Jackenstufe soll nicht wegen eines winzigen Zeitfensters zur Hauptempfehlun
 - Cross-Device-Revision ist reload-sicher und profilbezogen: normale Karten verwenden `runtime_generation + profile_revision`, Shared-Auswahl zusätzlich `directory_revision`. Ein erster nur gesehener Token gilt bei leerem Kartenstand nicht als angewendet.
 - Bei aufgeteilten Arbeitsfenstern hat echte `[start,end)`-Arbeitszeit Vorrang vor überlappenden Puffern benachbarter Fenster; der Wiedereinstieg nach Teil-Abwesenheit wird damit wieder als tatsächliche Arbeit bezeichnet.
 - Unbeantwortete Sessions mit fehlender/ungültiger Expiry werden verworfen; direkte Feedbackabgabe auf solchen Storage-Resten wird serverseitig als inkompatibel abgelehnt.
-- Frontend-Cache der aktuellen Karte: `ui=17`.
+- Frontend-Cache der aktuellen Karte: `ui=18`.
 
-- Frontend-Ressource und Package-Vertrag sind auf `ui=17` synchron; `setConfig()` räumt eigene Timer sauber auf und Revisionen gelten erst nach erfolgreichem Full-Refresh als angewendet.
+- Frontend-Ressource und Package-Vertrag sind auf `ui=18` synchron; `setConfig()` räumt eigene Timer sauber auf und Revisionen gelten erst nach erfolgreichem Full-Refresh als angewendet.
 - WebSocket- und periodischer HA-User-Sync prüfen nach ihrem `await`, dass noch derselbe Runtime-Manager aktiv ist.
 - Datetime-Parser für Forecast, Kalender und persistierte Sessions sind gegen unmögliche Zeitstempel gehärtet.
 - Forecast-Fehlerretry berücksichtigt die aktuell benötigten Quellen; ein irrelevanter defekter Arbeitsprovider erzwingt keinen 1-Minuten-Retry der Home-Beratung.
@@ -126,7 +141,7 @@ Eine Jackenstufe soll nicht wegen eines winzigen Zeitfensters zur Hauptempfehlun
 
 - Saison-/Feedback-Confidence: Sessions verwenden exakt die bereits saisonbewusst berechnete Recommendation-Confidence. Ein relevanter Saisonanker mit <1,0 eigener Real-Evidenz verhindert ab 10 % Einfluss vollständiges `hidden`, auch innerhalb der Überblendung.
 - Threshold-Upgrades: alte versteckte Raw-Überhänge werden beim Laden auf die effektiv verwendeten Grenzen canonicalisiert; Evidenz wächst nur bei echter effektiver Grenzbewegung.
-- Frontend: Pending-State-Refresh läuft durch normalen Throttle/Backoff; aktueller Frontend-Cache `ui=17`. Nach einem Update ist ein vollständiger Seitenreload vorgesehen, weil registrierte Custom-Element-Klassen in derselben JS-Session nicht ersetzt werden können.
+- Frontend: Pending-State-Refresh läuft durch normalen Throttle/Backoff; aktueller Frontend-Cache `ui=18`. Nach einem Update ist ein vollständiger Seitenreload vorgesehen, weil registrierte Custom-Element-Klassen in derselben JS-Session nicht ersetzt werden können.
 - Arbeitszeit: tatsächliche Schichten sind am Ende exklusiv (`start <= t < end`); exakt zum Feierabend gilt bereits der Pufferkontext.
 - Kalendercache: Generation-Counter verhindert Re-Population durch bereits laufende Requests nach einer Invalidierung. Entity-State-Änderungen leeren sofort; der interne TTL beträgt nur noch 1 Minute, weil nicht jede Kalender-CRUD-Änderung zwingend einen State-Change erzeugt.
 - Session-/Forecast-Hygiene: Session-Expiry wird auch beim Reuse-Early-Return gespeichert; Forecast-Dubletten wählen deterministisch den vollständigsten Datensatz pro Instant.
@@ -139,5 +154,5 @@ Eine Jackenstufe soll nicht wegen eines winzigen Zeitfensters zur Hauptempfehlun
 
 - Session-Deduplizierung verwendet nur semantische Entscheidungs-/Policy-Felder; Cadence-Zähler wie `total_feedback`/`feedback_opportunities` gehören nicht zur Identität. Bereits beantwortete identische Entscheidungen blockieren innerhalb von zehn Minuten eine zweite Opportunity. Offene Sessions mit älterer Semantik werden beim Update verworfen.
 - Policy-Wechsel innerhalb derselben realen Entscheidung superseden die alte unbeantwortete Session; supersedete Sessions sind weder Feedbackkandidaten noch per direkter API trainierbar. Während pausiertem Lernen erzeugte Sessions tragen `trainable=false` und bleiben nach Resume untrainierbar. Aktuelles internes Session-Schema: v5.
-- Aktueller v14-Vertrag: Eine beantwortete current-schema Session bleibt innerhalb des 10-Minuten-Fensters Dedupe-Anchor unabhängig von späteren Modell-/Learning-Contract-Änderungen. Unbeantwortete semantische Snapshot-Replacements übernehmen die `opportunity_count` der realen Entscheidung und erhöhen `feedback_opportunities` nicht erneut. Pausierte `trainable=false`-Display-Snapshots dürfen während derselben Pause dedupliziert werden, ohne nach Resume rückwirkend trainierbar zu werden.
+- v14-Dedupe-Vertrag: Eine beantwortete current-schema Session bleibt innerhalb des 10-Minuten-Fensters Dedupe-Anchor unabhängig von späteren Modell-/Learning-Contract-Änderungen. Unbeantwortete semantische Snapshot-Replacements übernehmen die `opportunity_count` der realen Entscheidung und erhöhen `feedback_opportunities` nicht erneut. Pausierte `trainable=false`-Display-Snapshots dürfen während derselben Pause dedupliziert werden, ohne nach Resume rückwirkend trainierbar zu werden.
 - Mutierende Kartenaktionen sind Single-Flight: Maintenance/Undo wird global pro Karte serialisiert, Feedback pro Session. Doppelklicks erzeugen dadurch keine doppelten Undo-/Feedback-Requests.

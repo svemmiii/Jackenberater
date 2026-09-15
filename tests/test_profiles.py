@@ -1269,6 +1269,9 @@ def test_v030_later_too_warm_on_light_to_none_trains_only_transition_boundary():
                     "jacket": const.JACKET_NONE,
                     "effective_c": 20.0,
                     "observed_at": "2026-09-01T18:00:00+00:00",
+                    "humidity_base_adjustment_c": 1.2,
+                    "solar_base_gain_c": 2.0,
+                    "condition": "sunny",
                 },
             },
         )
@@ -1276,6 +1279,10 @@ def test_v030_later_too_warm_on_light_to_none_trains_only_transition_boundary():
         general_before = before.general_offset_c
         autumn_before = before.autumn_bias_c
         light_before = before.light_threshold_delta_c
+        humidity_bias_before = before.humidity_warm_bias_c
+        solar_bias_before = before.solar_bias_c
+        humidity_weight_before = before.humidity_warm_stat.weight_sum
+        solar_weight_before = before.solar_stat.weight_sum
 
         await manager.async_feedback(
             "user",
@@ -1290,6 +1297,10 @@ def test_v030_later_too_warm_on_light_to_none_trains_only_transition_boundary():
         assert learned.general_offset_c == general_before
         assert learned.autumn_bias_c == autumn_before
         assert learned.light_threshold_delta_c < light_before
+        assert learned.humidity_warm_bias_c == humidity_bias_before
+        assert learned.solar_bias_c == solar_bias_before
+        assert learned.humidity_warm_stat.weight_sum == humidity_weight_before
+        assert learned.solar_stat.weight_sum == solar_weight_before
         assert learned.total_feedback == 1
 
     asyncio.run(run())
@@ -1316,6 +1327,9 @@ def test_v030_later_too_cold_on_none_to_light_trains_only_transition_boundary():
                     "jacket": const.JACKET_LIGHT,
                     "effective_c": 17.0,
                     "observed_at": "2026-09-01T18:00:00+00:00",
+                    "humidity_base_adjustment_c": 1.2,
+                    "solar_base_gain_c": 2.0,
+                    "condition": "sunny",
                 },
             },
         )
@@ -1323,6 +1337,10 @@ def test_v030_later_too_cold_on_none_to_light_trains_only_transition_boundary():
         general_before = before.general_offset_c
         autumn_before = before.autumn_bias_c
         light_before = before.light_threshold_delta_c
+        humidity_bias_before = before.humidity_warm_bias_c
+        solar_bias_before = before.solar_bias_c
+        humidity_weight_before = before.humidity_warm_stat.weight_sum
+        solar_weight_before = before.solar_stat.weight_sum
 
         await manager.async_feedback(
             "user",
@@ -1337,6 +1355,10 @@ def test_v030_later_too_cold_on_none_to_light_trains_only_transition_boundary():
         assert learned.general_offset_c == general_before
         assert learned.autumn_bias_c == autumn_before
         assert learned.light_threshold_delta_c > light_before
+        assert learned.humidity_warm_bias_c == humidity_bias_before
+        assert learned.solar_bias_c == solar_bias_before
+        assert learned.humidity_warm_stat.weight_sum == humidity_weight_before
+        assert learned.solar_stat.weight_sum == solar_weight_before
         assert learned.total_feedback == 1
 
     asyncio.run(run())
@@ -3671,3 +3693,305 @@ def test_learning_paused_identical_openings_reuse_display_session_without_storag
             raise AssertionError("paused display snapshot must never become trainable")
 
     asyncio.run(run())
+
+
+def test_v041_learning_contract_separates_humidity_and_solar_specialists():
+    model = learning.PersonalModel.from_answers(3, 3, 3, 3, 3)
+    model.general_stat = learning.RunningStat(samples=12, weight_sum=12.0)
+    rec = recommendation()
+
+    humid = profiles._learning_context_contract(
+        model,
+        rec,
+        {
+            "jacket": const.JACKET_LIGHT,
+            "top_layer": const.TOP_SHIRT,
+            "effective_c": 15.0,
+            "humidity_base_adjustment_c": 0.8,
+            "solar_base_gain_c": 0.0,
+            "condition": "cloudy",
+        },
+        bootstrap_mode=False,
+        transition_relevant=True,
+        general_learning=True,
+    )
+    assert humid["humidity_warm_learning"] is True
+    assert humid["humidity_cold_learning"] is False
+    assert humid["solar_learning"] is False
+
+    sunny = profiles._learning_context_contract(
+        model,
+        rec,
+        {
+            "jacket": const.JACKET_LIGHT,
+            "top_layer": const.TOP_SHIRT,
+            "effective_c": 15.0,
+            "humidity_base_adjustment_c": 0.0,
+            "solar_base_gain_c": 1.5,
+            "condition": "sunny",
+        },
+        bootstrap_mode=False,
+        transition_relevant=True,
+        general_learning=True,
+    )
+    assert sunny["humidity_warm_learning"] is False
+    assert sunny["humidity_cold_learning"] is False
+    assert sunny["solar_learning"] is True
+
+
+def test_v041_learning_contract_freezes_specialist_relevance_and_share():
+    model = learning.PersonalModel.from_answers(3, 3, 3, 3, 3)
+    contract = profiles._learning_context_contract(
+        model,
+        recommendation(),
+        {
+            "jacket": const.JACKET_LIGHT,
+            "top_layer": const.TOP_SHIRT,
+            "effective_c": 15.0,
+            "humidity_base_adjustment_c": 0.35,
+            "solar_base_gain_c": 1.94,
+            "condition": "sunny",
+        },
+        bootstrap_mode=False,
+        transition_relevant=True,
+        general_learning=True,
+    )
+    assert contract["humidity_warm_learning"] is True
+    assert contract["solar_learning"] is True
+    assert contract["humidity_warm_relevance"] == pytest.approx(0.30)
+    assert contract["solar_relevance"] == pytest.approx(0.95)
+    assert contract["environment_specialist_share"] == pytest.approx(0.5)
+
+
+def test_v041_humidity_relevance_change_replaces_snapshot_without_new_opportunity():
+    async def run():
+        manager = _make_mature_policy_manager()
+        rec1 = recommendation()
+        rec1.confidence = 0.95
+        rec1.effective_now_c = 24.78
+        first_contexts = {
+            "start": {
+                "jacket": const.JACKET_LIGHT,
+                "top_layer": const.TOP_SHIRT,
+                "effective_c": 24.78,
+                "humidity_base_adjustment_c": 1.98,
+                "solar_base_gain_c": 0.0,
+                "condition": "cloudy",
+            },
+            "later": {
+                "jacket": const.JACKET_LIGHT,
+                "top_layer": const.TOP_SHIRT,
+                "effective_c": 24.78,
+                "humidity_base_adjustment_c": 1.98,
+                "solar_base_gain_c": 0.0,
+                "condition": "cloudy",
+            },
+        }
+        first = await manager.async_open_session(
+            "user", rec1, weather_context={"condition": "cloudy"},
+            learning_contexts=first_contexts,
+        )
+        first_stored = manager._find_session("user", first["id"])
+        assert first_stored is not None
+        assert first_stored["learning_contract"]["start"]["humidity_warm_relevance"] == 1.0
+        assert first_stored["opportunity_count"] == 1
+
+        rec2 = recommendation()
+        rec2.confidence = 0.95
+        rec2.effective_now_c = 24.35
+        second_contexts = {
+            "start": {
+                "jacket": const.JACKET_LIGHT,
+                "top_layer": const.TOP_SHIRT,
+                "effective_c": 24.35,
+                "humidity_base_adjustment_c": 0.35,
+                "solar_base_gain_c": 0.0,
+                "condition": "cloudy",
+            },
+            "later": {
+                "jacket": const.JACKET_LIGHT,
+                "top_layer": const.TOP_SHIRT,
+                "effective_c": 24.35,
+                "humidity_base_adjustment_c": 0.35,
+                "solar_base_gain_c": 0.0,
+                "condition": "cloudy",
+            },
+        }
+        second = await manager.async_open_session(
+            "user", rec2, weather_context={"condition": "cloudy"},
+            learning_contexts=second_contexts,
+        )
+        assert second["id"] != first["id"]
+        current = manager._find_session("user", second["id"])
+        assert current is not None
+        assert current["opportunity_count"] == 1
+        assert manager.get_model("user").feedback_opportunities == 1
+        assert current["learning_contract"]["start"]["humidity_warm_relevance"] == pytest.approx(0.30)
+        old = manager._find_session("user", first["id"])
+        assert old is not None and old["superseded"] is True
+
+    asyncio.run(run())
+
+
+def test_v041_solar_relevance_change_replaces_snapshot_without_new_opportunity():
+    async def run():
+        manager = _make_mature_policy_manager()
+        rec1 = recommendation()
+        rec1.confidence = 0.95
+        rec1.effective_now_c = 18.0
+        first_contexts = {
+            "start": {
+                "jacket": const.JACKET_LIGHT,
+                "top_layer": const.TOP_SHIRT,
+                "effective_c": 18.0,
+                "humidity_base_adjustment_c": 0.0,
+                "solar_base_gain_c": 1.07,
+                "condition": "sunny",
+            },
+            "later": {
+                "jacket": const.JACKET_LIGHT,
+                "top_layer": const.TOP_SHIRT,
+                "effective_c": 18.0,
+                "humidity_base_adjustment_c": 0.0,
+                "solar_base_gain_c": 1.07,
+                "condition": "sunny",
+            },
+        }
+        first = await manager.async_open_session(
+            "user", rec1, weather_context={"condition": "sunny"},
+            learning_contexts=first_contexts,
+        )
+
+        rec2 = recommendation()
+        rec2.confidence = 0.95
+        rec2.effective_now_c = 18.4
+        second_contexts = {
+            "start": {
+                "jacket": const.JACKET_LIGHT,
+                "top_layer": const.TOP_SHIRT,
+                "effective_c": 18.4,
+                "humidity_base_adjustment_c": 0.0,
+                "solar_base_gain_c": 1.94,
+                "condition": "sunny",
+            },
+            "later": {
+                "jacket": const.JACKET_LIGHT,
+                "top_layer": const.TOP_SHIRT,
+                "effective_c": 18.4,
+                "humidity_base_adjustment_c": 0.0,
+                "solar_base_gain_c": 1.94,
+                "condition": "sunny",
+            },
+        }
+        second = await manager.async_open_session(
+            "user", rec2, weather_context={"condition": "sunny"},
+            learning_contexts=second_contexts,
+        )
+        assert second["id"] != first["id"]
+        current = manager._find_session("user", second["id"])
+        assert current is not None
+        assert current["opportunity_count"] == 1
+        assert manager.get_model("user").feedback_opportunities == 1
+        assert current["learning_contract"]["start"]["solar_relevance"] == pytest.approx(0.95)
+
+    asyncio.run(run())
+
+
+def test_v041_partlycloudy_potential_is_not_used_as_solar_learning_signal():
+    model = learning.PersonalModel.from_answers(3, 3, 3, 3, 3)
+    model.general_stat = learning.RunningStat(samples=12, weight_sum=12.0)
+    contract = profiles._learning_context_contract(
+        model,
+        recommendation(),
+        {
+            "jacket": const.JACKET_LIGHT,
+            "top_layer": const.TOP_SHIRT,
+            "effective_c": 15.0,
+            "solar_base_gain_c": 0.35,
+            "condition": "partlycloudy",
+        },
+        bootstrap_mode=False,
+        transition_relevant=True,
+        general_learning=True,
+    )
+    assert contract["solar_learning"] is False
+
+
+def test_v041_transient_contract_does_not_double_train_environment_specialists():
+    model = learning.PersonalModel.from_answers(3, 3, 3, 3, 3)
+    model.general_stat = learning.RunningStat(samples=12, weight_sum=12.0)
+    contract = profiles._learning_context_contract(
+        model,
+        recommendation(),
+        {
+            "jacket": const.JACKET_LIGHT,
+            "top_layer": const.TOP_SHIRT,
+            "effective_c": 15.0,
+            "humidity_base_adjustment_c": 0.8,
+            "solar_base_gain_c": 1.5,
+            "condition": "sunny",
+            "transient_override": True,
+            "transient_direction": "warming",
+        },
+        bootstrap_mode=False,
+        transition_relevant=True,
+        general_learning=True,
+    )
+    assert contract["humidity_warm_learning"] is False
+    assert contract["humidity_cold_learning"] is False
+    assert contract["solar_learning"] is False
+
+
+def test_v041_malformed_session_items_are_dropped_during_storage_cleanup():
+    manager = make_manager()
+    valid = {
+        "id": "answered",
+        "session_schema_version": profiles._SESSION_SCHEMA_VERSION,
+        "feedback": {"rating": const.FEEDBACK_PERFECT},
+        "created_at": datetime(2026, 9, 1, 11, tzinfo=timezone.utc).isoformat(),
+        "expires_at": datetime(2026, 9, 2, 11, tzinfo=timezone.utc).isoformat(),
+    }
+    manager._profiles["user"]["sessions"] = [None, 42, "broken", valid]
+    manager._cleanup_all()
+    sessions = manager._profiles["user"]["sessions"]
+    assert sessions == [valid]
+
+
+def test_v041_humidity_and_solar_contracts_can_learn_during_bootstrap():
+    model = learning.PersonalModel.from_answers(3, 3, 3, 3, 3)
+    assert profiles._feedback_bootstrap_mode(model) is True
+    contract = profiles._learning_context_contract(
+        model,
+        recommendation(),
+        {
+            "jacket": const.JACKET_LIGHT,
+            "top_layer": const.TOP_SHIRT,
+            "effective_c": 15.0,
+            "humidity_base_adjustment_c": 0.8,
+            "solar_base_gain_c": 1.5,
+            "condition": "sunny",
+        },
+        bootstrap_mode=True,
+        transition_relevant=True,
+        general_learning=True,
+    )
+    assert contract["humidity_warm_learning"] is True
+    assert contract["solar_learning"] is True
+    # Existing specialist rules with setup priors remain bootstrap-gated.
+    assert contract["wind_learning"] is False
+
+
+def test_v041_old_profile_migrates_to_neutral_environment_specialists():
+    old = learning.PersonalModel.from_answers(4, 2, 5, 3, 4).to_dict()
+    for key in (
+        "humidity_warm_bias_c", "humidity_cold_bias_c", "solar_bias_c",
+        "humidity_warm_stat", "humidity_cold_stat", "solar_stat",
+    ):
+        old.pop(key, None)
+    restored = learning.PersonalModel.from_dict(old)
+    assert restored.humidity_warm_bias_c == 0.0
+    assert restored.humidity_cold_bias_c == 0.0
+    assert restored.solar_bias_c == 0.0
+    assert restored.humidity_warm_stat.weight_sum == 0.0
+    assert restored.humidity_cold_stat.weight_sum == 0.0
+    assert restored.solar_stat.weight_sum == 0.0

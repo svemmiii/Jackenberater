@@ -1,4 +1,4 @@
-# JackenBerater v0.4.0
+# JackenBerater v0.4.1
 
 JackenBerater ist eine Home-Assistant-Integration für persönliche Jackenempfehlungen. Sie verwendet aktuelle Wetterdaten, den Forecast und optional persönliche Rückmeldungen.
 
@@ -62,6 +62,28 @@ Eine sichtbare Karte allein erzeugt keine Feedback-Session. Erst das bewusste Ö
 
 Der interne thermische Rechenwert bleibt Teil der Berechnung, wird aber nicht als Temperaturwert auf der normalen Nutzerkarte angezeigt.
 
+## Wetterempfinden ab v0.4.1
+
+JackenBerater trennt ab v0.4.1 weitere Wetterursachen vom normalen persönlichen Wärmeprofil, damit Feedback an schwülen oder sonnigen Tagen nicht unnötig die allgemeinen Jacken-/Pullovergrenzen verschiebt.
+
+### Luftfeuchte / Schwüle
+
+Für warm-feuchte Luft wird nicht mehr nur die relative Luftfeuchtigkeit betrachtet. Aus Lufttemperatur und relativer Feuchte wird intern der **Taupunkt** als Maß für den tatsächlichen Feuchtegehalt der Luft abgeleitet. Dadurch werden beispielsweise 90 % rF bei kalter Luft nicht mit schwüler Sommerluft gleichgesetzt. Die warme Feuchtewirkung wird erst mit passender Lufttemperatur relevant und bleibt eine transparente Komfortheuristik, kein offizieller Heat-Index.
+
+Das Lernmodell besitzt dafür getrennte kompakte Kanäle für **warm-feuchte/Schwüle-Empfindlichkeit** und den deutlich kleineren **kalt-feuchten Effekt**. Weil es dafür keine Startfrage und keinen persönlichen Setup-Prior gibt, dürfen diese Wetterkanäle bereits ab der ersten klar relevanten Bewertung vorsichtig eigene Evidenz sammeln. Feedback kann diese Faktoren korrigieren, ohne trockene Wetterlagen zu verschieben. Bei einer klar schwülen Situation darf selbst `Pullover + keine Jacke + zu warm` zuerst die Feuchteempfindlichkeit lernen, statt pauschal die Pullovergrenze für alle Wetterlagen zu verändern.
+
+### Sonne / Strahlungspotenzial
+
+Sonne wird bewusst als **Strahlungspotenzial** und nicht als behauptete direkte Besonnung modelliert. Eine Weather-Entity kann Bewölkung und einen Zustand wie `sunny` liefern, weiß aber nicht, ob die Person gerade unter einem Baum, zwischen Gebäuden oder auf freier Fläche steht. `sunny` erhält deshalb nur einen konservativen Wärmeaufschlag, der durch vorhandene Bewölkungsdaten gedämpft wird. `partlycloudy` bleibt ohne zusätzliche sichere Tageslicht-/Expositionsinformation thermisch neutral: Bewölkungsprozent allein beweisen weder Tageslicht noch persönliche Besonnung und einige Provider können `partlycloudy` auch nachts liefern.
+
+Das separate Solarlernen startet nur bei einem starken `sunny`-Signal und lernt absichtlich langsamer als eindeutige Kleidungsgrenzen oder Wind. Wiederholtes Feedback kann dadurch abbilden, dass sonnige Wetterlagen für den Nutzer typischerweise stärker oder schwächer wirken, ohne zu behaupten, seine tatsächliche Schattenposition zu kennen. Treffen mehrere Wetter-Spezialfaktoren gleichzeitig zu, wird ihre Lernstärke geteilt, damit ein einzelnes Feedback nicht mehrere Ursachen voll verstärkt.
+
+Die normale Nutzerkarte zeigt die verfügbare relative Luftfeuchte zusätzlich zur Temperatur an. Taupunkt, persönliche Feuchte-/Solarparameter und die übrigen internen Rechenwerte bleiben Diagnose-/Lernwerte und werden nicht als amtliche „gefühlte Temperatur“ ausgegeben.
+
+Ein materiell aktiver Feuchte-/Solar-Spezialist mit noch weniger als drei eigenen Evidenzpunkten hält eine sonst vollständig ausgeblendete stabile Empfehlung mindestens kompakt erreichbar, damit der neue Kanal überhaupt gezielt Feedback sammeln kann. Reines Feedback zum **späteren Jackenwechsel** (`PHASE_LATER`) bewertet dagegen ausschließlich die betreffende Jackengrenze und verändert Feuchte-/Solarlernen nicht.
+
+Nach einem Upgrade von v0.4.0 kann der angezeigte **Lernfortschritt leicht sinken**. Das ist kein Verlust alter Lerndaten: v0.4.1 erweitert die Breitenmetrik um Warmfeuchte, Kaltfeuchte und Solar, die bei bestehenden Profilen naturgemäß zunächst noch keine eigene Evidenz besitzen.
+
 ## Pullover / Midlayer ab v0.4.0
 
 JackenBerater unterscheidet jetzt zwischen **Grundschicht am Oberkörper** und **abnehmbarer Außenschicht**. Die Grundschicht ist entweder Shirt oder Pullover; die bestehende Jackenskala bleibt unverändert `keine / leichte / warme / Winterjacke`. Hosen oder andere Kleidungsbereiche sind bewusst nicht Teil dieses Modells.
@@ -103,7 +125,7 @@ title: Jacke heute
 
 Bei vollständig YAML-verwaltetem Lovelace muss die Ressource manuell eingetragen werden:
 
-`/jackenberater/frontend/jackenberater-card.js?v=0.4.0&ui=17`
+`/jackenberater/frontend/jackenberater-card.js?v=0.4.1&ui=18`
 
 Nach einem JackenBerater-Update sollte die Lovelace-Seite einmal vollständig neu geladen werden. Bereits registrierte Browser-Custom-Elements können innerhalb derselben JavaScript-Session technisch nicht durch eine neu geladene Klasse ersetzt werden; der versionsgebundene Ressourcenpfad verhindert dabei normale Cache-Probleme.
 

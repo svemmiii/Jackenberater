@@ -33,6 +33,12 @@ class ThermalResult:
     rain_penalty_c: float
     humidity_adjustment_c: float
     threshold_margin_c: float
+    # v0.4.1 keeps the neutral weather contribution alongside the personalized
+    # one so learning can attribute feedback to humidity/solar without
+    # re-deriving historical weather from a newer personal model.
+    base_solar_gain_c: float = 0.0
+    base_humidity_adjustment_c: float = 0.0
+    dew_point_c: float | None = None
     seasonal_adjustment_c: float = 0.0
     reasons: list[str] = field(default_factory=list)
 
@@ -59,12 +65,24 @@ class Recommendation:
     transition_penalty_c: float
     observed_at: datetime | None = None
     current_wind_penalty_c: float = 0.0
+    current_humidity: float | None = None
+    current_dew_point_c: float | None = None
+    current_humidity_adjustment_c: float = 0.0
+    current_base_humidity_adjustment_c: float = 0.0
+    current_solar_gain_c: float = 0.0
+    current_base_solar_gain_c: float = 0.0
     later_temperature_c: float | None = None
     later_wind_kmh: float | None = None
     later_gust_kmh: float | None = None
     later_condition: str | None = None
     later_effective_c: float | None = None
     later_wind_penalty_c: float | None = None
+    later_humidity: float | None = None
+    later_dew_point_c: float | None = None
+    later_humidity_adjustment_c: float | None = None
+    later_base_humidity_adjustment_c: float | None = None
+    later_solar_gain_c: float | None = None
+    later_base_solar_gain_c: float | None = None
     work_context: bool = False
     work_weather_available: bool = True
     work_jacket: str | None = None

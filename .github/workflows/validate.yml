@@ -30,7 +30,7 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.14"
-      - run: python -m pip install --upgrade pip pytest-homeassistant-custom-component==0.13.364
+      - run: python -m pip install --upgrade pip pytest-homeassistant-custom-component==0.13.365
       - run: python -m pytest -q tests/ha_runtime
 
   # Contract for hacs.json: JackenBerater declares Home Assistant >= 2026.6.0.

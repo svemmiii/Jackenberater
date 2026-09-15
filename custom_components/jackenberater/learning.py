@@ -91,6 +91,12 @@ class PersonalModel:
     # Positive offsets mean the user tends to need more warmth than baseline.
     general_offset_c: float = 0.0
     wind_bias_c: float = 0.0
+    # v0.4.1 weather-specific personalization. These are temperature-equivalent
+    # corrections that only apply while the corresponding weather signal is
+    # actually present; they do not shift ordinary dry/shaded jacket thresholds.
+    humidity_warm_bias_c: float = 0.0
+    humidity_cold_bias_c: float = 0.0
+    solar_bias_c: float = 0.0
     transition_bias_c: float = 0.0
     # How willing the user is to accept a short mismatch in exchange for the
     # jacket that fits the continuing trend. 1.0 is neutral; it is deliberately
@@ -131,6 +137,9 @@ class PersonalModel:
 
     general_stat: RunningStat = field(default_factory=RunningStat)
     wind_stat: RunningStat = field(default_factory=RunningStat)
+    humidity_warm_stat: RunningStat = field(default_factory=RunningStat)
+    humidity_cold_stat: RunningStat = field(default_factory=RunningStat)
+    solar_stat: RunningStat = field(default_factory=RunningStat)
     transition_stat: RunningStat = field(default_factory=RunningStat)
     transient_stat: RunningStat = field(default_factory=RunningStat)
     winter_season_stat: RunningStat = field(default_factory=RunningStat)
@@ -244,6 +253,9 @@ class PersonalModel:
         ) / 3.0
         specialist_evidence = (
             self.wind_stat.weight_sum
+            + self.humidity_warm_stat.weight_sum
+            + self.humidity_cold_stat.weight_sum
+            + self.solar_stat.weight_sum
             + self.transition_stat.weight_sum
             + self.transient_stat.weight_sum
             + self.winter_season_stat.weight_sum
@@ -251,7 +263,7 @@ class PersonalModel:
             + self.summer_season_stat.weight_sum
             + self.autumn_season_stat.weight_sum
             + self.pullover_stat.weight_sum
-        ) / 8.0
+        ) / 11.0
         evidence = (
             0.55 * self.general_stat.weight_sum
             + 0.35 * boundary_evidence
@@ -366,6 +378,9 @@ class PersonalModel:
         model.general_offset_c = _safe_number(raw.get("general_offset_c"), 0.0, -5.0, 5.0)
         model.seasonal_model_version = _safe_int(raw.get("seasonal_model_version"), 1) or 1
         model.wind_bias_c = _safe_number(raw.get("wind_bias_c"), 0.0, -2.0, 3.0)
+        model.humidity_warm_bias_c = _safe_number(raw.get("humidity_warm_bias_c"), 0.0, -2.0, 3.0)
+        model.humidity_cold_bias_c = _safe_number(raw.get("humidity_cold_bias_c"), 0.0, -1.0, 1.5)
+        model.solar_bias_c = _safe_number(raw.get("solar_bias_c"), 0.0, -1.5, 3.0)
         model.transition_bias_c = _safe_number(raw.get("transition_bias_c"), 0.0, -1.5, 2.5)
         model.transient_tolerance = _safe_number(raw.get("transient_tolerance"), 1.0, 0.0, 1.5)
         model.pullover_threshold_delta_c = _safe_number(raw.get("pullover_threshold_delta_c"), 0.0, -4.0, 4.0)
@@ -399,7 +414,8 @@ class PersonalModel:
         _canonicalize_threshold_deltas(model)
 
         for name in (
-            "general_stat", "wind_stat", "transition_stat", "transient_stat",
+            "general_stat", "wind_stat", "humidity_warm_stat", "humidity_cold_stat",
+            "solar_stat", "transition_stat", "transient_stat",
             "winter_season_stat", "spring_season_stat", "summer_season_stat",
             "autumn_season_stat", "light_stat", "warm_stat", "winter_stat", "pullover_stat",
         ):
@@ -1059,6 +1075,66 @@ def _contract_season_weights(raw: Any) -> dict[str, float] | None:
     return {name: weight / total for name, weight in normalized.items()}
 
 
+
+def _quantize_specialist_relevance(value: float) -> float:
+    """Return a stable semantic bucket for environment-specialist learning.
+
+    Session dedupe must react to meaningful learning-strength changes without
+    replacing a snapshot for every tiny provider refresh. Five-percentage-point
+    buckets keep the frozen contract close to the visible weather while avoiding
+    noisy session churn.
+    """
+    clamped = _clamp(float(value), 0.0, 1.0)
+    return round(round(clamped / 0.05) * 0.05, 2)
+
+
+def _environment_specialist_semantics(
+    *,
+    humidity_base_adjustment_c: float | None,
+    solar_base_gain_c: float | None,
+    warm_humidity_active: bool,
+    cold_humidity_active: bool,
+    solar_active: bool,
+) -> dict[str, float]:
+    """Return the immutable learning strength for weather-specialist channels.
+
+    The same helper is used when a feedback session is created and when feedback
+    is later applied. This keeps session identity and actual learning semantics in
+    lockstep while deliberately quantizing tiny provider refreshes.
+    """
+    humidity_base = _safe_number(
+        humidity_base_adjustment_c, 0.0, -10.0, 10.0
+    )
+    solar_base = _safe_number(solar_base_gain_c, 0.0, -10.0, 10.0)
+
+    warm_relevance = (
+        _quantize_specialist_relevance(_clamp(abs(humidity_base) / 1.2, 0.25, 1.0))
+        if warm_humidity_active
+        else 0.0
+    )
+    cold_relevance = (
+        _quantize_specialist_relevance(_clamp(abs(humidity_base) / 0.5, 0.25, 1.0))
+        if cold_humidity_active
+        else 0.0
+    )
+    solar_relevance = (
+        _quantize_specialist_relevance(_clamp(solar_base / 2.0, 0.25, 1.0))
+        if solar_active
+        else 0.0
+    )
+    active_channels = sum(
+        1
+        for relevance in (warm_relevance, cold_relevance, solar_relevance)
+        if relevance > 0.0
+    )
+    share = round(1.0 / max(1, active_channels), 6)
+    return {
+        "humidity_warm_relevance": warm_relevance,
+        "humidity_cold_relevance": cold_relevance,
+        "solar_relevance": solar_relevance,
+        "environment_specialist_share": share,
+    }
+
 def apply_feedback(
     model: PersonalModel,
     *,
@@ -1066,6 +1142,8 @@ def apply_feedback(
     jacket: str,
     wind_kmh: float | None = None,
     wind_penalty_c: float | None = None,
+    humidity_base_adjustment_c: float | None = None,
+    solar_base_gain_c: float | None = None,
     transition_penalty_c: float = 0.0,
     effective_c: float | None = None,
     phase: str | None = None,
@@ -1118,6 +1196,12 @@ def apply_feedback(
     )
     wind_learning_locked = "wind_learning" in contract
     wind_learning_enabled = bool(contract.get("wind_learning"))
+    humidity_warm_learning_locked = "humidity_warm_learning" in contract
+    humidity_warm_learning_enabled = bool(contract.get("humidity_warm_learning"))
+    humidity_cold_learning_locked = "humidity_cold_learning" in contract
+    humidity_cold_learning_enabled = bool(contract.get("humidity_cold_learning"))
+    solar_learning_locked = "solar_learning" in contract
+    solar_learning_enabled = bool(contract.get("solar_learning"))
     transition_learning_locked = "transition_learning" in contract
     transition_learning_enabled = bool(contract.get("transition_learning"))
     if "transient_override" in contract:
@@ -1168,6 +1252,126 @@ def apply_feedback(
     ):
         threshold_effective_c = effective_c + PULLOVER_WARMTH_C
 
+    # v0.4.1: attribute clearly relevant humidity/radiation feedback to its own
+    # compact specialist channel.  These factors are evaluated before garment
+    # early-returns so a hot/muggy no-jacket day can actually teach humidity
+    # sensitivity instead of becoming an unlearnable "no lighter jacket" case.
+    # Solar learning is deliberately slower because cloud cover tells us only
+    # that radiation is *possible*; it cannot prove that the user stood in sun.
+    # ``boundary_only`` is used for PHASE_LATER feedback that deliberately
+    # evaluates only the crossed jacket boundary.  Such a rating says nothing
+    # about whether humidity/radiation modelling was right, even if those
+    # specialists happened to be active in the later weather snapshot.
+    # Keep all environment-specialist channels frozen on this path.
+    if boundary_only:
+        warm_humidity_active = False
+        cold_humidity_active = False
+        solar_active = False
+    else:
+        warm_humidity_active = (
+            humidity_warm_learning_enabled
+            if humidity_warm_learning_locked
+            else (
+                not transient_override
+                and (humidity_base_adjustment_c or 0.0) >= 0.35
+            )
+        )
+        cold_humidity_active = (
+            humidity_cold_learning_enabled
+            if humidity_cold_learning_locked
+            else (
+                not transient_override
+                and (humidity_base_adjustment_c or 0.0) <= -0.20
+            )
+        )
+        solar_active = (
+            solar_learning_enabled
+            if solar_learning_locked
+            else (
+                not transient_override
+                and (solar_base_gain_c or 0.0) >= 0.75
+            )
+        )
+
+    specialist_semantics = _environment_specialist_semantics(
+        humidity_base_adjustment_c=humidity_base_adjustment_c,
+        solar_base_gain_c=solar_base_gain_c,
+        warm_humidity_active=warm_humidity_active,
+        cold_humidity_active=cold_humidity_active,
+        solar_active=solar_active,
+    )
+    # Current-schema sessions freeze the semantic learning strength as well as
+    # the on/off gates. This prevents a later provider refresh from reusing a
+    # visually similar session whose feedback would carry materially different
+    # specialist evidence. Legacy/direct callers fall back to the same helper.
+    if "humidity_warm_relevance" in contract:
+        specialist_semantics["humidity_warm_relevance"] = _safe_number(
+            contract.get("humidity_warm_relevance"),
+            specialist_semantics["humidity_warm_relevance"],
+            0.0,
+            1.0,
+        )
+    if "humidity_cold_relevance" in contract:
+        specialist_semantics["humidity_cold_relevance"] = _safe_number(
+            contract.get("humidity_cold_relevance"),
+            specialist_semantics["humidity_cold_relevance"],
+            0.0,
+            1.0,
+        )
+    if "solar_relevance" in contract:
+        specialist_semantics["solar_relevance"] = _safe_number(
+            contract.get("solar_relevance"),
+            specialist_semantics["solar_relevance"],
+            0.0,
+            1.0,
+        )
+    if "environment_specialist_share" in contract:
+        specialist_semantics["environment_specialist_share"] = _safe_number(
+            contract.get("environment_specialist_share"),
+            specialist_semantics["environment_specialist_share"],
+            0.0,
+            1.0,
+        )
+
+    specialist_share = specialist_semantics["environment_specialist_share"]
+    environment_specialist_active = False
+    if warm_humidity_active:
+        relevance = specialist_semantics["humidity_warm_relevance"]
+        previous = model.humidity_warm_stat.weight_sum
+        model.humidity_warm_stat.add(error, weight=weight * relevance * specialist_share)
+        environment_specialist_active = True
+        if error != 0.0:
+            # Too warm => humidity should count as more warming.
+            step = _learning_step(previous) * 0.35 * weight * relevance * specialist_share
+            model.humidity_warm_bias_c = _clamp(
+                model.humidity_warm_bias_c - error * step, -2.0, 3.0
+            )
+
+    if cold_humidity_active:
+        relevance = specialist_semantics["humidity_cold_relevance"]
+        previous = model.humidity_cold_stat.weight_sum
+        model.humidity_cold_stat.add(error, weight=weight * relevance * specialist_share)
+        environment_specialist_active = True
+        if error != 0.0:
+            # Too cold => strengthen the cold/damp correction.
+            step = _learning_step(previous) * 0.25 * weight * relevance * specialist_share
+            model.humidity_cold_bias_c = _clamp(
+                model.humidity_cold_bias_c + error * step, -1.0, 1.5
+            )
+
+    if solar_active:
+        relevance = specialist_semantics["solar_relevance"]
+        previous = model.solar_stat.weight_sum
+        model.solar_stat.add(error, weight=weight * relevance * specialist_share)
+        environment_specialist_active = True
+        if error != 0.0:
+            # Too warm in a high-radiation-potential situation => allow more
+            # solar warming in future. Keep this intentionally slow/noisy.
+            step = _learning_step(previous) * 0.18 * weight * relevance * specialist_share
+            model.solar_bias_c = _clamp(
+                model.solar_bias_c - error * step, -1.5, 3.0
+            )
+
     # The pullover is a fixed mid-layer choice for the planning period, not a
     # fifth jacket class. Attribute feedback before the transient early-return
     # whenever the mid-layer itself is the only sensible explanation:
@@ -1181,14 +1385,20 @@ def apply_feedback(
     # the outer-layer/transient decision instead of double-learning garments.
     pullover_context = top_layer == TOP_PULLOVER and not boundary_only
     if pullover_context and error < 0.0 and jacket == JACKET_NONE:
-        previous_pullover = model.pullover_stat.weight_sum
-        model.pullover_stat.add(error, weight=weight)
-        pullover_step = _learning_step(previous_pullover) * 0.45 * weight
-        model.pullover_threshold_delta_c = _clamp(
-            model.pullover_threshold_delta_c + error * pullover_step,
-            -4.0,
-            4.0,
-        )
+        # When a clearly relevant humidity/solar specialist is active, first
+        # explain this warm miss with that local weather factor. Otherwise the
+        # global Pullover threshold would be shifted by a condition that only
+        # exists on muggy/sunny days. Dry/shaded warm misses still train the
+        # Pullover threshold exactly as before.
+        if not environment_specialist_active:
+            previous_pullover = model.pullover_stat.weight_sum
+            model.pullover_stat.add(error, weight=weight)
+            pullover_step = _learning_step(previous_pullover) * 0.45 * weight
+            model.pullover_threshold_delta_c = _clamp(
+                model.pullover_threshold_delta_c + error * pullover_step,
+                -4.0,
+                4.0,
+            )
         return _learned()
 
     if pullover_context and error == 0.0 and count_feedback:

@@ -81,8 +81,11 @@ def assess_point(
     if wind_penalty > 0:
         wind_penalty *= max(0.55, min(1.65, 1.0 + model.wind_bias_c * 0.12))
 
-    solar_gain = _solar_gain(point.condition, point.cloud_coverage)
-    humidity_adjustment = _humidity_adjustment(temp, point.humidity)
+    base_solar_gain = _solar_gain(point.condition, point.cloud_coverage)
+    solar_gain = _solar_gain(point.condition, point.cloud_coverage, model=model)
+    base_humidity_adjustment = _humidity_adjustment(temp, point.humidity)
+    humidity_adjustment = _humidity_adjustment(temp, point.humidity, model=model)
+    dew_point = _dew_point_c(temp, point.humidity)
     rain_penalty = _rain_penalty(point)
     seasonal_adjustment = model.seasonal_bias_for(point.dt)
 
@@ -119,8 +122,12 @@ def assess_point(
         reasons.append("wind")
     if transition_penalty >= 0.8:
         reasons.append("transition")
-    if solar_gain >= 1.0:
+    if solar_gain >= 0.8:
         reasons.append("sun")
+    if humidity_adjustment >= 0.35:
+        reasons.append("humid_warm")
+    elif humidity_adjustment <= -0.20:
+        reasons.append("humid_cold")
     if rain_penalty > 0:
         reasons.append("wet")
     # Mark personalization whenever the learned profile changes the actual
@@ -130,8 +137,8 @@ def assess_point(
     neutral_effective = (
         temp
         - base_wind_penalty
-        + solar_gain
-        + humidity_adjustment
+        + base_solar_gain
+        + base_humidity_adjustment
         - rain_penalty
         - base_transition_penalty
         + activity_context_c
@@ -152,6 +159,9 @@ def assess_point(
         rain_penalty_c=round(rain_penalty, 2),
         humidity_adjustment_c=round(humidity_adjustment, 2),
         threshold_margin_c=round(margin, 2),
+        base_solar_gain_c=round(base_solar_gain, 2),
+        base_humidity_adjustment_c=round(base_humidity_adjustment, 2),
+        dew_point_c=round(dew_point, 2) if dew_point is not None else None,
         seasonal_adjustment_c=round(seasonal_adjustment, 2),
         reasons=reasons,
     )
@@ -398,6 +408,34 @@ def build_recommendation(
         default=current_result.threshold_margin_c,
     ) <= 1.5
     unusual_weather = any(result.wind_penalty_c >= 1.5 for result in feedback_results)
+    # Give new weather-specific channels a few early feedback opportunities, but
+    # stop treating ordinary humid/sunny weather as permanently "unusual" once
+    # the relevant specialist has acquired its own evidence.  Keep a dedicated
+    # flag as well: unlike generic unusual weather, an under-trained specialist
+    # must stay reachable in the UI or it could remain at zero evidence forever.
+    specialist_feedback_needed = False
+    if model.humidity_warm_stat.weight_sum < 3.0:
+        warm_humidity_feedback_needed = any(
+            result.base_humidity_adjustment_c >= 0.60 for result in feedback_results
+        )
+        specialist_feedback_needed = (
+            specialist_feedback_needed or warm_humidity_feedback_needed
+        )
+        unusual_weather = unusual_weather or warm_humidity_feedback_needed
+    if model.humidity_cold_stat.weight_sum < 3.0:
+        cold_humidity_feedback_needed = any(
+            result.base_humidity_adjustment_c <= -0.30 for result in feedback_results
+        )
+        specialist_feedback_needed = (
+            specialist_feedback_needed or cold_humidity_feedback_needed
+        )
+        unusual_weather = unusual_weather or cold_humidity_feedback_needed
+    if model.solar_stat.weight_sum < 3.0:
+        solar_feedback_needed = any(
+            result.base_solar_gain_c >= 1.0 for result in feedback_results
+        )
+        specialist_feedback_needed = specialist_feedback_needed or solar_feedback_needed
+        unusual_weather = unusual_weather or solar_feedback_needed
 
     decision_confidence = model.decision_confidence(
         jacket_now,
@@ -422,6 +460,7 @@ def build_recommendation(
             and decision_confidence >= 0.65
             and forecast_coverage_complete
             and transient is None
+            and not specialist_feedback_needed
             and not model.has_low_evidence_season_anchor(current.dt)
             and not (
                 later_point is not None
@@ -475,6 +514,12 @@ def build_recommendation(
         transition_penalty_c=current_result.transition_penalty_c,
         observed_at=current.dt,
         current_wind_penalty_c=current_result.wind_penalty_c,
+        current_humidity=(round(current.humidity, 1) if current.humidity is not None else None),
+        current_dew_point_c=current_result.dew_point_c,
+        current_humidity_adjustment_c=current_result.humidity_adjustment_c,
+        current_base_humidity_adjustment_c=current_result.base_humidity_adjustment_c,
+        current_solar_gain_c=current_result.solar_gain_c,
+        current_base_solar_gain_c=current_result.base_solar_gain_c,
         later_temperature_c=(
             round(later_point.temperature_c, 1) if later_point is not None else None
         ),
@@ -494,6 +539,22 @@ def build_recommendation(
         ),
         later_wind_penalty_c=(
             later_result.wind_penalty_c if later_result is not None else None
+        ),
+        later_humidity=(
+            round(later_point.humidity, 1)
+            if later_point is not None and later_point.humidity is not None
+            else None
+        ),
+        later_dew_point_c=(later_result.dew_point_c if later_result is not None else None),
+        later_humidity_adjustment_c=(
+            later_result.humidity_adjustment_c if later_result is not None else None
+        ),
+        later_base_humidity_adjustment_c=(
+            later_result.base_humidity_adjustment_c if later_result is not None else None
+        ),
+        later_solar_gain_c=(later_result.solar_gain_c if later_result is not None else None),
+        later_base_solar_gain_c=(
+            later_result.base_solar_gain_c if later_result is not None else None
         ),
         work_context=work_context,
         work_jacket=work_jacket,
@@ -733,6 +794,9 @@ def _result_with_pullover(
         threshold_margin_c=round(
             _nearest_threshold_margin(clothing_effective, thresholds), 2
         ),
+        base_solar_gain_c=result.base_solar_gain_c,
+        base_humidity_adjustment_c=result.base_humidity_adjustment_c,
+        dew_point_c=result.dew_point_c,
         seasonal_adjustment_c=result.seasonal_adjustment_c,
         reasons=list(result.reasons),
     )
@@ -921,43 +985,144 @@ def _wind_penalty(temp_c: float, wind_kmh: float) -> float:
     )
 
 
-def _solar_gain(condition: str | None, cloud: float | None) -> float:
-    condition = (condition or "").lower()
-    if condition == "sunny":
-        base = 2.0
-    elif condition == "partlycloudy":
-        # Hourly HA forecasts do not guarantee an explicit day/night flag and
-        # there is no standardized "partlycloudy-night" state. Be conservative:
-        # a few clouds alone are not proof of useful solar warming.
-        base = 0.0
-    elif condition == "clear-night":
-        base = -0.35
-    else:
-        base = 0.0
-    if cloud is not None and base > 0:
-        base *= max(0.25, min(1.0, 1.0 - cloud / 125.0))
-    return base
+def _solar_gain(
+    condition: str | None,
+    cloud: float | None,
+    *,
+    model: PersonalModel | None = None,
+) -> float:
+    """Return a conservative radiation-potential correction.
 
-
-def _humidity_adjustment(temp_c: float, humidity: float | None) -> float:
-    """Small humidity correction with smooth temperature transitions."""
-    if humidity is None:
+    A weather provider can tell us that sunshine is meteorologically possible,
+    but not whether the user is currently in building/tree shade. Therefore this
+    is deliberately much smaller than a full mean-radiant-temperature model.
+    ``sunny`` is the only positive short-wave signal. ``partlycloudy`` stays
+    neutral without an explicit daylight/exposure signal because cloud cover
+    alone cannot prove that the user is personally in direct sun.
+    """
+    normalized = (condition or "").lower()
+    if normalized == "sunny":
+        # With no cloud field, keep some uncertainty instead of assuming a fully
+        # exposed clear sky. Existing v0.4.0 used 2 K for sunny; 1.7 K is a
+        # slightly more conservative potential in v0.4.1.
+        base = 1.7 if cloud is None else 2.0
+    elif normalized == "partlycloudy":
+        # Without an explicit daylight/exposure signal, partly-cloudy is too
+        # ambiguous to assign solar warmth: providers may emit it at night and
+        # cloud percentage alone cannot tell whether the user is in sun/shade.
+        # Keep the conservative v0.4.1 radiation model on the strong ``sunny``
+        # signal only; this also removes a hard cloud-percentage threshold.
         return 0.0
-    humidity = max(0.0, min(100.0, humidity))
+    elif normalized == "clear-night":
+        return -0.30
+    else:
+        return 0.0
 
-    cold_base = 0.0
-    if humidity > 80.0:
-        cold_base = -min(0.55, (humidity - 80.0) * 0.0275)
-    # Full cold-damp effect through 10 °C, then fade it out by 14 °C.
-    cold_strength = 1.0 - _smoothstep(10.0, 14.0, temp_c)
+    if cloud is not None and base > 0.0:
+        # Cloud is evidence about *potential* short-wave radiation, not proof of
+        # personal sun exposure. Never reduce a sunny provider state below 20%
+        # solely because its cloud percentage is noisy/inconsistent.
+        cloud_factor = max(0.20, min(1.0, 1.0 - cloud / 120.0))
+        base *= cloud_factor
+
+    if model is None or base <= 0.0:
+        return base
+
+    relevance = max(0.0, min(1.0, base / 2.0))
+    personalized = base + model.solar_bias_c * relevance
+    # Personal learning may decide that the forecast sunshine usually matters
+    # less (e.g. shade-heavy routine), but it can never turn sunshine into a
+    # cooling term.
+    return max(0.0, min(5.0, personalized))
+
+
+def _dew_point_c(temp_c: float, humidity: float | None) -> float | None:
+    """Return dew point from air temperature/RH using the Magnus approximation."""
+    if humidity is None:
+        return None
+    try:
+        rh = float(humidity)
+        temp = float(temp_c)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(rh) or not math.isfinite(temp) or rh <= 0.0:
+        return None
+    rh = max(0.1, min(100.0, rh))
+    # Constants widely used for water vapour over liquid water in ordinary
+    # outdoor temperatures. Dew point is used as a moisture-content signal, not
+    # exposed to the user as an official meteorological derived entity.
+    a = 17.62
+    b = 243.12
+    gamma = math.log(rh / 100.0) + (a * temp) / (b + temp)
+    denominator = a - gamma
+    if abs(denominator) < 1e-9:
+        return None
+    dew = (b * gamma) / denominator
+    return min(temp, dew) if math.isfinite(dew) else None
+
+
+def _humidity_components(
+    temp_c: float, humidity: float | None
+) -> tuple[float, float, float, float, float | None]:
+    """Return neutral warm/cold moisture corrections and dew point.
+
+    Relative humidity alone is misleading across temperatures. The warm side is
+    therefore driven by dew point (actual atmospheric moisture content) and only
+    fades in once air temperature is warm enough for evaporation comfort to
+    matter. The small cold/damp term remains RH-based and intentionally bounded.
+    """
+    if humidity is None:
+        return 0.0, 0.0, 0.0, 0.0, None
+    try:
+        rh = float(humidity)
+    except (TypeError, ValueError, OverflowError):
+        return 0.0, 0.0, 0.0, 0.0, None
+    if not math.isfinite(rh):
+        return 0.0, 0.0, 0.0, 0.0, None
+    rh = max(0.0, min(100.0, rh))
+    dew = _dew_point_c(temp_c, rh)
+
+    # Very damp cold air gets only a small correction. This is deliberately
+    # weaker than rain/wet-clothing handling and fades out through 8..14 C.
+    cold_relevance = _smoothstep(82.0, 100.0, rh) * (
+        1.0 - _smoothstep(8.0, 14.0, temp_c)
+    )
+    cold_base = -0.50 * cold_relevance
 
     warm_base = 0.0
-    if humidity > 65.0:
-        warm_base = min(1.0, (humidity - 65.0) * 0.03)
-    # Warm-humid discomfort fades in gradually instead of jumping at 24 °C.
-    warm_strength = _smoothstep(22.0, 26.0, temp_c)
+    warm_relevance = 0.0
+    if dew is not None and dew > 12.8:
+        # NWS comfort guidance uses roughly 55 F / 65 F dew point as useful
+        # "comfortable -> muggy" landmarks. Map those to a modest clothing
+        # correction rather than applying Heat Index/Humidex outside their
+        # intended range.
+        if dew <= 18.3:
+            moisture_load = (dew - 12.8) / (18.3 - 12.8) * 0.90
+        else:
+            moisture_load = min(2.0, 0.90 + (dew - 18.3) * 0.24)
+        warm_temp_strength = _smoothstep(16.0, 22.0, temp_c)
+        warm_base = moisture_load * warm_temp_strength
+        warm_relevance = min(1.0, moisture_load / 1.5) * warm_temp_strength
 
-    return cold_base * cold_strength + warm_base * warm_strength
+    return warm_base, cold_base, warm_relevance, cold_relevance, dew
+
+
+def _humidity_adjustment(
+    temp_c: float,
+    humidity: float | None,
+    *,
+    model: PersonalModel | None = None,
+) -> float:
+    """Return dew-point based warm humidity plus a small cold/damp correction."""
+    warm_base, cold_base, warm_relevance, cold_relevance, _dew = _humidity_components(
+        temp_c, humidity
+    )
+    if model is None:
+        return warm_base + cold_base
+
+    warm = max(0.0, warm_base + model.humidity_warm_bias_c * warm_relevance)
+    cold = min(0.0, cold_base - model.humidity_cold_bias_c * cold_relevance)
+    return max(-2.0, min(5.0, warm + cold))
 
 
 def _rain_penalty(point: WeatherPoint) -> float:

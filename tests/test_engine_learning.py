@@ -152,6 +152,10 @@ def test_mature_confident_profile_can_hide_clear_hot_advice():
             model, rating=const.FEEDBACK_PERFECT, jacket=const.JACKET_NONE,
             observed_at=observed,
         )
+    # v0.4.1 keeps a materially active, under-trained solar specialist reachable
+    # for early feedback. Once it has enough own evidence, the mature stable
+    # no-jacket state may become fully hidden again.
+    model.solar_stat = learning.RunningStat(samples=3, weight_sum=3.0)
     rec = engine.build_recommendation(
         point(0, 28, condition="sunny"),
         [point(i, 27 + i * 0.05, condition="sunny") for i in range(1, 10)],
@@ -677,6 +681,240 @@ def test_humidity_adjustment_is_continuous_at_transition_temperatures():
     assert abs(warm_above - warm_below) < 0.05
 
 
+def test_v041_dew_point_distinguishes_muggy_air_from_relative_humidity_alone():
+    # Around 20 C / 90% RH the dew point is already near 18 C and should create
+    # a meaningful warm-humid correction; 20 C / 50% remains neutral.
+    assert engine._dew_point_c(20.0, 90.0) == pytest.approx(18.31, abs=0.05)
+    assert engine._humidity_adjustment(20.0, 90.0) > 0.6
+    assert engine._humidity_adjustment(20.0, 50.0) == pytest.approx(0.0)
+    # High RH in genuinely cold air is not misread as muggy heat.
+    assert engine._humidity_adjustment(5.0, 95.0) < 0.0
+
+
+def test_v041_humidity_warm_learning_is_separate_and_affects_only_humid_weather():
+    model = PersonalModel.from_answers(3, 3, 3, 3, 3)
+    model.general_stat = learning.RunningStat(samples=12, weight_sum=12.0)
+    dry_before = engine.assess_point(point(0, 20.0, humidity=50.0), model).effective_temperature_c
+    humid_before = engine.assess_point(point(0, 20.0, humidity=90.0), model).effective_temperature_c
+    pullover_before = model.pullover_threshold_delta_c
+
+    learned = learning.apply_feedback(
+        model,
+        rating=const.FEEDBACK_TOO_WARM,
+        jacket=const.JACKET_NONE,
+        effective_c=humid_before,
+        humidity_base_adjustment_c=engine._humidity_adjustment(20.0, 90.0),
+        learning_contract={
+            "bootstrap_mode": False,
+            "humidity_warm_learning": True,
+            "humidity_cold_learning": False,
+            "solar_learning": False,
+            "wind_learning": False,
+            "transition_learning": False,
+        },
+    )
+    assert learned is True
+    assert model.humidity_warm_stat.weight_sum > 0.0
+    assert model.humidity_warm_bias_c > 0.0
+    assert model.pullover_threshold_delta_c == pullover_before
+    humid_after = engine.assess_point(point(0, 20.0, humidity=90.0), model).effective_temperature_c
+    dry_after = engine.assess_point(point(0, 20.0, humidity=50.0), model).effective_temperature_c
+    assert humid_after > humid_before
+    assert dry_after == dry_before
+
+
+def _cold_humidity_contract():
+    return {
+        "bootstrap_mode": False,
+        "humidity_warm_learning": False,
+        "humidity_cold_learning": True,
+        "solar_learning": False,
+        "humidity_warm_relevance": 0.0,
+        "humidity_cold_relevance": 1.0,
+        "solar_relevance": 0.0,
+        "environment_specialist_share": 1.0,
+        "wind_learning": False,
+        "transition_learning": False,
+    }
+
+
+def test_v041_cold_humidity_too_cold_strengthens_cold_damp_effect():
+    model = PersonalModel.from_answers(3, 3, 3, 3, 3)
+    before = model.humidity_cold_bias_c
+    learning.apply_feedback(
+        model,
+        rating=const.FEEDBACK_TOO_COLD,
+        jacket=const.JACKET_LIGHT,
+        humidity_base_adjustment_c=-0.5,
+        learning_contract=_cold_humidity_contract(),
+    )
+    assert model.humidity_cold_bias_c > before
+    assert model.humidity_cold_stat.weight_sum == pytest.approx(1.0)
+
+
+def test_v041_cold_humidity_too_warm_weakens_cold_damp_effect():
+    model = PersonalModel.from_answers(3, 3, 3, 3, 3)
+    before = model.humidity_cold_bias_c
+    learning.apply_feedback(
+        model,
+        rating=const.FEEDBACK_TOO_WARM,
+        jacket=const.JACKET_LIGHT,
+        humidity_base_adjustment_c=-0.5,
+        learning_contract=_cold_humidity_contract(),
+    )
+    assert model.humidity_cold_bias_c < before
+    assert model.humidity_cold_stat.weight_sum == pytest.approx(1.0)
+
+
+def test_v041_cold_humidity_perfect_adds_evidence_without_moving_bias():
+    model = PersonalModel.from_answers(3, 3, 3, 3, 3)
+    before = model.humidity_cold_bias_c
+    learning.apply_feedback(
+        model,
+        rating=const.FEEDBACK_PERFECT,
+        jacket=const.JACKET_LIGHT,
+        humidity_base_adjustment_c=-0.5,
+        learning_contract=_cold_humidity_contract(),
+    )
+    assert model.humidity_cold_bias_c == before
+    assert model.humidity_cold_stat.weight_sum == pytest.approx(1.0)
+
+
+def test_v041_locked_specialist_relevance_controls_actual_learning_weight():
+    model = PersonalModel.from_answers(3, 3, 3, 3, 3)
+    learning.apply_feedback(
+        model,
+        rating=const.FEEDBACK_TOO_WARM,
+        jacket=const.JACKET_NONE,
+        humidity_base_adjustment_c=1.98,
+        learning_contract={
+            "bootstrap_mode": False,
+            "humidity_warm_learning": True,
+            "humidity_cold_learning": False,
+            "solar_learning": False,
+            "humidity_warm_relevance": 0.30,
+            "humidity_cold_relevance": 0.0,
+            "solar_relevance": 0.0,
+            "environment_specialist_share": 1.0,
+            "wind_learning": False,
+            "transition_learning": False,
+        },
+    )
+    assert model.humidity_warm_stat.weight_sum == pytest.approx(0.30)
+    assert model.humidity_warm_bias_c == pytest.approx(0.0945)
+
+
+def test_v041_malformed_locked_specialist_weights_fall_back_safely():
+    model = PersonalModel.from_answers(3, 3, 3, 3, 3)
+    learned = learning.apply_feedback(
+        model,
+        rating=const.FEEDBACK_TOO_WARM,
+        jacket=const.JACKET_NONE,
+        humidity_base_adjustment_c=0.8,
+        learning_contract={
+            "bootstrap_mode": False,
+            "humidity_warm_learning": True,
+            "humidity_cold_learning": False,
+            "solar_learning": False,
+            "humidity_warm_relevance": {"broken": True},
+            "environment_specialist_share": float("inf"),
+            "wind_learning": False,
+            "transition_learning": False,
+        },
+    )
+    assert learned is True
+    assert model.humidity_warm_stat.weight_sum > 0.0
+    assert 0.0 < model.humidity_warm_bias_c <= 3.0
+
+
+def test_v041_muggy_pullover_too_warm_prefers_humidity_channel_over_global_pullover_shift():
+    model = PersonalModel.from_answers(3, 3, 3, 3, 3)
+    model.general_stat = learning.RunningStat(samples=12, weight_sum=12.0)
+    before_pullover = model.pullover_threshold_delta_c
+    learned = learning.apply_feedback(
+        model,
+        rating=const.FEEDBACK_TOO_WARM,
+        jacket=const.JACKET_NONE,
+        top_layer=const.TOP_PULLOVER,
+        humidity_base_adjustment_c=0.8,
+        learning_contract={
+            "bootstrap_mode": False,
+            "humidity_warm_learning": True,
+            "humidity_cold_learning": False,
+            "solar_learning": False,
+            "wind_learning": False,
+            "transition_learning": False,
+        },
+    )
+    assert learned is True
+    assert model.humidity_warm_bias_c > 0.0
+    assert model.pullover_threshold_delta_c == before_pullover
+    assert model.pullover_stat.weight_sum == 0.0
+
+
+def test_v041_dry_pullover_too_warm_still_trains_pullover_threshold():
+    model = PersonalModel.from_answers(3, 3, 3, 3, 3)
+    model.general_stat = learning.RunningStat(samples=12, weight_sum=12.0)
+    before = model.pullover_threshold_delta_c
+    learning.apply_feedback(
+        model,
+        rating=const.FEEDBACK_TOO_WARM,
+        jacket=const.JACKET_NONE,
+        top_layer=const.TOP_PULLOVER,
+        humidity_base_adjustment_c=0.0,
+        solar_base_gain_c=0.0,
+        learning_contract={
+            "bootstrap_mode": False,
+            "humidity_warm_learning": False,
+            "humidity_cold_learning": False,
+            "solar_learning": False,
+            "wind_learning": False,
+            "transition_learning": False,
+        },
+    )
+    assert model.pullover_threshold_delta_c < before
+    assert model.pullover_stat.weight_sum > 0.0
+
+
+def test_v041_solar_learning_is_conservative_and_does_not_change_shaded_weather():
+    model = PersonalModel.from_answers(3, 3, 3, 3, 3)
+    model.general_stat = learning.RunningStat(samples=12, weight_sum=12.0)
+    cloudy_before = engine.assess_point(point(0, 18.0, condition="cloudy"), model).effective_temperature_c
+    sunny_before = engine.assess_point(point(0, 18.0, condition="sunny", cloud_coverage=0), model).effective_temperature_c
+    learning.apply_feedback(
+        model,
+        rating=const.FEEDBACK_TOO_WARM,
+        jacket=const.JACKET_NONE,
+        solar_base_gain_c=2.0,
+        learning_contract={
+            "bootstrap_mode": False,
+            "humidity_warm_learning": False,
+            "humidity_cold_learning": False,
+            "solar_learning": True,
+            "wind_learning": False,
+            "transition_learning": False,
+        },
+    )
+    assert 0.0 < model.solar_bias_c < 0.25
+    assert model.solar_stat.weight_sum > 0.0
+    sunny_after = engine.assess_point(point(0, 18.0, condition="sunny", cloud_coverage=0), model).effective_temperature_c
+    cloudy_after = engine.assess_point(point(0, 18.0, condition="cloudy"), model).effective_temperature_c
+    assert sunny_after > sunny_before
+    assert cloudy_after == cloudy_before
+
+
+def test_v041_profile_roundtrip_preserves_environment_specialists():
+    model = PersonalModel.from_answers(3, 3, 3, 3, 3)
+    model.humidity_warm_bias_c = 0.7
+    model.humidity_cold_bias_c = -0.2
+    model.solar_bias_c = 0.4
+    model.humidity_warm_stat.add(-1.0, weight=0.8)
+    model.humidity_cold_stat.add(1.0, weight=0.4)
+    model.solar_stat.add(-1.0, weight=0.5)
+    restored = PersonalModel.from_dict(model.to_dict())
+    assert restored.to_dict() == model.to_dict()
+
+
 def test_later_decision_preserves_its_reason():
     model = PersonalModel.from_answers(3, 3, 3, 3)
     rec = engine.build_recommendation(
@@ -878,13 +1116,27 @@ def test_unusual_days_keep_model_in_fast_learning_until_weighted_experience_is_m
     )
 
 
-def test_partlycloudy_without_daylight_signal_has_no_solar_bonus():
+def test_partlycloudy_has_no_solar_bonus_without_daylight_exposure_evidence():
     model = PersonalModel.from_answers(3, 3, 3, 3)
-    result = engine.assess_point(
-        point(0, 17.5, condition="partlycloudy", cloud_coverage=30),
-        model,
-    )
-    assert result.solar_gain_c == 0.0
+    # Cloud percentage alone cannot establish daylight or personal sun exposure.
+    # Keep partly-cloudy neutral across the old 40% boundary.
+    for cloud in (0.0, 30.0, 39.9, 40.0, 40.0001, 41.0, 60.0, 100.0):
+        result = engine.assess_point(
+            point(0, 17.5, condition="partlycloudy", cloud_coverage=cloud),
+            model,
+        )
+        assert result.solar_gain_c == 0.0
+        assert result.base_solar_gain_c == 0.0
+
+
+def test_partlycloudy_without_low_cloud_evidence_has_no_solar_bonus():
+    model = PersonalModel.from_answers(3, 3, 3, 3)
+    assert engine.assess_point(
+        point(0, 17.5, condition="partlycloudy", cloud_coverage=60), model
+    ).solar_gain_c == 0.0
+    assert engine.assess_point(
+        point(0, 17.5, condition="partlycloudy"), model
+    ).solar_gain_c == 0.0
 
 
 def test_corrupt_scalar_storage_is_sanitized_instead_of_crashing_engine():
@@ -2382,3 +2634,188 @@ def test_pullover_transient_cooling_uses_shifted_jacket_boundary():
     assert rec.jacket_later == const.JACKET_LIGHT
     assert rec.transient_override is False
     assert rec.instant_jacket is None
+
+
+def test_v041_multiple_environment_specialists_share_one_feedback_signal():
+    single = PersonalModel.from_answers(3, 3, 3, 3, 3)
+    combined = PersonalModel.from_answers(3, 3, 3, 3, 3)
+    for model in (single, combined):
+        model.general_stat = learning.RunningStat(samples=12, weight_sum=12.0)
+
+    learning.apply_feedback(
+        single,
+        rating=const.FEEDBACK_TOO_WARM,
+        jacket=const.JACKET_NONE,
+        humidity_base_adjustment_c=1.0,
+        solar_base_gain_c=0.0,
+        learning_contract={
+            "bootstrap_mode": False,
+            "humidity_warm_learning": True,
+            "humidity_cold_learning": False,
+            "solar_learning": False,
+            "wind_learning": False,
+            "transition_learning": False,
+        },
+    )
+    learning.apply_feedback(
+        combined,
+        rating=const.FEEDBACK_TOO_WARM,
+        jacket=const.JACKET_NONE,
+        humidity_base_adjustment_c=1.0,
+        solar_base_gain_c=2.0,
+        learning_contract={
+            "bootstrap_mode": False,
+            "humidity_warm_learning": True,
+            "humidity_cold_learning": False,
+            "solar_learning": True,
+            "wind_learning": False,
+            "transition_learning": False,
+        },
+    )
+    assert 0.0 < combined.humidity_warm_bias_c < single.humidity_warm_bias_c
+    assert combined.solar_bias_c > 0.0
+    assert combined.humidity_warm_stat.weight_sum < single.humidity_warm_stat.weight_sum
+
+
+def _v041_environment_boundary_contract():
+    return {
+        "bootstrap_mode": False,
+        "humidity_warm_learning": True,
+        "humidity_cold_learning": False,
+        "solar_learning": True,
+        "humidity_warm_relevance": 1.0,
+        "humidity_cold_relevance": 0.0,
+        "solar_relevance": 1.0,
+        "environment_specialist_share": 0.5,
+        "wind_learning": False,
+        "transition_learning": False,
+    }
+
+
+@pytest.mark.parametrize(
+    ("rating", "direction"),
+    [
+        (const.FEEDBACK_TOO_COLD, 1),
+        (const.FEEDBACK_TOO_WARM, -1),
+    ],
+)
+def test_v041_boundary_only_later_feedback_does_not_train_environment_specialists(
+    rating, direction
+):
+    model = PersonalModel.from_answers(3, 3, 3, 3, 3)
+    model.general_stat = learning.RunningStat(samples=20, weight_sum=20.0)
+    before_boundary = model.warm_threshold_delta_c
+    before_humidity_bias = model.humidity_warm_bias_c
+    before_solar_bias = model.solar_bias_c
+    before_humidity_weight = model.humidity_warm_stat.weight_sum
+    before_solar_weight = model.solar_stat.weight_sum
+
+    learned = learning.apply_feedback(
+        model,
+        rating=rating,
+        jacket=const.JACKET_LIGHT,
+        effective_c=13.0,
+        humidity_base_adjustment_c=1.2,
+        solar_base_gain_c=2.0,
+        apply_general=False,
+        boundary_only=True,
+        boundary_attribute="warm_threshold_delta_c",
+        learning_contract=_v041_environment_boundary_contract(),
+    )
+
+    assert learned is True
+    if direction > 0:
+        assert model.warm_threshold_delta_c > before_boundary
+    else:
+        assert model.warm_threshold_delta_c < before_boundary
+    assert model.humidity_warm_bias_c == before_humidity_bias
+    assert model.solar_bias_c == before_solar_bias
+    assert model.humidity_warm_stat.weight_sum == before_humidity_weight
+    assert model.solar_stat.weight_sum == before_solar_weight
+
+
+def _mature_no_jacket_model_for_specialist_visibility():
+    model = PersonalModel.from_answers(3, 3, 3, 3, 3)
+    observed = point(0, 30.0, condition="cloudy").dt
+    for _ in range(30):
+        learning.apply_feedback(
+            model,
+            rating=const.FEEDBACK_PERFECT,
+            jacket=const.JACKET_NONE,
+            observed_at=observed,
+        )
+    return model
+
+
+def test_v041_untrained_material_warm_humidity_specialist_cannot_be_hidden():
+    model = _mature_no_jacket_model_for_specialist_visibility()
+    current = point(0, 30.0, humidity=80.0, condition="cloudy")
+    forecast = [
+        point(hour, 30.0, humidity=80.0, condition="cloudy")
+        for hour in range(1, 10)
+    ]
+
+    rec = engine.build_recommendation(
+        current,
+        forecast,
+        model,
+        indoor_temperature_c=22.0,
+        base_horizon_hours=9,
+        max_horizon_hours=9,
+    )
+    assert rec.jacket_now == const.JACKET_NONE
+    assert rec.current_base_humidity_adjustment_c >= 0.60
+    assert model.humidity_warm_stat.weight_sum < 3.0
+    assert "uncertain_conditions" in rec.reasons
+    assert rec.display_mode != const.DISPLAY_HIDDEN
+
+    model.humidity_warm_stat = learning.RunningStat(samples=3, weight_sum=3.0)
+    learned_rec = engine.build_recommendation(
+        current,
+        forecast,
+        model,
+        indoor_temperature_c=22.0,
+        base_horizon_hours=9,
+        max_horizon_hours=9,
+    )
+    assert learned_rec.display_mode == const.DISPLAY_HIDDEN
+
+
+def test_v041_untrained_material_solar_specialist_cannot_be_hidden():
+    model = _mature_no_jacket_model_for_specialist_visibility()
+    # Keep humidity neutral so the visibility requirement is specifically solar.
+    model.humidity_warm_stat = learning.RunningStat(samples=3, weight_sum=3.0)
+    current = point(
+        0, 28.0, humidity=50.0, condition="sunny", cloud_coverage=10.0
+    )
+    forecast = [
+        point(
+            hour, 28.0, humidity=50.0, condition="sunny", cloud_coverage=10.0
+        )
+        for hour in range(1, 10)
+    ]
+
+    rec = engine.build_recommendation(
+        current,
+        forecast,
+        model,
+        indoor_temperature_c=22.0,
+        base_horizon_hours=9,
+        max_horizon_hours=9,
+    )
+    assert rec.jacket_now == const.JACKET_NONE
+    assert rec.current_base_solar_gain_c >= 1.0
+    assert model.solar_stat.weight_sum < 3.0
+    assert "uncertain_conditions" in rec.reasons
+    assert rec.display_mode != const.DISPLAY_HIDDEN
+
+    model.solar_stat = learning.RunningStat(samples=3, weight_sum=3.0)
+    learned_rec = engine.build_recommendation(
+        current,
+        forecast,
+        model,
+        indoor_temperature_c=22.0,
+        base_horizon_hours=9,
+        max_horizon_hours=9,
+    )
+    assert learned_rec.display_mode == const.DISPLAY_HIDDEN
