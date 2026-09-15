@@ -107,7 +107,7 @@ def test_frontend_registration_does_not_hide_unexpected_runtime_errors():
 
 
 def test_release_version_is_consistent_across_current_release_files():
-    version = "0.3.2"
+    version = "0.4.0"
     manifest = json.loads((INTEGRATION / "manifest.json").read_text(encoding="utf-8"))
     const_source = (INTEGRATION / "const.py").read_text(encoding="utf-8")
     init_source = (INTEGRATION / "__init__.py").read_text(encoding="utf-8")
@@ -174,7 +174,7 @@ def test_user_card_does_not_expose_internal_effective_temperature():
 
 def test_bug_report_template_targets_current_release():
     bug = (ROOT / ".github" / "ISSUE_TEMPLATE" / "bug_report.yml").read_text(encoding="utf-8")
-    assert 'value: "0.3.2"' in bug
+    assert 'value: "0.4.0"' in bug
 
 
 def test_release_ci_covers_declared_minimum_current_and_latest_home_assistant():
@@ -253,3 +253,11 @@ def test_unload_failure_restores_runtime_unloading_flag_and_revision_api_is_scop
     assert 'directory_revision_token' in profiles_source
     assert '_revision_token_for_connection' in api_source
     assert '"profile_revision": _revision_token_for_connection' in api_source
+
+
+def test_v040_pullover_reason_copy_stays_truthful_without_forecast_claims():
+    card = (ROOT / "custom_components" / "jackenberater" / "frontend" / "jackenberater-card.js").read_text(encoding="utf-8")
+    assert "Später wird es deutlich milder" not in card
+    assert "Die Kälte ist anhaltend stark genug" not in card
+    assert "nicht durchgehend kühl und stabil genug" in card
+    assert "Es ist stark genug kalt" in card

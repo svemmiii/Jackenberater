@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import timedelta
 
 DOMAIN = "jackenberater"
-INTEGRATION_VERSION = "0.3.2"
+INTEGRATION_VERSION = "0.4.0"
 PLATFORMS = ["sensor"]
 PROFILE_BACKUP_ENABLED = False
 
@@ -45,6 +45,16 @@ DEFAULT_FALLBACK_INDOOR_TEMP = 21.5
 BASE_LIGHT_THRESHOLD_C = 18.0
 BASE_WARM_THRESHOLD_C = 12.0
 BASE_WINTER_THRESHOLD_C = 5.0
+
+# Pullover / mid-layer planning. A pullover is deliberately treated differently
+# from a jacket: it is a base decision for the relevant planning period, while
+# an outer jacket may be taken off or carried later. ``PULLOVER_WARMTH_C`` is a
+# transparent comfort heuristic, not a conversion from clo to air temperature.
+BASE_PULLOVER_COMFORT_C = 18.0
+PULLOVER_WARMTH_C = 3.0
+PULLOVER_STABILITY_RANGE_C = 3.0
+PULLOVER_MIN_STABLE_DURATION = timedelta(hours=2)
+PULLOVER_DEEP_COLD_MARGIN_C = 6.0
 DEFAULT_WORKDAY_START = "08:00"
 DEFAULT_WORKDAY_END = "17:00"
 
@@ -70,6 +80,10 @@ JACKET_WARM = "warm"
 JACKET_WINTER = "winter"
 JACKET_LEVELS = (JACKET_NONE, JACKET_LIGHT, JACKET_WARM, JACKET_WINTER)
 JACKET_RANK = {name: idx for idx, name in enumerate(JACKET_LEVELS)}
+
+TOP_SHIRT = "shirt"
+TOP_PULLOVER = "pullover"
+TOP_LAYERS = (TOP_SHIRT, TOP_PULLOVER)
 
 RAIN_NONE = "none"
 RAIN_TAKE = "take"

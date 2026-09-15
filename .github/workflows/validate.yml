@@ -22,7 +22,7 @@ jobs:
       - run: node --check custom_components/jackenberater/frontend/jackenberater-card.js
       - run: node tests/frontend-session.test.js
 
-  # Reproducible smoke against the current stable HA runtime used for this release.
+  # Reproducible smoke against the latest currently published HA test helper.
   ha-runtime-smoke:
     runs-on: ubuntu-latest
     steps:

@@ -14,6 +14,7 @@ from typing import Callable, Iterable
 
 from .const import (
     BASE_LIGHT_THRESHOLD_C,
+    BASE_PULLOVER_COMFORT_C,
     BASE_WARM_THRESHOLD_C,
     BASE_WINTER_THRESHOLD_C,
     CALENDAR_MAX_HOURS,
@@ -27,9 +28,15 @@ from .const import (
     JACKET_WARM,
     JACKET_WINTER,
     MAX_FORECAST_HOURS,
+    PULLOVER_DEEP_COLD_MARGIN_C,
+    PULLOVER_MIN_STABLE_DURATION,
+    PULLOVER_STABILITY_RANGE_C,
+    PULLOVER_WARMTH_C,
     RAIN_NONE,
     RAIN_RECOMMENDED,
     RAIN_TAKE,
+    TOP_PULLOVER,
+    TOP_SHIRT,
 )
 from .learning import PersonalModel
 from .models import Recommendation, ThermalResult, WeatherPoint
@@ -167,19 +174,31 @@ def build_recommendation(
     activity_context_c: float = 0.0,
     activity_context_fn: Callable[[datetime], float] | None = None,
 ) -> Recommendation:
-    """Build the current + future practical garment recommendation.
+    """Build one practical upper-body outfit recommendation.
 
-    The immediate thermal class remains the physical starting point, but a short
-    transient can be intentionally smoothed when the continuing personal comfort
-    trend clearly favours the neighbouring jacket class. This avoids telling a
-    user to wear a heavier jacket for only a few minutes before a lasting warm-up,
-    or to carry two jackets just to switch almost immediately.
+    v0.4.0 adds one fixed mid-layer choice (shirt or pullover) while keeping the
+    proven jacket engine as the removable outer layer. The advisor never tells a
+    user to change from shirt to pullover later in the day: when notable warming
+    is expected, shirt + removable jacket is deliberately preferred.
     """
     current_result = assess_point(
         current,
         model,
         indoor_temperature_c=indoor_temperature_c,
         apply_transition=True,
+        activity_context_c=_activity_for(current.dt, activity_context_c, activity_context_fn),
+    )
+    # The pullover is a fixed base layer for the whole planning period. A
+    # short-lived indoor->outdoor transition penalty may justify a removable
+    # jacket *now*, but must never lock the user into a pullover for hours.
+    # Keep a second current assessment without that transient penalty solely for
+    # the base-layer decision; the real current result above remains authoritative
+    # for jacket_now, transient handling, diagnostics and feedback.
+    base_layer_current_result = assess_point(
+        current,
+        model,
+        indoor_temperature_c=indoor_temperature_c,
+        apply_transition=False,
         activity_context_c=_activity_for(current.dt, activity_context_c, activity_context_fn),
     )
 
@@ -210,12 +229,57 @@ def build_recommendation(
         for point in horizon_points
     ]
 
+    # Work context must never pull an already-past provider point back into the
+    # future decision or bypass the global calendar/work maximum horizon.
+    work_limit = _absolute_horizon_end(current.dt, CALENDAR_MAX_HOURS)
+    work_points = sorted(
+        (
+            p
+            for p in (work_points or [])
+            if is_after(p.dt, current.dt) and is_at_or_before(p.dt, work_limit)
+        ),
+        key=lambda p: instant_key(p.dt),
+    )
+    work_context = bool(work_points)
+    work_pairs: list[tuple[WeatherPoint, ThermalResult]] = [
+        (
+            p,
+            assess_point(
+                p,
+                model,
+                activity_context_c=_activity_for(
+                    p.dt, activity_context_c, activity_context_fn
+                ),
+            ),
+        )
+        for p in work_points
+    ]
+
+    # Choose one base top for the whole planning period. The environmental
+    # effective temperatures stay untouched; a pullover only shifts the garment
+    # lookup, so diagnostics and existing weather/season learning keep their
+    # established semantics.
+    top_layer, pullover_reason = _select_top_layer(
+        current.dt, base_layer_current_result, future_results, work_pairs, model
+    )
+    if top_layer == TOP_PULLOVER:
+        current_result = _result_with_pullover(current_result, model)
+        future_results = [
+            (point, _result_with_pullover(result, model))
+            for point, result in future_results
+        ]
+        work_pairs = [
+            (point, _result_with_pullover(result, model))
+            for point, result in work_pairs
+        ]
+
     trend = _trend_label(current_result, future_results)
     transient = _transient_now_override(
         current.dt,
         current_result,
         future_results,
         model,
+        clothing_offset_c=PULLOVER_WARMTH_C if top_layer == TOP_PULLOVER else 0.0,
     )
     jacket_now = current_result.jacket
     instant_jacket: str | None = None
@@ -250,10 +314,6 @@ def build_recommendation(
                     later_result = result
                     break
         else:
-            # Prefer the lightest class that becomes sufficient for the complete
-            # remaining suffix, then fall back through slightly warmer classes.
-            # Thus an isolated no-jacket point cannot hide a later stable light
-            # jacket, while a genuinely stable no-jacket phase is still reported.
             current_rank = JACKET_RANK[jacket_now]
             for candidate_rank in range(current_rank):
                 found = False
@@ -278,48 +338,20 @@ def build_recommendation(
                 if found:
                     break
 
-    # Work context must never pull an already-past provider point back into the
-    # future decision or bypass the global calendar/work maximum horizon.
-    work_limit = _absolute_horizon_end(current.dt, CALENDAR_MAX_HOURS)
-    work_points = sorted(
-        (
-            p
-            for p in (work_points or [])
-            if is_after(p.dt, current.dt) and is_at_or_before(p.dt, work_limit)
-        ),
-        key=lambda p: instant_key(p.dt),
-    )
     work_jacket: str | None = None
-    work_context = bool(work_points)
-    work_pairs: list[tuple[WeatherPoint, ThermalResult]] = []
-    if work_points:
-        work_pairs = [
-            (
-                p,
-                assess_point(
-                    p,
-                    model,
-                    activity_context_c=_activity_for(
-                        p.dt, activity_context_c, activity_context_fn
-                    ),
-                ),
-            )
-            for p in work_points
-        ]
-        if work_pairs:
-            work_target_point, work_target_result = max(
-                work_pairs, key=lambda pair: JACKET_RANK[pair[1].jacket]
-            )
-            work_jacket = work_target_result.jacket
-            if JACKET_RANK[work_jacket] > JACKET_RANK[jacket_later]:
-                jacket_later = work_jacket
-                later_at = work_target_point.dt
-                later_point = work_target_point
-                later_result = work_target_result
-                later_change_confirmed = True
-        latest_work = max(
-            (p.dt for p in work_points), default=None, key=instant_key
+    if work_pairs:
+        work_target_point, work_target_result = max(
+            work_pairs, key=lambda pair: JACKET_RANK[pair[1].jacket]
         )
+        work_jacket = work_target_result.jacket
+        if JACKET_RANK[work_jacket] > JACKET_RANK[jacket_later]:
+            jacket_later = work_jacket
+            later_at = work_target_point.dt
+            later_point = work_target_point
+            later_result = work_target_result
+            later_change_confirmed = True
+
+        latest_work = max((p.dt for p in work_points), default=None, key=instant_key)
         if latest_work is not None:
             work_hours = math.ceil(
                 max(0.0, elapsed(current.dt, latest_work).total_seconds()) / 3600.0
@@ -337,9 +369,8 @@ def build_recommendation(
         else "home"
     )
 
-    # later_* describes a real final class change. A work override may cancel a
-    # previously detected home change, in which case no future feedback target may
-    # survive.
+    # later_* describes a real final outer-layer change. The pullover is fixed
+    # for the planning period and is therefore never represented as later_at.
     if jacket_later == jacket_now:
         later_at = None
         later_point = None
@@ -359,8 +390,6 @@ def build_recommendation(
         effective_values.extend(result.effective_temperature_c for _, result in work_pairs)
 
     class_change = jacket_later != jacket_now
-    # Automatic feedback may only be triggered by contexts that the session can
-    # actually learn from later.
     feedback_results = [current_result]
     if class_change and later_result is not None:
         feedback_results.append(later_result)
@@ -375,10 +404,8 @@ def build_recommendation(
         jacket_later,
         observed_at=current.dt,
         later_at=later_point.dt if later_point is not None else None,
+        pullover_used=top_layer == TOP_PULLOVER,
     )
-    # Coverage is measured against the horizon we intended to evaluate, not
-    # merely against the last cached point that happened to be available.
-    # Otherwise one stale +1 h point would incorrectly report "complete".
     coverage_horizon_hours = max(base_horizon_hours, horizon_hours)
     forecast_coverage_complete = _forecast_covers_horizon(
         current.dt, forecast, coverage_horizon_hours
@@ -395,10 +422,6 @@ def build_recommendation(
             and decision_confidence >= 0.65
             and forecast_coverage_complete
             and transient is None
-            # A seeded/young seasonal anchor with a material share of the
-            # recommendation must remain reachable for deliberate feedback.
-            # Weighted confidence alone can otherwise let a mature neighbouring
-            # season hide a 0-evidence anchor during the overlap.
             and not model.has_low_evidence_season_anchor(current.dt)
             and not (
                 later_point is not None
@@ -408,6 +431,12 @@ def build_recommendation(
     )
 
     reasons = list(current_result.reasons)
+    if pullover_reason == "stable_cool":
+        reasons.append("pullover_stable")
+    elif pullover_reason == "deep_cold":
+        reasons.append("pullover_deep_cold")
+    elif pullover_reason == "flexible_layering":
+        reasons.append("flexible_layering")
     if transient is not None:
         reasons.append("transient_trend")
     if class_change:
@@ -483,8 +512,9 @@ def build_recommendation(
         instant_jacket=instant_jacket,
         seasonal_adjustment_c=current_result.seasonal_adjustment_c,
         later_change_confirmed=later_change_confirmed,
+        top_layer=top_layer,
+        pullover_reason=pullover_reason,
     )
-
 
 def _trend_label(
     current: ThermalResult,
@@ -564,6 +594,8 @@ def _transient_now_override(
     current_result: ThermalResult,
     future_results: list[tuple[WeatherPoint, ThermalResult]],
     model: PersonalModel,
+    *,
+    clothing_offset_c: float = 0.0,
 ) -> dict[str, object] | None:
     """Collapse a short, personally tolerable transition into one practical jacket.
 
@@ -632,6 +664,11 @@ def _transient_now_override(
     threshold = _transition_boundary(current_rank, target_rank, _thresholds(model))
     if threshold is None:
         return None
+    # Transient burden is integrated on the raw environmental effective
+    # temperature. A fixed midlayer therefore shifts only the garment boundary,
+    # not the weather signal itself. With a pullover, e.g. the normal 18 °C
+    # none/light boundary becomes a 15 °C environmental boundary.
+    threshold -= max(0.0, float(clothing_offset_c))
     burden = _transient_burden_degree_minutes(
         current_dt,
         current_result,
@@ -643,7 +680,14 @@ def _transient_now_override(
 
     answer = model.cold_answer if direction == "warming" else model.warm_answer
     answer_factor = 1.0 + (3 - max(1, min(5, int(answer)))) * 0.10
-    tolerance = max(0.5, min(1.5, float(model.transient_tolerance)))
+    tolerance = max(0.0, min(1.5, float(model.transient_tolerance)))
+    # A fully learned-down tolerance is an explicit veto for short-term
+    # smoothing.  Do not rely on the burden inequality here: with a burden of
+    # exactly 0 degree-minutes, ``0 <= 0`` would otherwise still allow an
+    # override even though the user has trained this feature completely off.
+    if tolerance <= 0.0:
+        return None
+
     # The personal upper transition window naturally spans roughly 15–45 min.
     personal_max_minutes = max(
         15.0,
@@ -665,6 +709,110 @@ def _transient_now_override(
         "burden": burden,
         "duration_minutes": duration_minutes,
     }
+
+
+def _result_with_pullover(
+    result: ThermalResult, model: PersonalModel
+) -> ThermalResult:
+    """Return the same weather assessment with pullover warmth applied to clothing.
+
+    The environmental effective temperature stays unchanged for diagnostics and
+    learning. Only the garment threshold lookup receives the transparent
+    pullover warmth offset.
+    """
+    thresholds = _thresholds(model)
+    clothing_effective = result.effective_temperature_c + PULLOVER_WARMTH_C
+    return ThermalResult(
+        effective_temperature_c=result.effective_temperature_c,
+        jacket=_jacket_for_temperature(clothing_effective, thresholds),
+        wind_penalty_c=result.wind_penalty_c,
+        transition_penalty_c=result.transition_penalty_c,
+        solar_gain_c=result.solar_gain_c,
+        rain_penalty_c=result.rain_penalty_c,
+        humidity_adjustment_c=result.humidity_adjustment_c,
+        threshold_margin_c=round(
+            _nearest_threshold_margin(clothing_effective, thresholds), 2
+        ),
+        seasonal_adjustment_c=result.seasonal_adjustment_c,
+        reasons=list(result.reasons),
+    )
+
+
+def _select_top_layer(
+    current_dt: datetime,
+    current: ThermalResult,
+    future: list[tuple[WeatherPoint, ThermalResult]],
+    work: list[tuple[WeatherPoint, ThermalResult]],
+    model: PersonalModel,
+) -> tuple[str, str | None]:
+    """Choose one base top for the whole relevant period.
+
+    A pullover is intentionally *not* scheduled as a later clothing change.
+    Jackets are the flexible outer layer: when the day warms notably, shirt +
+    removable jacket wins over a pullover that would be awkward later.
+    """
+    thresholds = _thresholds(model)
+    comfort_ceiling = BASE_PULLOVER_COMFORT_C + model.pullover_threshold_delta_c
+    deep_cold_threshold = thresholds[2] - PULLOVER_DEEP_COLD_MARGIN_C
+
+    # Use unique future instants for stability. API work forecasts are already
+    # merged into the home timeline, but direct engine callers may also pass the
+    # work list separately.
+    by_instant: dict[datetime, tuple[WeatherPoint, ThermalResult]] = {}
+    for point, result in [*future, *work]:
+        by_instant[instant_key(point.dt)] = (point, result)
+    planning = [by_instant[key] for key in sorted(by_instant)]
+    timeline = [current, *(result for _, result in planning)]
+
+    values = [result.effective_temperature_c for result in timeline]
+    low = min(values)
+    high = max(values)
+    spread = high - low
+
+    pullover_now = _result_with_pullover(current, model)
+    reduces_outer_layer = (
+        JACKET_RANK[pullover_now.jacket] < JACKET_RANK[current.jacket]
+    )
+    deep_cold_now = current.effective_temperature_c <= deep_cold_threshold
+
+    # In genuinely deep cold the pullover extends the scale beyond the existing
+    # winter-jacket ceiling. Require either no forecast (conservative now) or one
+    # nearby confirming cold point so a very brief cold dip does not lock the user
+    # into a hot mid-layer for the rest of a warming workday.
+    if deep_cold_now:
+        if not planning:
+            return TOP_PULLOVER, "deep_cold"
+        # Even in deep cold, do not lock the user into a pullover if the same
+        # planning period later becomes genuinely warm. A removable winter coat
+        # is the more adaptable choice in that case.
+        if high > comfort_ceiling:
+            return TOP_SHIRT, "flexible_layering"
+        first_point, first_result = planning[0]
+        if (
+            elapsed(current_dt, first_point.dt) <= timedelta(minutes=90)
+            and first_result.effective_temperature_c <= deep_cold_threshold + 2.0
+        ):
+            return TOP_PULLOVER, "deep_cold"
+        return TOP_SHIRT, "flexible_layering"
+
+    if not reduces_outer_layer:
+        return TOP_SHIRT, None
+
+    # A normal pullover substitution needs an actual forecast trend: current-only
+    # data or one isolated point is not enough to claim that conditions remain
+    # stable. Two continuous future samples are the minimum evidence.
+    if len(planning) < 2:
+        return TOP_SHIRT, None
+    if elapsed(current_dt, planning[-1][0].dt) < PULLOVER_MIN_STABLE_DURATION:
+        return TOP_SHIRT, None
+    pairs = planning
+    if not _forecast_pairs_are_continuous(pairs, origin=current_dt):
+        return TOP_SHIRT, "flexible_layering"
+
+    if high > comfort_ceiling or spread > PULLOVER_STABILITY_RANGE_C:
+        return TOP_SHIRT, "flexible_layering"
+
+    return TOP_PULLOVER, "stable_cool"
 
 
 def _thresholds(model: PersonalModel) -> tuple[float, float, float]:
@@ -892,9 +1040,19 @@ def _activity_for(
 def _forecast_pairs_are_continuous(
     pairs: list[tuple[WeatherPoint, ThermalResult]],
     *,
+    origin: datetime | None = None,
     max_gap: timedelta = timedelta(minutes=90),
 ) -> bool:
-    """Return whether adjacent forecast samples form one continuous period."""
+    """Return whether forecast samples form one continuous period from origin.
+
+    When ``origin`` is supplied, the first forecast point is part of the same
+    continuity contract. This matters for fixed outfit choices: a set of nicely
+    spaced points four hours in the future is not evidence that conditions stay
+    stable from *now* until then.
+    """
+    if origin is not None and pairs:
+        if elapsed(origin, pairs[0][0].dt) > max_gap:
+            return False
     if len(pairs) < 2:
         return True
     previous = pairs[0][0].dt

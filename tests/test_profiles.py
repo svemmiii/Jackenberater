@@ -6,6 +6,8 @@ import importlib.util
 from pathlib import Path
 import sys
 import types
+
+import pytest
 from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).parents[1] / "custom_components" / "jackenberater"
@@ -183,6 +185,139 @@ def test_phase_all_learns_start_and_later_without_double_counting_global_feedbac
         assert learned.total_feedback == before + 1
         assert learned.transition_stat.samples == 1
         assert learned.wind_stat.samples == 1
+    asyncio.run(run())
+
+
+def test_phase_all_perfect_counts_fixed_pullover_evidence_only_once():
+    async def run():
+        manager = make_manager()
+        model = manager.get_model("user")
+        model.total_feedback = 11
+        model.general_stat.samples = 11
+        model.general_stat.weight_sum = 11.0
+        manager._profiles["user"]["model"] = model.to_dict()
+
+        rec = recommendation()
+        rec.top_layer = const.TOP_PULLOVER
+        rec.jacket_now = const.JACKET_NONE
+        rec.jacket_later = const.JACKET_LIGHT
+        rec.transient_override = True
+        rec.transient_direction = "warming"
+        rec.instant_jacket = const.JACKET_LIGHT
+        # Keep the predicted switch in the already-observed past so PHASE_ALL is
+        # valid and both start/later contexts are intentionally learned.
+        rec.later_at = datetime(2026, 9, 1, 11, tzinfo=timezone.utc)
+        session = await manager.async_open_session(
+            "user",
+            rec,
+            weather_context={"temperature_c": 15.0, "wind_kmh": 5.0},
+            learning_contexts={
+                "start": {
+                    "jacket": const.JACKET_NONE,
+                    "top_layer": const.TOP_PULLOVER,
+                    "effective_c": 17.0,
+                    "wind_kmh": 5.0,
+                    "wind_penalty_c": 0.0,
+                    "transition_penalty_c": 0.0,
+                    "transient_override": True,
+                    "transient_direction": "warming",
+                },
+                "later": {
+                    "jacket": const.JACKET_LIGHT,
+                    "top_layer": const.TOP_PULLOVER,
+                    "effective_c": 14.0,
+                    "wind_kmh": 5.0,
+                    "wind_penalty_c": 0.0,
+                    "transition_penalty_c": 0.0,
+                },
+            },
+        )
+
+        before = manager.get_model("user")
+        before_feedback = before.total_feedback
+        before_pullover = before.pullover_stat.weight_sum
+        before_light = before.light_stat.weight_sum
+        before_transient = before.transient_stat.weight_sum
+
+        await manager.async_feedback(
+            "user",
+            session["id"],
+            rating=const.FEEDBACK_PERFECT,
+            phase=const.PHASE_ALL,
+            recommendation_used=True,
+            unusual_day=False,
+            voluntary=True,
+        )
+
+        learned = manager.get_model("user")
+        assert learned.total_feedback == before_feedback + 1
+        assert learned.pullover_stat.weight_sum == before_pullover + 1.0
+        assert learned.transient_stat.weight_sum == before_transient + 1.0
+        # The later jacket context still gets to confirm its clothing-adjusted
+        # light-jacket boundary even though the fixed pullover is not double-counted.
+        assert learned.light_stat.weight_sum >= before_light + 1.0
+
+    asyncio.run(run())
+
+
+def test_transient_pullover_without_jacket_too_warm_reaches_pullover_learning():
+    async def run():
+        manager = make_manager()
+        model = manager.get_model("user")
+        model.total_feedback = 11
+        model.general_stat.samples = 11
+        model.general_stat.weight_sum = 11.0
+        manager._profiles["user"]["model"] = model.to_dict()
+
+        rec = recommendation()
+        rec.top_layer = const.TOP_PULLOVER
+        rec.jacket_now = const.JACKET_NONE
+        rec.jacket_later = const.JACKET_NONE
+        rec.transient_override = True
+        rec.transient_direction = "warming"
+        rec.instant_jacket = const.JACKET_LIGHT
+
+        session = await manager.async_open_session(
+            "user",
+            rec,
+            weather_context={"temperature_c": 15.2, "wind_kmh": 0.0},
+            learning_contexts={
+                "start": {
+                    "jacket": const.JACKET_NONE,
+                    "top_layer": const.TOP_PULLOVER,
+                    "effective_c": 15.2,
+                    "transient_override": True,
+                    "transient_direction": "warming",
+                    "observed_at": "2026-09-01T12:00:00+00:00",
+                },
+                "later": {
+                    "jacket": const.JACKET_NONE,
+                    "top_layer": const.TOP_PULLOVER,
+                    "effective_c": 15.5,
+                },
+            },
+        )
+
+        before = manager.get_model("user")
+        pullover_before = before.pullover_threshold_delta_c
+        transient_before = before.transient_tolerance
+
+        await manager.async_feedback(
+            "user",
+            session["id"],
+            rating=const.FEEDBACK_TOO_WARM,
+            phase=None,
+            recommendation_used=True,
+            unusual_day=False,
+            voluntary=True,
+        )
+
+        learned = manager.get_model("user")
+        assert learned.pullover_threshold_delta_c < pullover_before
+        assert learned.pullover_stat.weight_sum == pytest.approx(1.0)
+        assert learned.transient_tolerance == transient_before
+        assert learned.transient_stat.weight_sum == pytest.approx(0.0)
+
     asyncio.run(run())
 
 
@@ -438,6 +573,80 @@ def test_recent_session_reuses_nearly_identical_learning_context():
     asyncio.run(run())
 
 
+def test_recent_session_reuses_same_decision_when_only_weather_condition_label_changes():
+    async def run():
+        manager = make_manager()
+        rec = recommendation()
+        context = {
+            "start": {
+                "jacket": const.JACKET_LIGHT,
+                "effective_c": 15.0,
+                "wind_penalty_c": 0.2,
+                "transition_penalty_c": 0.0,
+            },
+            "later": {
+                "jacket": const.JACKET_LIGHT,
+                "effective_c": 15.0,
+                "wind_penalty_c": 0.2,
+                "transition_penalty_c": 0.0,
+            },
+        }
+        first = await manager.async_open_session(
+            "user", rec,
+            weather_context={"temperature_c": 15.0, "condition": "cloudy"},
+            learning_contexts=context,
+        )
+        second = await manager.async_open_session(
+            "user", rec,
+            weather_context={"temperature_c": 15.0, "condition": "partlycloudy"},
+            learning_contexts=context,
+        )
+
+        assert second["id"] == first["id"]
+        assert len(manager._profiles["user"]["sessions"]) == 1
+        assert manager.get_model("user").feedback_opportunities == 1
+
+    asyncio.run(run())
+
+
+def test_recent_session_reuses_same_decision_when_only_rain_advice_changes():
+    async def run():
+        manager = make_manager()
+        rec = recommendation()
+        context = {
+            "start": {
+                "jacket": const.JACKET_LIGHT,
+                "effective_c": 15.0,
+                "wind_penalty_c": 0.2,
+                "transition_penalty_c": 0.0,
+            },
+            "later": {
+                "jacket": const.JACKET_LIGHT,
+                "effective_c": 15.0,
+                "wind_penalty_c": 0.2,
+                "transition_penalty_c": 0.0,
+            },
+        }
+        first = await manager.async_open_session(
+            "user", rec,
+            weather_context={"temperature_c": 15.0, "condition": "cloudy"},
+            learning_contexts=context,
+        )
+
+        rec.rain_status = const.RAIN_TAKE
+        second = await manager.async_open_session(
+            "user", rec,
+            weather_context={"temperature_c": 15.0, "condition": "cloudy"},
+            learning_contexts=context,
+        )
+
+        assert second["id"] == first["id"]
+        assert len(manager._profiles["user"]["sessions"]) == 1
+        assert manager.get_model("user").feedback_opportunities == 1
+
+    asyncio.run(run())
+
+
 def test_recent_identical_sessions_are_deduplicated_across_logins_for_same_profile():
     async def run():
         manager = make_manager()
@@ -497,6 +706,7 @@ def test_feedback_candidates_can_be_scoped_to_the_opening_login():
             "request_feedback": True, "feedback": None,
             "session_schema_version": profiles._SESSION_SCHEMA_VERSION,
             "policy_signature": {},
+            "learning_contract": {"bootstrap_mode": True, "start": {}},
             "trainable": True,
             "superseded": False,
             "opened_by_user_id": "tablet-a",
@@ -508,6 +718,7 @@ def test_feedback_candidates_can_be_scoped_to_the_opening_login():
             "request_feedback": True, "feedback": None,
             "session_schema_version": profiles._SESSION_SCHEMA_VERSION,
             "policy_signature": {},
+            "learning_contract": {"bootstrap_mode": True, "start": {}},
             "trainable": True,
             "superseded": False,
             "opened_by_user_id": "tablet-b",
@@ -689,6 +900,11 @@ def test_profile_import_sanitizes_values_and_rejects_wrong_format():
         restored = await manager.async_import_profile("user", payload)
         assert restored.transient_tolerance == 1.5
         assert restored.winter_bias_c == 0.0
+
+        payload["model"]["transient_tolerance"] = -99
+        restored = await manager.async_import_profile("user", payload)
+        assert restored.transient_tolerance == 0.0
+
         try:
             await manager.async_import_profile("user", {"format": "wrong", "version": 1, "model": {}})
         except ValueError:
@@ -1268,7 +1484,7 @@ def test_v030_profile_re_setup_discards_sessions_from_previous_model():
         # learning pause switch; all old recommendation/feedback contexts vanish.
         await manager.async_set_learning("user", False)
         fresh = await manager.async_setup_profile(
-            "user", cold=5, warm=1, wind=5, evening=5,
+            "user", cold=5, warm=1, wind=5, evening=5, pullover=1,
         )
 
         assert manager._sessions("user") == []
@@ -1277,6 +1493,8 @@ def test_v030_profile_re_setup_discards_sessions_from_previous_model():
         assert fresh.warm_answer == 1
         assert fresh.wind_answer == 5
         assert fresh.evening_answer == 5
+        assert fresh.pullover_answer == 1
+        assert fresh.pullover_threshold_delta_c == -2.0
         assert fresh.general_offset_c == 1.8
         assert abs(fresh.light_threshold_delta_c - 0.495) < 1e-12
         assert fresh.total_feedback == 0
@@ -1556,7 +1774,11 @@ def test_recent_session_is_not_reused_when_feedback_policy_or_season_date_change
                 rec1,
                 weather_context={"temperature_c": 15.0, "condition": "cloudy"},
                 learning_contexts={
-                    "start": {"jacket": const.JACKET_LIGHT, "effective_c": 15.0},
+                    "start": {
+                        "jacket": const.JACKET_LIGHT,
+                        "effective_c": 15.0,
+                        "observed_at": first_now.isoformat(),
+                    },
                     "later": {"jacket": const.JACKET_LIGHT, "effective_c": 15.0},
                 },
             )
@@ -1571,7 +1793,11 @@ def test_recent_session_is_not_reused_when_feedback_policy_or_season_date_change
                 rec2,
                 weather_context={"temperature_c": 15.0, "condition": "cloudy"},
                 learning_contexts={
-                    "start": {"jacket": const.JACKET_LIGHT, "effective_c": 15.0},
+                    "start": {
+                        "jacket": const.JACKET_LIGHT,
+                        "effective_c": 15.0,
+                        "observed_at": second_now.isoformat(),
+                    },
                     "later": {"jacket": const.JACKET_LIGHT, "effective_c": 15.0},
                 },
             )
@@ -2220,6 +2446,10 @@ def test_card_revision_tracks_session_creation_and_ready_transition_without_mode
 def test_policy_change_supersedes_old_unanswered_same_decision_session():
     async def run():
         manager = make_manager()
+        model = manager.get_model("user")
+        model.general_stat = learning.RunningStat(samples=20, weight_sum=20.0)
+        model.total_feedback = 30
+        manager._profiles["user"]["model"] = model.to_dict()
         contexts = {
             "start": {"jacket": const.JACKET_LIGHT, "effective_c": 15.0},
             "later": {"jacket": const.JACKET_LIGHT, "effective_c": 15.0},
@@ -2299,5 +2529,1145 @@ def test_session_opened_while_learning_paused_never_becomes_trainable_after_resu
         else:
             raise AssertionError("paused-session context must not become trainable after resume")
         assert manager.get_model("user").total_feedback == 0
+
+    asyncio.run(run())
+
+
+def test_pullover_reason_change_does_not_create_second_learning_session():
+    async def run():
+        manager = make_manager()
+        rec_a = recommendation()
+        rec_a.top_layer = const.TOP_SHIRT
+        rec_a.pullover_reason = None
+        first = await manager.async_open_session(
+            "user",
+            rec_a,
+            weather_context={"temperature_c": 15.0, "condition": "cloudy"},
+            learning_contexts={
+                "start": {"jacket": const.JACKET_LIGHT, "effective_c": 15.0},
+                "later": {"jacket": const.JACKET_LIGHT, "effective_c": 15.0},
+            },
+        )
+
+        rec_b = recommendation()
+        rec_b.top_layer = const.TOP_SHIRT
+        rec_b.pullover_reason = "flexible_layering"
+        second = await manager.async_open_session(
+            "user",
+            rec_b,
+            weather_context={"temperature_c": 15.0, "condition": "cloudy"},
+            learning_contexts={
+                "start": {"jacket": const.JACKET_LIGHT, "effective_c": 15.0},
+                "later": {"jacket": const.JACKET_LIGHT, "effective_c": 15.0},
+            },
+        )
+
+        assert second["id"] == first["id"]
+        assert manager.get_model("user").feedback_opportunities == 1
+        assert len(manager._profiles["user"]["sessions"]) == 1
+
+    asyncio.run(run())
+
+
+
+def test_work_forecast_appearing_without_outfit_change_reuses_learning_session():
+    async def run():
+        manager = make_manager()
+        model = manager.get_model("user")
+        current = weather_point(0, 15.0)
+        home_forecast = [
+            weather_point(60, 15.0),
+            weather_point(120, 15.0),
+            weather_point(180, 15.0),
+        ]
+
+        without_work = engine.build_recommendation(
+            current,
+            home_forecast,
+            model,
+            indoor_temperature_c=15.0,
+            base_horizon_hours=3,
+            max_horizon_hours=3,
+        )
+        with_work = engine.build_recommendation(
+            current,
+            home_forecast,
+            model,
+            indoor_temperature_c=15.0,
+            base_horizon_hours=3,
+            max_horizon_hours=3,
+            work_points=[weather_point(90, 15.0), weather_point(150, 15.0)],
+            work_start=weather_point(60, 15.0).dt,
+            work_end=weather_point(180, 15.0).dt,
+            work_name="Arbeit",
+        )
+
+        assert without_work.jacket_now == with_work.jacket_now
+        assert without_work.jacket_later == with_work.jacket_later
+        assert without_work.top_layer == with_work.top_layer
+        assert without_work.effective_now_c == with_work.effective_now_c
+        assert without_work.work_context is False
+        assert without_work.work_jacket is None
+        assert with_work.work_context is True
+        assert with_work.work_jacket == with_work.jacket_now
+
+        def contexts(rec):
+            return {
+                "start": {
+                    "jacket": rec.jacket_now,
+                    "effective_c": rec.effective_now_c,
+                    "wind_penalty_c": rec.current_wind_penalty_c,
+                    "transition_penalty_c": rec.transition_penalty_c,
+                    "top_layer": rec.top_layer,
+                },
+                "later": {
+                    "jacket": rec.jacket_later,
+                    "effective_c": rec.later_effective_c,
+                    "wind_penalty_c": rec.later_wind_penalty_c,
+                    "transition_penalty_c": 0.0,
+                    "top_layer": rec.top_layer,
+                },
+            }
+
+        first = await manager.async_open_session(
+            "user",
+            without_work,
+            weather_context={"temperature_c": 15.0, "condition": "cloudy"},
+            learning_contexts=contexts(without_work),
+        )
+        second = await manager.async_open_session(
+            "user",
+            with_work,
+            weather_context={"temperature_c": 15.0, "condition": "cloudy"},
+            learning_contexts=contexts(with_work),
+        )
+
+        assert second["id"] == first["id"]
+        assert manager.get_model("user").feedback_opportunities == 1
+        assert len(manager._profiles["user"]["sessions"]) == 1
+
+    asyncio.run(run())
+
+
+def test_organizational_work_metadata_alone_does_not_split_learning_session():
+    async def run():
+        metadata_changes = (
+            ("source", "work"),
+            ("work_jacket", const.JACKET_LIGHT),
+            ("work_context", True),
+            ("later_work_period", "actual"),
+            ("later_change_confirmed", False),
+        )
+
+        for field, value in metadata_changes:
+            manager = make_manager()
+            base = recommendation()
+            first = await manager.async_open_session(
+                "user",
+                base,
+                weather_context={"temperature_c": 15.0, "condition": "cloudy"},
+                learning_contexts={
+                    "start": {"jacket": const.JACKET_LIGHT, "effective_c": 15.0},
+                    "later": {"jacket": const.JACKET_LIGHT, "effective_c": 15.0},
+                },
+            )
+
+            changed = recommendation()
+            setattr(changed, field, value)
+            second = await manager.async_open_session(
+                "user",
+                changed,
+                weather_context={"temperature_c": 15.0, "condition": "cloudy"},
+                learning_contexts={
+                    "start": {"jacket": const.JACKET_LIGHT, "effective_c": 15.0},
+                    "later": {"jacket": const.JACKET_LIGHT, "effective_c": 15.0},
+                },
+            )
+
+            assert second["id"] == first["id"], field
+            assert manager.get_model("user").feedback_opportunities == 1, field
+            assert len(manager._profiles["user"]["sessions"]) == 1, field
+
+    asyncio.run(run())
+
+
+def test_learning_semantics_refreshes_snapshot_when_perfect_boundary_changes():
+    async def run():
+        manager = make_manager()
+
+        first_rec = recommendation()
+        first_rec.effective_now_c = 14.8
+        first_rec.min_effective_c = 14.8
+        first_rec.max_effective_c = 14.8
+        first = await manager.async_open_session(
+            "user",
+            first_rec,
+            weather_context={"temperature_c": 14.8, "condition": "cloudy"},
+            learning_contexts={
+                "start": {"jacket": const.JACKET_LIGHT, "effective_c": 14.8},
+                "later": {"jacket": const.JACKET_LIGHT, "effective_c": 14.8},
+            },
+        )
+
+        second_rec = recommendation()
+        second_rec.effective_now_c = 15.2
+        second_rec.min_effective_c = 15.2
+        second_rec.max_effective_c = 15.2
+        second = await manager.async_open_session(
+            "user",
+            second_rec,
+            weather_context={"temperature_c": 15.2, "condition": "cloudy"},
+            learning_contexts={
+                "start": {"jacket": const.JACKET_LIGHT, "effective_c": 15.2},
+                "later": {"jacket": const.JACKET_LIGHT, "effective_c": 15.2},
+            },
+        )
+
+        assert second["id"] != first["id"]
+        old = manager._find_session("user", first["id"])
+        current = manager._find_session("user", second["id"])
+        assert old is not None and current is not None
+        assert old["superseded"] is True
+        assert old["trainable"] is False
+        assert current["trainable"] is True
+        assert sum(
+            1
+            for item in manager._profiles["user"]["sessions"]
+            if item.get("feedback") is None and item.get("trainable") is True
+        ) == 1
+
+        await manager.async_feedback(
+            "user",
+            second["id"],
+            rating=const.FEEDBACK_PERFECT,
+            phase=None,
+            recommendation_used=True,
+            unusual_day=False,
+            voluntary=True,
+        )
+        learned = manager.get_model("user")
+        assert learned.light_stat.weight_sum == 1.0
+        assert learned.warm_stat.weight_sum == 0.0
+
+    asyncio.run(run())
+
+
+def test_learning_semantics_refreshes_snapshot_when_wind_learning_activates():
+    async def run():
+        manager = make_manager()
+        mature = manager.get_model("user")
+        mature.general_stat.samples = 11
+        mature.general_stat.weight_sum = 11.0
+        manager._profiles["user"]["model"] = mature.to_dict()
+
+        first = await manager.async_open_session(
+            "user",
+            recommendation(),
+            weather_context={"temperature_c": 15.0, "condition": "cloudy"},
+            learning_contexts={
+                "start": {
+                    "jacket": const.JACKET_LIGHT,
+                    "effective_c": 15.0,
+                    "wind_penalty_c": 0.4,
+                    "transition_penalty_c": 0.0,
+                },
+                "later": {
+                    "jacket": const.JACKET_LIGHT,
+                    "effective_c": 15.0,
+                    "wind_penalty_c": 0.4,
+                    "transition_penalty_c": 0.0,
+                },
+            },
+        )
+        second = await manager.async_open_session(
+            "user",
+            recommendation(),
+            weather_context={"temperature_c": 15.0, "condition": "cloudy"},
+            learning_contexts={
+                "start": {
+                    "jacket": const.JACKET_LIGHT,
+                    "effective_c": 15.0,
+                    "wind_penalty_c": 0.6,
+                    "transition_penalty_c": 0.0,
+                },
+                "later": {
+                    "jacket": const.JACKET_LIGHT,
+                    "effective_c": 15.0,
+                    "wind_penalty_c": 0.6,
+                    "transition_penalty_c": 0.0,
+                },
+            },
+        )
+
+        assert second["id"] != first["id"]
+        old = manager._find_session("user", first["id"])
+        assert old is not None
+        assert old["superseded"] is True
+        assert old["trainable"] is False
+
+        await manager.async_feedback(
+            "user",
+            second["id"],
+            rating=const.FEEDBACK_PERFECT,
+            phase=None,
+            recommendation_used=True,
+            unusual_day=False,
+            voluntary=True,
+        )
+        assert manager.get_model("user").wind_stat.weight_sum == 1.0
+
+    asyncio.run(run())
+
+
+def test_learning_semantics_refreshes_snapshot_when_transition_learning_activates():
+    async def run():
+        manager = make_manager()
+        mature = manager.get_model("user")
+        mature.general_stat.samples = 11
+        mature.general_stat.weight_sum = 11.0
+        manager._profiles["user"]["model"] = mature.to_dict()
+
+        first_rec = recommendation()
+        first_rec.transition_penalty_c = 0.7
+        first = await manager.async_open_session(
+            "user",
+            first_rec,
+            weather_context={"temperature_c": 15.0, "condition": "cloudy"},
+            learning_contexts={
+                "start": {
+                    "jacket": const.JACKET_LIGHT,
+                    "effective_c": 15.0,
+                    "wind_penalty_c": 0.0,
+                    "transition_penalty_c": 0.7,
+                },
+                "later": {
+                    "jacket": const.JACKET_LIGHT,
+                    "effective_c": 15.0,
+                    "wind_penalty_c": 0.0,
+                    "transition_penalty_c": 0.0,
+                },
+            },
+        )
+
+        second_rec = recommendation()
+        second_rec.transition_penalty_c = 0.9
+        second = await manager.async_open_session(
+            "user",
+            second_rec,
+            weather_context={"temperature_c": 15.0, "condition": "cloudy"},
+            learning_contexts={
+                "start": {
+                    "jacket": const.JACKET_LIGHT,
+                    "effective_c": 15.0,
+                    "wind_penalty_c": 0.0,
+                    "transition_penalty_c": 0.9,
+                },
+                "later": {
+                    "jacket": const.JACKET_LIGHT,
+                    "effective_c": 15.0,
+                    "wind_penalty_c": 0.0,
+                    "transition_penalty_c": 0.0,
+                },
+            },
+        )
+
+        assert second["id"] != first["id"]
+        old = manager._find_session("user", first["id"])
+        assert old is not None
+        assert old["superseded"] is True
+        assert old["trainable"] is False
+
+        await manager.async_feedback(
+            "user",
+            second["id"],
+            rating=const.FEEDBACK_PERFECT,
+            phase=None,
+            recommendation_used=True,
+            unusual_day=False,
+            voluntary=True,
+        )
+        assert manager.get_model("user").transition_stat.weight_sum == 1.0
+
+    asyncio.run(run())
+
+
+def test_learning_semantics_still_reuses_small_refresh_inside_same_learning_regions():
+    async def run():
+        manager = make_manager()
+
+        first_rec = recommendation()
+        first_rec.effective_now_c = 14.6
+        first = await manager.async_open_session(
+            "user",
+            first_rec,
+            weather_context={"temperature_c": 14.6, "condition": "cloudy"},
+            learning_contexts={
+                "start": {
+                    "jacket": const.JACKET_LIGHT,
+                    "effective_c": 14.6,
+                    "wind_penalty_c": 0.2,
+                    "transition_penalty_c": 0.5,
+                },
+                "later": {
+                    "jacket": const.JACKET_LIGHT,
+                    "effective_c": 14.6,
+                    "wind_penalty_c": 0.2,
+                    "transition_penalty_c": 0.0,
+                },
+            },
+        )
+
+        second_rec = recommendation()
+        second_rec.effective_now_c = 14.8
+        second = await manager.async_open_session(
+            "user",
+            second_rec,
+            weather_context={"temperature_c": 14.8, "condition": "partlycloudy"},
+            learning_contexts={
+                "start": {
+                    "jacket": const.JACKET_LIGHT,
+                    "effective_c": 14.8,
+                    "wind_penalty_c": 0.4,
+                    "transition_penalty_c": 0.7,
+                },
+                "later": {
+                    "jacket": const.JACKET_LIGHT,
+                    "effective_c": 14.8,
+                    "wind_penalty_c": 0.4,
+                    "transition_penalty_c": 0.0,
+                },
+            },
+        )
+
+        assert second["id"] == first["id"]
+        assert manager.get_model("user").feedback_opportunities == 1
+        assert len(manager._profiles["user"]["sessions"]) == 1
+
+    asyncio.run(run())
+
+
+def test_transient_learning_semantics_reuses_boundary_refresh_that_cannot_reach_boundary_learning():
+    async def run():
+        manager = make_manager()
+        model = manager.get_model("user")
+        model.general_stat = learning.RunningStat(samples=20, weight_sum=20.0)
+        manager._profiles["user"]["model"] = model.to_dict()
+
+        first_rec = recommendation()
+        first_rec.effective_now_c = 14.8
+        first_rec.transient_override = True
+        first_rec.transient_direction = "warming"
+        first = await manager.async_open_session(
+            "user",
+            first_rec,
+            weather_context={"temperature_c": 14.8, "condition": "cloudy"},
+            learning_contexts={
+                "start": {
+                    "jacket": const.JACKET_LIGHT,
+                    "effective_c": 14.8,
+                    "wind_penalty_c": 0.0,
+                    "transition_penalty_c": 0.0,
+                    "transient_override": True,
+                    "transient_direction": "warming",
+                },
+                "later": {"jacket": const.JACKET_LIGHT, "effective_c": 14.8},
+            },
+        )
+
+        second_rec = recommendation()
+        second_rec.effective_now_c = 15.2
+        second_rec.transient_override = True
+        second_rec.transient_direction = "warming"
+        second = await manager.async_open_session(
+            "user",
+            second_rec,
+            weather_context={"temperature_c": 15.2, "condition": "cloudy"},
+            learning_contexts={
+                "start": {
+                    "jacket": const.JACKET_LIGHT,
+                    "effective_c": 15.2,
+                    "wind_penalty_c": 0.0,
+                    "transition_penalty_c": 0.0,
+                    "transient_override": True,
+                    "transient_direction": "warming",
+                },
+                "later": {"jacket": const.JACKET_LIGHT, "effective_c": 15.2},
+            },
+        )
+
+        assert second["id"] == first["id"]
+        assert manager.get_model("user").feedback_opportunities == 1
+
+    asyncio.run(run())
+
+
+def test_transient_learning_semantics_reuses_wind_threshold_refresh():
+    async def run():
+        manager = make_manager()
+        model = manager.get_model("user")
+        model.general_stat = learning.RunningStat(samples=20, weight_sum=20.0)
+        manager._profiles["user"]["model"] = model.to_dict()
+
+        def rec_and_context(wind_penalty: float):
+            rec = recommendation()
+            rec.transient_override = True
+            rec.transient_direction = "warming"
+            contexts = {
+                "start": {
+                    "jacket": const.JACKET_LIGHT,
+                    "effective_c": 15.0,
+                    "wind_penalty_c": wind_penalty,
+                    "transition_penalty_c": 0.0,
+                    "transient_override": True,
+                    "transient_direction": "warming",
+                },
+                "later": {"jacket": const.JACKET_LIGHT, "effective_c": 15.0},
+            }
+            return rec, contexts
+
+        first_rec, first_ctx = rec_and_context(0.4)
+        first = await manager.async_open_session(
+            "user", first_rec,
+            weather_context={"temperature_c": 15.0, "condition": "cloudy"},
+            learning_contexts=first_ctx,
+        )
+        second_rec, second_ctx = rec_and_context(0.6)
+        second = await manager.async_open_session(
+            "user", second_rec,
+            weather_context={"temperature_c": 15.0, "condition": "cloudy"},
+            learning_contexts=second_ctx,
+        )
+
+        assert second["id"] == first["id"]
+        assert manager.get_model("user").feedback_opportunities == 1
+
+    asyncio.run(run())
+
+
+def test_transient_learning_semantics_reuses_transition_threshold_refresh():
+    async def run():
+        manager = make_manager()
+        model = manager.get_model("user")
+        model.general_stat = learning.RunningStat(samples=20, weight_sum=20.0)
+        manager._profiles["user"]["model"] = model.to_dict()
+
+        def rec_and_context(transition_penalty: float):
+            rec = recommendation()
+            rec.transient_override = True
+            rec.transient_direction = "warming"
+            rec.transition_penalty_c = transition_penalty
+            contexts = {
+                "start": {
+                    "jacket": const.JACKET_LIGHT,
+                    "effective_c": 15.0,
+                    "wind_penalty_c": 0.0,
+                    "transition_penalty_c": transition_penalty,
+                    "transient_override": True,
+                    "transient_direction": "warming",
+                },
+                "later": {"jacket": const.JACKET_LIGHT, "effective_c": 15.0},
+            }
+            return rec, contexts
+
+        first_rec, first_ctx = rec_and_context(0.7)
+        first = await manager.async_open_session(
+            "user", first_rec,
+            weather_context={"temperature_c": 15.0, "condition": "cloudy"},
+            learning_contexts=first_ctx,
+        )
+        second_rec, second_ctx = rec_and_context(0.9)
+        second = await manager.async_open_session(
+            "user", second_rec,
+            weather_context={"temperature_c": 15.0, "condition": "cloudy"},
+            learning_contexts=second_ctx,
+        )
+
+        assert second["id"] == first["id"]
+        assert manager.get_model("user").feedback_opportunities == 1
+
+    asyncio.run(run())
+
+
+def test_bootstrap_learning_semantics_reuses_wind_threshold_refresh():
+    async def run():
+        manager = make_manager()
+        first = await manager.async_open_session(
+            "user",
+            recommendation(),
+            weather_context={"temperature_c": 15.0, "condition": "cloudy"},
+            learning_contexts={
+                "start": {
+                    "jacket": const.JACKET_LIGHT,
+                    "effective_c": 15.0,
+                    "wind_penalty_c": 0.4,
+                    "transition_penalty_c": 0.0,
+                },
+                "later": {"jacket": const.JACKET_LIGHT, "effective_c": 15.0},
+            },
+        )
+        second = await manager.async_open_session(
+            "user",
+            recommendation(),
+            weather_context={"temperature_c": 15.0, "condition": "cloudy"},
+            learning_contexts={
+                "start": {
+                    "jacket": const.JACKET_LIGHT,
+                    "effective_c": 15.0,
+                    "wind_penalty_c": 0.6,
+                    "transition_penalty_c": 0.0,
+                },
+                "later": {"jacket": const.JACKET_LIGHT, "effective_c": 15.0},
+            },
+        )
+
+        assert second["id"] == first["id"]
+        assert manager.get_model("user").feedback_opportunities == 1
+
+    asyncio.run(run())
+
+
+def test_bootstrap_learning_semantics_reuses_transition_threshold_refresh():
+    async def run():
+        manager = make_manager()
+        first_rec = recommendation()
+        first_rec.transition_penalty_c = 0.7
+        first = await manager.async_open_session(
+            "user",
+            first_rec,
+            weather_context={"temperature_c": 15.0, "condition": "cloudy"},
+            learning_contexts={
+                "start": {
+                    "jacket": const.JACKET_LIGHT,
+                    "effective_c": 15.0,
+                    "wind_penalty_c": 0.0,
+                    "transition_penalty_c": 0.7,
+                },
+                "later": {"jacket": const.JACKET_LIGHT, "effective_c": 15.0},
+            },
+        )
+        second_rec = recommendation()
+        second_rec.transition_penalty_c = 0.9
+        second = await manager.async_open_session(
+            "user",
+            second_rec,
+            weather_context={"temperature_c": 15.0, "condition": "cloudy"},
+            learning_contexts={
+                "start": {
+                    "jacket": const.JACKET_LIGHT,
+                    "effective_c": 15.0,
+                    "wind_penalty_c": 0.0,
+                    "transition_penalty_c": 0.9,
+                },
+                "later": {"jacket": const.JACKET_LIGHT, "effective_c": 15.0},
+            },
+        )
+
+        assert second["id"] == first["id"]
+        assert manager.get_model("user").feedback_opportunities == 1
+
+    asyncio.run(run())
+
+
+def _make_mature_policy_manager():
+    manager = make_manager()
+    model = manager.get_model("user")
+    model.total_feedback = 30
+    model.general_stat = learning.RunningStat(samples=30, weight_sum=30.0)
+    manager._profiles["user"]["model"] = model.to_dict()
+    return manager
+
+
+def _policy_contexts():
+    return {
+        "start": {"jacket": const.JACKET_LIGHT, "effective_c": 15.0},
+        "later": {"jacket": const.JACKET_LIGHT, "effective_c": 15.0},
+    }
+
+
+def test_policy_signature_reuses_high_confidence_changes_inside_same_region():
+    async def run():
+        manager = _make_mature_policy_manager()
+        first_rec = recommendation()
+        first_rec.confidence = 0.80
+        first = await manager.async_open_session(
+            "user", first_rec,
+            weather_context={"temperature_c": 15.0, "condition": "cloudy"},
+            learning_contexts=_policy_contexts(),
+        )
+        second_rec = recommendation()
+        second_rec.confidence = 0.79
+        second = await manager.async_open_session(
+            "user", second_rec,
+            weather_context={"temperature_c": 15.0, "condition": "cloudy"},
+            learning_contexts=_policy_contexts(),
+        )
+
+        assert second["id"] == first["id"]
+        assert manager.get_model("user").feedback_opportunities == 1
+
+    asyncio.run(run())
+
+
+def test_policy_signature_reuses_low_confidence_changes_inside_same_region():
+    async def run():
+        manager = _make_mature_policy_manager()
+        first_rec = recommendation()
+        first_rec.confidence = 0.45
+        first = await manager.async_open_session(
+            "user", first_rec,
+            weather_context={"temperature_c": 15.0, "condition": "cloudy"},
+            learning_contexts=_policy_contexts(),
+        )
+        second_rec = recommendation()
+        second_rec.confidence = 0.541
+        second = await manager.async_open_session(
+            "user", second_rec,
+            weather_context={"temperature_c": 15.0, "condition": "cloudy"},
+            learning_contexts=_policy_contexts(),
+        )
+
+        assert second["id"] == first["id"]
+        assert manager.get_model("user").feedback_opportunities == 1
+
+    asyncio.run(run())
+
+
+def test_policy_signature_still_refreshes_when_confidence_crosses_policy_boundary():
+    async def run():
+        manager = _make_mature_policy_manager()
+        first_rec = recommendation()
+        first_rec.confidence = 0.54
+        first = await manager.async_open_session(
+            "user", first_rec,
+            weather_context={"temperature_c": 15.0, "condition": "cloudy"},
+            learning_contexts=_policy_contexts(),
+        )
+        second_rec = recommendation()
+        second_rec.confidence = 0.56
+        second = await manager.async_open_session(
+            "user", second_rec,
+            weather_context={"temperature_c": 15.0, "condition": "cloudy"},
+            learning_contexts=_policy_contexts(),
+        )
+
+        assert second["id"] != first["id"]
+        old = manager._find_session("user", first["id"])
+        assert old is not None
+        assert old["superseded"] is True
+        assert old["trainable"] is False
+        # Same real decision, new policy snapshot: keep the original opportunity
+        # ordinal instead of advancing active-learning cadence.
+        assert manager.get_model("user").feedback_opportunities == 1
+        current = manager._find_session("user", second["id"])
+        assert current is not None
+        assert current["opportunity_count"] == 1
+
+    asyncio.run(run())
+
+
+def test_learning_contract_freezes_perfect_boundary_across_intervening_model_change():
+    async def run():
+        manager = make_manager()
+        model = manager.get_model("user")
+        model.general_stat = learning.RunningStat(samples=20, weight_sum=20.0)
+        manager._profiles["user"]["model"] = model.to_dict()
+
+        rec = recommendation()
+        rec.effective_now_c = 14.9
+        session = await manager.async_open_session(
+            "user",
+            rec,
+            weather_context={"temperature_c": 14.9, "condition": "cloudy"},
+            learning_contexts={
+                "start": {"jacket": const.JACKET_LIGHT, "effective_c": 14.9},
+                "later": {"jacket": const.JACKET_LIGHT, "effective_c": 14.9},
+            },
+        )
+        stored = manager._find_session("user", session["id"])
+        assert stored is not None
+        assert stored["learning_contract"]["start"]["perfect_boundary"] == "warm_threshold_delta_c"
+
+        changed = manager.get_model("user")
+        changed.light_threshold_delta_c = -1.5
+        assert learning._perfect_threshold_attribute(
+            changed, const.JACKET_LIGHT, 14.9
+        ) == "light_threshold_delta_c"
+        manager._profiles["user"]["model"] = changed.to_dict()
+
+        await manager.async_feedback(
+            "user", session["id"], rating=const.FEEDBACK_PERFECT, phase=None,
+            recommendation_used=True, unusual_day=False, voluntary=True,
+        )
+        learned = manager.get_model("user")
+        assert learned.warm_stat.weight_sum == 1.0
+        assert learned.light_stat.weight_sum == 0.0
+
+    asyncio.run(run())
+
+
+def test_learning_contract_keeps_bootstrap_session_bootstrap_after_model_matures_elsewhere():
+    async def run():
+        manager = make_manager()
+        model = manager.get_model("user")
+        model.general_stat = learning.RunningStat(samples=10, weight_sum=9.5)
+        manager._profiles["user"]["model"] = model.to_dict()
+
+        session = await manager.async_open_session(
+            "user", recommendation(),
+            weather_context={"temperature_c": 15.0, "condition": "cloudy"},
+            learning_contexts={
+                "start": {
+                    "jacket": const.JACKET_LIGHT,
+                    "effective_c": 15.0,
+                    "wind_penalty_c": 0.6,
+                    "transition_penalty_c": 0.9,
+                },
+                "later": {"jacket": const.JACKET_LIGHT, "effective_c": 15.0},
+            },
+        )
+        stored = manager._find_session("user", session["id"])
+        assert stored is not None
+        assert stored["learning_contract"]["bootstrap_mode"] is True
+
+        matured = manager.get_model("user")
+        matured.general_stat = learning.RunningStat(samples=30, weight_sum=20.0)
+        manager._profiles["user"]["model"] = matured.to_dict()
+
+        await manager.async_feedback(
+            "user", session["id"], rating=const.FEEDBACK_PERFECT, phase=None,
+            recommendation_used=True, unusual_day=False, voluntary=True,
+        )
+        learned = manager.get_model("user")
+        assert learned.wind_stat.weight_sum == 0.0
+        assert learned.transition_stat.weight_sum == 0.0
+
+    asyncio.run(run())
+
+
+def test_learning_contract_freezes_bootstrap_for_all_phase_contexts():
+    async def run():
+        manager = make_manager()
+        model = manager.get_model("user")
+        model.general_stat = learning.RunningStat(samples=10, weight_sum=9.5)
+        manager._profiles["user"]["model"] = model.to_dict()
+
+        rec = recommendation()
+        rec.jacket_later = const.JACKET_WARM
+        rec.later_at = datetime(2026, 9, 1, 11, 0, tzinfo=timezone.utc)
+        session = await manager.async_open_session(
+            "user", rec,
+            weather_context={"temperature_c": 15.0, "condition": "cloudy"},
+            learning_contexts={
+                "start": {
+                    "jacket": const.JACKET_LIGHT,
+                    "effective_c": 15.0,
+                    "wind_penalty_c": 0.6,
+                    "transition_penalty_c": 0.9,
+                },
+                "later": {
+                    "jacket": const.JACKET_WARM,
+                    "effective_c": 11.0,
+                    "wind_penalty_c": 0.6,
+                    "transition_penalty_c": 0.0,
+                },
+            },
+        )
+
+        await manager.async_feedback(
+            "user", session["id"], rating=const.FEEDBACK_PERFECT,
+            phase=const.PHASE_ALL, recommendation_used=True,
+            unusual_day=False, voluntary=True,
+        )
+        learned = manager.get_model("user")
+        assert learned.general_stat.weight_sum > 10.0
+        assert learned.wind_stat.weight_sum == 0.0
+        assert learned.transition_stat.weight_sum == 0.0
+
+    asyncio.run(run())
+
+
+def test_policy_signature_reuses_when_informative_reason_changes_but_result_stays_true():
+    async def run():
+        manager = _make_mature_policy_manager()
+        first_rec = recommendation()
+        first_rec.confidence = 0.20
+        first_rec.reasons = ["near_threshold"]
+        first = await manager.async_open_session(
+            "user", first_rec,
+            weather_context={"temperature_c": 15.0, "condition": "cloudy"},
+            learning_contexts=_policy_contexts(),
+        )
+
+        second_rec = recommendation()
+        second_rec.confidence = 0.20
+        second_rec.reasons = []
+        second = await manager.async_open_session(
+            "user", second_rec,
+            weather_context={"temperature_c": 15.0, "condition": "cloudy"},
+            learning_contexts=_policy_contexts(),
+        )
+
+        assert second["id"] == first["id"]
+        assert manager.get_model("user").feedback_opportunities == 1
+
+    asyncio.run(run())
+
+
+def test_policy_signature_reuses_confidence_boundary_change_when_other_informative_reason_remains():
+    async def run():
+        manager = _make_mature_policy_manager()
+        first_rec = recommendation()
+        first_rec.confidence = 0.54
+        first_rec.reasons = ["near_threshold"]
+        first = await manager.async_open_session(
+            "user", first_rec,
+            weather_context={"temperature_c": 15.0, "condition": "cloudy"},
+            learning_contexts=_policy_contexts(),
+        )
+
+        second_rec = recommendation()
+        second_rec.confidence = 0.56
+        second_rec.reasons = ["near_threshold"]
+        second = await manager.async_open_session(
+            "user", second_rec,
+            weather_context={"temperature_c": 15.0, "condition": "cloudy"},
+            learning_contexts=_policy_contexts(),
+        )
+
+        assert second["id"] == first["id"]
+        assert manager.get_model("user").feedback_opportunities == 1
+
+    asyncio.run(run())
+
+
+def test_midnight_same_season_weights_reuses_session():
+    async def run():
+        manager = make_manager()
+        original_now = profiles.dt_util.now
+        try:
+            first_now = datetime(2026, 1, 10, 23, 58, tzinfo=timezone.utc)
+            profiles.dt_util.now = lambda: first_now
+            first_rec = recommendation()
+            first_rec.observed_at = first_now
+            first = await manager.async_open_session(
+                "user", first_rec,
+                weather_context={"temperature_c": 15.0, "condition": "cloudy"},
+                learning_contexts={
+                    "start": {
+                        "jacket": const.JACKET_LIGHT,
+                        "effective_c": 15.0,
+                        "observed_at": first_now.isoformat(),
+                    },
+                    "later": {"jacket": const.JACKET_LIGHT, "effective_c": 15.0},
+                },
+            )
+
+            second_now = datetime(2026, 1, 11, 0, 2, tzinfo=timezone.utc)
+            profiles.dt_util.now = lambda: second_now
+            second_rec = recommendation()
+            second_rec.observed_at = second_now
+            second = await manager.async_open_session(
+                "user", second_rec,
+                weather_context={"temperature_c": 15.0, "condition": "cloudy"},
+                learning_contexts={
+                    "start": {
+                        "jacket": const.JACKET_LIGHT,
+                        "effective_c": 15.0,
+                        "observed_at": second_now.isoformat(),
+                    },
+                    "later": {"jacket": const.JACKET_LIGHT, "effective_c": 15.0},
+                },
+            )
+
+            assert second["id"] == first["id"]
+            assert manager.get_model("user").feedback_opportunities == 1
+        finally:
+            profiles.dt_util.now = original_now
+
+    asyncio.run(run())
+
+
+
+def test_answered_same_real_decision_remains_anchor_even_after_feedback_changes_learning_contract():
+    async def run():
+        manager = make_manager()
+        model = manager.get_model("user")
+        model.general_stat = learning.RunningStat(samples=20, weight_sum=20.0)
+        manager._profiles["user"]["model"] = model.to_dict()
+
+        rec = recommendation()
+        rec.confidence = 0.95
+        rec.effective_now_c = 15.0
+        contexts = {
+            "start": {"jacket": const.JACKET_LIGHT, "effective_c": 15.0},
+            "later": {"jacket": const.JACKET_LIGHT, "effective_c": 15.0},
+        }
+        first = await manager.async_open_session(
+            "user", rec,
+            weather_context={"temperature_c": 15.0, "condition": "cloudy"},
+            learning_contexts=contexts,
+        )
+        stored = manager._find_session("user", first["id"])
+        assert stored is not None
+        old_contract = stored["learning_contract"]
+        assert old_contract["start"]["perfect_boundary"] == "light_threshold_delta_c"
+
+        await manager.async_feedback(
+            "user", first["id"], rating=const.FEEDBACK_TOO_COLD, phase=None,
+            recommendation_used=True, unusual_day=False, voluntary=True,
+        )
+        model_after = manager.get_model("user")
+        new_contract = profiles._learning_contract(model_after, rec, contexts)
+        assert new_contract != old_contract
+        assert new_contract["start"]["perfect_boundary"] == "warm_threshold_delta_c"
+
+        reopened = await manager.async_open_session(
+            "user", rec,
+            weather_context={"temperature_c": 15.0, "condition": "cloudy"},
+            learning_contexts=contexts,
+        )
+
+        assert reopened["id"] == first["id"]
+        assert reopened["feedback"] is not None
+        assert manager.get_model("user").feedback_opportunities == 1
+        assert manager.get_model("user").total_feedback == 1
+        assert len(manager._profiles["user"]["sessions"]) == 1
+
+    asyncio.run(run())
+
+
+def test_semantic_snapshot_replacement_keeps_opportunity_nine_and_cadence():
+    async def run():
+        manager = _make_mature_policy_manager()
+        model = manager.get_model("user")
+        model.feedback_opportunities = 8
+        manager._profiles["user"]["model"] = model.to_dict()
+
+        first_rec = recommendation()
+        first_rec.confidence = 0.95
+        first_rec.effective_now_c = 14.8
+        first = await manager.async_open_session(
+            "user", first_rec,
+            weather_context={"temperature_c": 14.8, "condition": "cloudy"},
+            learning_contexts={
+                "start": {"jacket": const.JACKET_LIGHT, "effective_c": 14.8},
+                "later": {"jacket": const.JACKET_LIGHT, "effective_c": 14.8},
+            },
+        )
+        first_stored = manager._find_session("user", first["id"])
+        assert first_stored is not None
+        assert first_stored["opportunity_count"] == 9
+        assert first["request_feedback"] is False
+
+        second_rec = recommendation()
+        second_rec.confidence = 0.95
+        second_rec.effective_now_c = 15.2
+        second = await manager.async_open_session(
+            "user", second_rec,
+            weather_context={"temperature_c": 15.2, "condition": "cloudy"},
+            learning_contexts={
+                "start": {"jacket": const.JACKET_LIGHT, "effective_c": 15.2},
+                "later": {"jacket": const.JACKET_LIGHT, "effective_c": 15.2},
+            },
+        )
+
+        assert second["id"] != first["id"]
+        current = manager._find_session("user", second["id"])
+        assert current is not None
+        assert current["opportunity_count"] == 9
+        assert second["request_feedback"] is False
+        assert manager.get_model("user").feedback_opportunities == 9
+
+    asyncio.run(run())
+
+
+def test_semantic_snapshot_replacement_keeps_opportunity_ten_due():
+    async def run():
+        manager = _make_mature_policy_manager()
+        model = manager.get_model("user")
+        model.feedback_opportunities = 9
+        manager._profiles["user"]["model"] = model.to_dict()
+
+        first_rec = recommendation()
+        first_rec.confidence = 0.95
+        first_rec.effective_now_c = 14.8
+        first = await manager.async_open_session(
+            "user", first_rec,
+            weather_context={"temperature_c": 14.8, "condition": "cloudy"},
+            learning_contexts={
+                "start": {"jacket": const.JACKET_LIGHT, "effective_c": 14.8},
+                "later": {"jacket": const.JACKET_LIGHT, "effective_c": 14.8},
+            },
+        )
+        assert first["request_feedback"] is True
+
+        second_rec = recommendation()
+        second_rec.confidence = 0.95
+        second_rec.effective_now_c = 15.2
+        second = await manager.async_open_session(
+            "user", second_rec,
+            weather_context={"temperature_c": 15.2, "condition": "cloudy"},
+            learning_contexts={
+                "start": {"jacket": const.JACKET_LIGHT, "effective_c": 15.2},
+                "later": {"jacket": const.JACKET_LIGHT, "effective_c": 15.2},
+            },
+        )
+
+        assert second["id"] != first["id"]
+        current = manager._find_session("user", second["id"])
+        assert current is not None
+        assert current["opportunity_count"] == 10
+        assert second["request_feedback"] is True
+        assert manager.get_model("user").feedback_opportunities == 10
+
+    asyncio.run(run())
+
+
+def test_learning_paused_identical_openings_reuse_display_session_without_storage_churn():
+    async def run():
+        manager = make_manager()
+        await manager.async_set_learning("user", False)
+        rec = recommendation()
+        contexts = {
+            "start": {"jacket": const.JACKET_LIGHT, "effective_c": 15.0},
+            "later": {"jacket": const.JACKET_LIGHT, "effective_c": 15.0},
+        }
+
+        sessions = []
+        for _ in range(5):
+            sessions.append(
+                await manager.async_open_session(
+                    "user", rec,
+                    weather_context={"temperature_c": 15.0, "condition": "cloudy"},
+                    learning_contexts=contexts,
+                )
+            )
+
+        assert {item["id"] for item in sessions} == {sessions[0]["id"]}
+        assert len(manager._profiles["user"]["sessions"]) == 1
+        stored = manager._find_session("user", sessions[0]["id"])
+        assert stored is not None
+        assert stored["trainable"] is False
+        assert stored["request_feedback"] is False
+        assert stored["opportunity_count"] is None
+        assert manager.get_model("user").feedback_opportunities == 0
+
+        await manager.async_set_learning("user", True)
+        resumed = await manager.async_open_session(
+            "user", rec,
+            weather_context={"temperature_c": 15.0, "condition": "cloudy"},
+            learning_contexts=contexts,
+        )
+        assert resumed["id"] != sessions[0]["id"]
+        assert manager.get_model("user").feedback_opportunities == 1
+        try:
+            await manager.async_feedback(
+                "user", sessions[0]["id"], rating=const.FEEDBACK_PERFECT, phase=None,
+                recommendation_used=True, unusual_day=False, voluntary=True,
+            )
+        except ValueError as err:
+            assert str(err) == "feedback_session_incompatible"
+        else:
+            raise AssertionError("paused display snapshot must never become trainable")
 
     asyncio.run(run())

@@ -25,6 +25,8 @@ from .const import (
     JACKET_WINTER,
     PHASE_ALL,
     PHASE_START,
+    PULLOVER_WARMTH_C,
+    TOP_PULLOVER,
 )
 
 
@@ -84,6 +86,7 @@ class PersonalModel:
     warm_answer: int = 3
     wind_answer: int = 3
     evening_answer: int = 3
+    pullover_answer: int = 3
 
     # Positive offsets mean the user tends to need more warmth than baseline.
     general_offset_c: float = 0.0
@@ -93,6 +96,9 @@ class PersonalModel:
     # jacket that fits the continuing trend. 1.0 is neutral; it is deliberately
     # tightly bounded so transient learning can refine, not dominate, the model.
     transient_tolerance: float = 1.0
+    # Positive values mean the user is comfortable using a pullover at slightly
+    # warmer conditions; negative values prefer shirt + removable jacket sooner.
+    pullover_threshold_delta_c: float = 0.0
 
     # Seasonal values are independent offsets from the personal year-round
     # baseline. They are never automatically re-centered. A shared component may
@@ -134,6 +140,7 @@ class PersonalModel:
     light_stat: RunningStat = field(default_factory=RunningStat)
     warm_stat: RunningStat = field(default_factory=RunningStat)
     winter_stat: RunningStat = field(default_factory=RunningStat)
+    pullover_stat: RunningStat = field(default_factory=RunningStat)
     total_feedback: int = 0
     feedback_opportunities: int = 0
 
@@ -144,17 +151,20 @@ class PersonalModel:
         warm: int,
         wind: int,
         evening: int = 3,
+        pullover: int = 3,
     ) -> "PersonalModel":
         cold = _choice(cold)
         warm = _choice(warm)
         wind = _choice(wind)
         evening = _choice(evening)
+        pullover = _choice(pullover)
         model = cls(
             setup_complete=True,
             cold_answer=cold,
             warm_answer=warm,
             wind_answer=wind,
             evening_answer=evening,
+            pullover_answer=pullover,
         )
         # Fast but bounded initial personalization. These are starting priors,
         # not permanent truths; real feedback can move them immediately.
@@ -164,6 +174,7 @@ class PersonalModel:
         model.warm_threshold_delta_c = warmth_tendency
         model.winter_threshold_delta_c = warmth_tendency * 1.15
         model.wind_bias_c = (wind - 3) * 0.35
+        model.pullover_threshold_delta_c = (pullover - 3) * 1.0
         return model
 
     def seasonal_bias_for(self, when: datetime | None) -> float:
@@ -196,6 +207,7 @@ class PersonalModel:
             self.warm_answer,
             self.wind_answer,
             self.evening_answer,
+            self.pullover_answer,
         )
         fresh.learning_enabled = self.learning_enabled
         for key, value in asdict(fresh).items():
@@ -238,7 +250,8 @@ class PersonalModel:
             + self.spring_season_stat.weight_sum
             + self.summer_season_stat.weight_sum
             + self.autumn_season_stat.weight_sum
-        ) / 7.0
+            + self.pullover_stat.weight_sum
+        ) / 8.0
         evidence = (
             0.55 * self.general_stat.weight_sum
             + 0.35 * boundary_evidence
@@ -258,6 +271,12 @@ class PersonalModel:
         if jacket == JACKET_WINTER:
             return self.winter_stat.confidence
         return 0.0
+
+    def pullover_confidence(self) -> float:
+        """Confidence in the optional pullover/mid-layer preference."""
+        if self.pullover_stat.weight_sum <= 0.0:
+            return 0.18 if self.setup_complete else 0.08
+        return max(0.08, min(0.98, self.pullover_stat.confidence))
 
     def _season_context_confidence(self, when: datetime | None) -> float:
         """Confidence contributed by the season anchors active at one instant.
@@ -305,6 +324,7 @@ class PersonalModel:
         *,
         observed_at: datetime | None = None,
         later_at: datetime | None = None,
+        pullover_used: bool = False,
     ) -> float:
         """Return conservative confidence for the recommendation being shown."""
         jacket_conf = min(
@@ -313,7 +333,7 @@ class PersonalModel:
         )
         # During the first few ratings the global model is intentionally the main
         # learner. Afterwards the garment-boundary confidence also matters.
-        if self.general_stat.weight_sum < 10.0:
+        if _feedback_bootstrap_mode(self):
             confidence = self.confidence()
         else:
             confidence = min(self.confidence(), jacket_conf)
@@ -322,6 +342,8 @@ class PersonalModel:
             confidence = min(confidence, self._season_context_confidence(observed_at))
         if later_at is not None:
             confidence = min(confidence, self._season_context_confidence(later_at))
+        if pullover_used:
+            confidence = min(confidence, self.pullover_confidence())
         return confidence
 
     def to_dict(self) -> dict[str, Any]:
@@ -339,12 +361,14 @@ class PersonalModel:
         model.warm_answer = _choice(raw.get("warm_answer", 3))
         model.wind_answer = _choice(raw.get("wind_answer", 3))
         model.evening_answer = _choice(raw.get("evening_answer", 3))
+        model.pullover_answer = _choice(raw.get("pullover_answer", 3))
 
         model.general_offset_c = _safe_number(raw.get("general_offset_c"), 0.0, -5.0, 5.0)
         model.seasonal_model_version = _safe_int(raw.get("seasonal_model_version"), 1) or 1
         model.wind_bias_c = _safe_number(raw.get("wind_bias_c"), 0.0, -2.0, 3.0)
         model.transition_bias_c = _safe_number(raw.get("transition_bias_c"), 0.0, -1.5, 2.5)
-        model.transient_tolerance = _safe_number(raw.get("transient_tolerance"), 1.0, 0.5, 1.5)
+        model.transient_tolerance = _safe_number(raw.get("transient_tolerance"), 1.0, 0.0, 1.5)
+        model.pullover_threshold_delta_c = _safe_number(raw.get("pullover_threshold_delta_c"), 0.0, -4.0, 4.0)
         old_season_limit = 4.0 if model.seasonal_model_version >= 4 else 1.8
         model.winter_bias_c = _safe_number(raw.get("winter_bias_c"), 0.0, -old_season_limit, old_season_limit)
         model.spring_bias_c = _safe_number(raw.get("spring_bias_c"), 0.0, -old_season_limit, old_season_limit)
@@ -360,7 +384,9 @@ class PersonalModel:
             setattr(
                 model,
                 f"{season}_seeded_from",
-                str(seeded_from) if seeded_from in {"winter", "spring", "summer", "autumn"} else "",
+                seeded_from
+                if isinstance(seeded_from, str) and seeded_from in _SEASON_NAMES
+                else "",
             )
         model.light_threshold_delta_c = _safe_number(raw.get("light_threshold_delta_c"), 0.0, -3.0, 4.0)
         model.warm_threshold_delta_c = _safe_number(raw.get("warm_threshold_delta_c"), 0.0, -3.0, 4.0)
@@ -375,7 +401,7 @@ class PersonalModel:
         for name in (
             "general_stat", "wind_stat", "transition_stat", "transient_stat",
             "winter_season_stat", "spring_season_stat", "summer_season_stat",
-            "autumn_season_stat", "light_stat", "warm_stat", "winter_stat",
+            "autumn_season_stat", "light_stat", "warm_stat", "winter_stat", "pullover_stat",
         ):
             setattr(model, name, _safe_stat(raw.get(name)))
         model.total_feedback = _safe_int(raw.get("total_feedback"), 0)
@@ -523,7 +549,7 @@ def _apply_threshold_move(
 def _choice(value: int) -> int:
     try:
         return max(1, min(5, int(value)))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return 3
 
 
@@ -912,6 +938,40 @@ def _pool_season_consensus(model: PersonalModel) -> float:
     return transfer
 
 
+def _perfect_threshold_attribute(
+    model: PersonalModel,
+    jacket: str,
+    effective_c: float | None = None,
+) -> str | None:
+    """Return the one jacket boundary a perfect observation confirms.
+
+    Session reuse needs the exact same semantic split as feedback learning. Keep
+    the boundary choice in one helper so a small weather refresh cannot reuse an
+    old snapshot after crossing the midpoint between two adjacent boundaries.
+    """
+    if jacket == JACKET_NONE:
+        return "light_threshold_delta_c"
+    if jacket == JACKET_WINTER:
+        return "winter_threshold_delta_c"
+    if effective_c is None or not math.isfinite(effective_c):
+        return None
+
+    light, warm, winter = _model_thresholds(model)
+    if jacket == JACKET_LIGHT:
+        return (
+            "light_threshold_delta_c"
+            if abs(effective_c - light) <= abs(effective_c - warm)
+            else "warm_threshold_delta_c"
+        )
+    if jacket == JACKET_WARM:
+        return (
+            "warm_threshold_delta_c"
+            if abs(effective_c - warm) <= abs(effective_c - winter)
+            else "winter_threshold_delta_c"
+        )
+    return None
+
+
 def _threshold_stats_for_observation(
     model: PersonalModel,
     jacket: str,
@@ -925,18 +985,13 @@ def _threshold_stats_for_observation(
     nearest adjacent boundary; legacy contexts without it stay conservative.
     """
     if error == 0.0:
-        if jacket == JACKET_NONE:
-            return [model.light_stat]
-        if jacket == JACKET_WINTER:
-            return [model.winter_stat]
-        if effective_c is None or not math.isfinite(effective_c):
-            return []
-        light, warm, winter = _model_thresholds(model)
-        if jacket == JACKET_LIGHT:
-            return [model.light_stat] if abs(effective_c - light) <= abs(effective_c - warm) else [model.warm_stat]
-        if jacket == JACKET_WARM:
-            return [model.warm_stat] if abs(effective_c - warm) <= abs(effective_c - winter) else [model.winter_stat]
-        return []
+        attribute = _perfect_threshold_attribute(model, jacket, effective_c)
+        stat = {
+            "light_threshold_delta_c": model.light_stat,
+            "warm_threshold_delta_c": model.warm_stat,
+            "winter_threshold_delta_c": model.winter_stat,
+        }.get(attribute)
+        return [stat] if stat is not None else []
 
     if (jacket == JACKET_NONE and error > 0) or (jacket == JACKET_LIGHT and error < 0):
         return [model.light_stat]
@@ -961,6 +1016,49 @@ def _threshold_target(model: PersonalModel, jacket: str, error: float) -> tuple[
     return None
 
 
+def _feedback_bootstrap_mode(model: PersonalModel) -> bool:
+    """Return whether one feedback interaction must stay in bootstrap mode.
+
+    The mode is sampled before any evidence from that interaction is added and
+    must remain fixed for all contexts belonging to the same user rating.
+    """
+    return model.general_stat.weight_sum < 10.0
+
+
+def _threshold_stat_for_attribute(
+    model: PersonalModel, attribute: str | None
+) -> RunningStat | None:
+    return {
+        "light_threshold_delta_c": model.light_stat,
+        "warm_threshold_delta_c": model.warm_stat,
+        "winter_threshold_delta_c": model.winter_stat,
+    }.get(attribute or "")
+
+
+def _contract_season_weights(raw: Any) -> dict[str, float] | None:
+    """Validate a stored season-weight contract without re-deriving it."""
+    if not isinstance(raw, dict):
+        return None
+    normalized: dict[str, float] = {}
+    for name, value in raw.items():
+        if name not in _SEASON_NAMES:
+            return None
+        try:
+            weight = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(weight) or weight < 0.0:
+            return None
+        if weight > 0.0:
+            normalized[name] = weight
+    if not normalized:
+        return {}
+    total = sum(normalized.values())
+    if total <= 0.0:
+        return {}
+    return {name: weight / total for name, weight in normalized.items()}
+
+
 def apply_feedback(
     model: PersonalModel,
     *,
@@ -981,6 +1079,8 @@ def apply_feedback(
     transient_direction: str | None = None,
     boundary_only: bool = False,
     boundary_attribute: str | None = None,
+    top_layer: str = "shirt",
+    learning_contract: dict[str, Any] | None = None,
 ) -> bool:
     """Fold one rating into the compact profile and report real learning change."""
     if rating == FEEDBACK_NOT_USED or recommendation_used is False:
@@ -999,6 +1099,40 @@ def apply_feedback(
     # future learning/feedback cadence.
     if not model.learning_enabled:
         return False
+
+    contract = learning_contract if isinstance(learning_contract, dict) else {}
+    bootstrap_mode = (
+        bool(contract.get("bootstrap_mode"))
+        if "bootstrap_mode" in contract
+        else _feedback_bootstrap_mode(model)
+    )
+    perfect_boundary_locked = "perfect_boundary" in contract
+    perfect_boundary_attribute = (
+        str(contract.get("perfect_boundary"))
+        if contract.get("perfect_boundary") in {
+            "light_threshold_delta_c",
+            "warm_threshold_delta_c",
+            "winter_threshold_delta_c",
+        }
+        else None
+    )
+    wind_learning_locked = "wind_learning" in contract
+    wind_learning_enabled = bool(contract.get("wind_learning"))
+    transition_learning_locked = "transition_learning" in contract
+    transition_learning_enabled = bool(contract.get("transition_learning"))
+    if "transient_override" in contract:
+        transient_override = bool(contract.get("transient_override"))
+    if "transient_direction" in contract:
+        transient_direction = (
+            str(contract.get("transient_direction"))
+            if contract.get("transient_direction") in {"warming", "cooling"}
+            else None
+        )
+    season_weights_contract = (
+        _contract_season_weights(contract.get("season_weights"))
+        if "season_weights" in contract
+        else None
+    )
 
     # ``total_feedback`` is an interaction counter, not learning evidence.  Keep
     # it out of the change check so a deliberately non-learnable rating can be
@@ -1021,10 +1155,54 @@ def apply_feedback(
     weight = 0.30 if unusual_day else 1.0
     weight = max(0.2, min(1.2, weight))
 
+    # ``effective_c`` is the environmental effective temperature. Jacket
+    # thresholds, however, are evaluated against the clothing-equivalent
+    # temperature when a pullover is worn. Keep the two meanings explicit so a
+    # perfect Pullover + leichte Jacke observation confirms the same boundary
+    # that the recommendation engine actually used.
+    threshold_effective_c = effective_c
+    if (
+        top_layer == TOP_PULLOVER
+        and effective_c is not None
+        and math.isfinite(effective_c)
+    ):
+        threshold_effective_c = effective_c + PULLOVER_WARMTH_C
+
+    # The pullover is a fixed mid-layer choice for the planning period, not a
+    # fifth jacket class. Attribute feedback before the transient early-return
+    # whenever the mid-layer itself is the only sensible explanation:
+    #
+    # * Pullover + no jacket + too warm -> the fixed pullover was too much.
+    #   Do not make the transient system more tolerant for that complaint.
+    # * Perfect -> confirm the fixed pullover once per feedback interaction,
+    #   while still allowing the transient decision to receive its own evidence.
+    #
+    # If a removable jacket was also present, warmth/cold feedback belongs to
+    # the outer-layer/transient decision instead of double-learning garments.
+    pullover_context = top_layer == TOP_PULLOVER and not boundary_only
+    if pullover_context and error < 0.0 and jacket == JACKET_NONE:
+        previous_pullover = model.pullover_stat.weight_sum
+        model.pullover_stat.add(error, weight=weight)
+        pullover_step = _learning_step(previous_pullover) * 0.45 * weight
+        model.pullover_threshold_delta_c = _clamp(
+            model.pullover_threshold_delta_c + error * pullover_step,
+            -4.0,
+            4.0,
+        )
+        return _learned()
+
+    if pullover_context and error == 0.0 and count_feedback:
+        # PHASE_ALL may evaluate start + later jacket contexts, but the pullover
+        # is one fixed decision and therefore receives at most one confirmation.
+        model.pullover_stat.add(0.0, weight=weight)
+
     # A transient override is a separate decision: accept a short mismatch now
     # because the continuing trend favours another jacket. Feedback on that
-    # deliberate compromise must primarily teach *transient tolerance*, not move
-    # the user's ordinary all-day jacket thresholds or global comfort offset.
+    # deliberate compromise primarily teaches *transient tolerance*, not the
+    # user's ordinary all-day jacket thresholds or global comfort offset. A
+    # perfect Pullover recommendation may already have confirmed the fixed
+    # mid-layer above; that is intentional because the two decisions are
+    # independent pieces of the same outfit.
     if transient_override and transient_direction in {"warming", "cooling"}:
         signal = 0.0
         if error != 0.0:
@@ -1034,7 +1212,7 @@ def apply_feedback(
         if signal != 0.0:
             transient_step = _learning_step(previous_transient) * 0.08 * weight
             model.transient_tolerance = _clamp(
-                model.transient_tolerance + signal * transient_step, 0.5, 1.5
+                model.transient_tolerance + signal * transient_step, 0.0, 1.5
             )
         return _learned()
 
@@ -1058,7 +1236,9 @@ def apply_feedback(
             stats = (
                 [explicit_stat]
                 if explicit_stat is not None
-                else _threshold_stats_for_observation(model, jacket, error, effective_c)
+                else _threshold_stats_for_observation(
+                    model, jacket, error, threshold_effective_c
+                )
             )
             for stat in stats:
                 stat.add(error, weight=weight)
@@ -1072,7 +1252,11 @@ def apply_feedback(
         return _learned()
 
     if apply_general:
-        season_weights = _season_weights(observed_at)
+        season_weights = (
+            season_weights_contract
+            if season_weights_contract is not None
+            else _season_weights(observed_at)
+        )
 
         # ``general_stat`` remains global evidence for confidence/cadence, but
         # normal thermal feedback no longer moves ``general_offset_c`` directly.
@@ -1111,8 +1295,14 @@ def apply_feedback(
     # non-perfect rating only counts as boundary evidence if the real boundary
     # can actually move; this prevents confidence from increasing behind a
     # neighbour-imposed 2.5 °C spacing cap.
-    threshold_stats = _threshold_stats_for_observation(model, jacket, error, effective_c)
-    if model.general_stat.weight_sum <= 10.0:
+    if error == 0.0 and perfect_boundary_locked:
+        perfect_stat = _threshold_stat_for_attribute(model, perfect_boundary_attribute)
+        threshold_stats = [perfect_stat] if perfect_stat is not None else []
+    else:
+        threshold_stats = _threshold_stats_for_observation(
+            model, jacket, error, threshold_effective_c
+        )
+    if bootstrap_mode:
         for stat in threshold_stats:
             stat.add(error, weight=weight)
         return _learned()
@@ -1125,7 +1315,11 @@ def apply_feedback(
     # Raw gusts can be high while the engine deliberately applies no wind penalty
     # (for example in warm weather); learning from the raw speed would misattribute
     # the user's feedback.
-    if (wind_penalty_c or 0.0) >= 0.5:
+    if (
+        wind_learning_enabled
+        if wind_learning_locked
+        else (wind_penalty_c or 0.0) >= 0.5
+    ):
         previous = model.wind_stat.weight_sum
         model.wind_stat.add(error, weight=weight)
         special_step = _learning_step(previous) * 0.45 * weight
@@ -1135,7 +1329,11 @@ def apply_feedback(
             3.0,
         )
 
-    if transition_penalty_c >= 0.8 and phase in (None, PHASE_START, PHASE_ALL):
+    if (
+        transition_learning_enabled
+        if transition_learning_locked
+        else transition_penalty_c >= 0.8
+    ) and phase in (None, PHASE_START, PHASE_ALL):
         previous = model.transition_stat.weight_sum
         model.transition_stat.add(error, weight=weight)
         special_step = _learning_step(previous) * 0.45 * weight
@@ -1170,7 +1368,7 @@ def should_request_feedback(
         return False
     n = model.total_feedback
     opportunities = model.feedback_opportunities if opportunity_count is None else opportunity_count
-    if model.general_stat.weight_sum < 10.0:
+    if _feedback_bootstrap_mode(model):
         return True
     confidence = model.confidence() if decision_confidence is None else decision_confidence
     informative = near_threshold or class_change or unusual_weather or confidence < 0.55

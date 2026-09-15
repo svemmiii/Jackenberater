@@ -605,6 +605,7 @@ async def _recommendation(
         recommendation.work_name = work_name
         recommendation.work_start = work_start
         recommendation.work_end = work_end
+        recommendation.stay_context = "work"
     return recommendation
 
 
@@ -828,6 +829,7 @@ def _learning_contexts(rec: Recommendation) -> dict[str, dict[str, Any]]:
         "transient_override": rec.transient_override,
         "transient_direction": rec.transient_direction,
         "transient_burden": rec.transient_burden,
+        "top_layer": rec.top_layer,
     }
     later = {
         "jacket": rec.jacket_later,
@@ -840,6 +842,7 @@ def _learning_contexts(rec: Recommendation) -> dict[str, dict[str, Any]]:
         # Indoor->outdoor transition belongs to the deliberate 'go out now'
         # moment, not automatically to a later forecast point.
         "transition_penalty_c": 0.0,
+        "top_layer": rec.top_layer,
     }
     return {"start": start, "later": later}
 
@@ -991,6 +994,7 @@ async def ws_open_session(hass, connection, msg) -> None:
         vol.Required("warm"): vol.All(int, vol.Range(min=1, max=5)),
         vol.Required("wind"): vol.All(int, vol.Range(min=1, max=5)),
         vol.Required("evening"): vol.All(int, vol.Range(min=1, max=5)),
+        vol.Optional("pullover", default=3): vol.All(int, vol.Range(min=1, max=5)),
     }
 )
 @websocket_api.async_response
@@ -1006,6 +1010,7 @@ async def ws_profile_setup(hass, connection, msg) -> None:
             warm=msg["warm"],
             wind=msg["wind"],
             evening=msg["evening"],
+            pullover=msg["pullover"],
         )
         _ensure_runtime_current(entry, runtime, manager)
         connection.send_result(msg["id"], manager.get_profile_summary(profile_id))

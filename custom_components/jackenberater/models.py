@@ -89,6 +89,11 @@ class Recommendation:
     later_change_confirmed: bool = True
     context_calendar_status: str = "not_configured"
     vacation_calendar_status: str = "not_applicable"
+    # v0.4.0: fixed base top for the relevant planning period. Jackets remain
+    # removable outer layers; the advisor never schedules a shirt->pullover
+    # change later in the day.
+    top_layer: str = "shirt"
+    pullover_reason: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         result = asdict(self)

@@ -485,6 +485,24 @@ def test_corrupt_running_stat_storage_falls_back_safely():
     assert model.total_feedback == 0
 
 
+def test_corrupt_choice_infinity_falls_back_safely():
+    model = PersonalModel.from_dict({
+        "cold_answer": float("inf"),
+        "warm_answer": float("-inf"),
+    })
+    assert model.cold_answer == 3
+    assert model.warm_answer == 3
+
+
+def test_corrupt_unhashable_season_seed_falls_back_safely():
+    model = PersonalModel.from_dict({
+        "winter_seeded_from": {},
+        "spring_seeded_from": [],
+    })
+    assert model.winter_seeded_from == ""
+    assert model.spring_seeded_from == ""
+
+
 def test_past_work_points_cannot_change_future_recommendation():
     model = PersonalModel.from_answers(3, 3, 3, 3)
     current = point(0, 22)
@@ -1058,6 +1076,201 @@ def test_transient_feedback_personalizes_short_term_tolerance_without_history():
     assert model.light_threshold_delta_c == light_before
     assert model.warm_threshold_delta_c == warm_before
     assert "history" not in model.to_dict()
+
+
+def test_repeated_too_cold_feedback_can_train_warming_transient_override_out():
+    model = PersonalModel.from_answers(3, 3, 3, 3, 3)
+    current = point_minutes(0, 18.2)
+    future = [
+        point_minutes(20, 18.4),
+        point_minutes(60, 18.5),
+        point_minutes(120, 18.5),
+    ]
+
+    first = engine.build_recommendation(
+        current, future, model, indoor_temperature_c=26.0,
+        base_horizon_hours=2, max_horizon_hours=2,
+    )
+    assert first.instant_jacket == const.JACKET_LIGHT
+    assert first.jacket_now == const.JACKET_NONE
+    assert first.transient_override is True
+    assert first.transient_direction == "warming"
+
+    for _ in range(40):
+        rec = engine.build_recommendation(
+            current, future, model, indoor_temperature_c=26.0,
+            base_horizon_hours=2, max_horizon_hours=2,
+        )
+        if not rec.transient_override:
+            break
+        learning.apply_feedback(
+            model,
+            rating=const.FEEDBACK_TOO_COLD,
+            jacket=rec.jacket_now,
+            effective_c=rec.effective_now_c,
+            observed_at=current.dt,
+            transient_override=True,
+            transient_direction="warming",
+            top_layer=rec.top_layer,
+        )
+
+    final = engine.build_recommendation(
+        current, future, model, indoor_temperature_c=26.0,
+        base_horizon_hours=2, max_horizon_hours=2,
+    )
+    assert model.transient_tolerance < 0.5
+    assert final.jacket_now == const.JACKET_LIGHT
+    assert final.instant_jacket is None
+    assert final.transient_override is False
+
+
+def test_repeated_too_warm_feedback_can_train_cooling_transient_override_out():
+    model = PersonalModel.from_answers(3, 3, 3, 3, 3)
+    current = point_minutes(0, 18.4)
+    future = [
+        point_minutes(20, 17.8),
+        point_minutes(60, 17.8),
+        point_minutes(120, 17.8),
+    ]
+
+    first = engine.build_recommendation(
+        current, future, model, indoor_temperature_c=18.0,
+        base_horizon_hours=2, max_horizon_hours=2,
+    )
+    assert first.instant_jacket == const.JACKET_NONE
+    assert first.jacket_now == const.JACKET_LIGHT
+    assert first.transient_override is True
+    assert first.transient_direction == "cooling"
+
+    for _ in range(40):
+        rec = engine.build_recommendation(
+            current, future, model, indoor_temperature_c=18.0,
+            base_horizon_hours=2, max_horizon_hours=2,
+        )
+        if not rec.transient_override:
+            break
+        learning.apply_feedback(
+            model,
+            rating=const.FEEDBACK_TOO_WARM,
+            jacket=rec.jacket_now,
+            effective_c=rec.effective_now_c,
+            observed_at=current.dt,
+            transient_override=True,
+            transient_direction="cooling",
+            top_layer=rec.top_layer,
+        )
+
+    final = engine.build_recommendation(
+        current, future, model, indoor_temperature_c=18.0,
+        base_horizon_hours=2, max_horizon_hours=2,
+    )
+    assert model.transient_tolerance < 0.5
+    assert final.jacket_now == const.JACKET_NONE
+    assert final.instant_jacket is None
+    assert final.transient_override is False
+
+
+def test_zero_transient_tolerance_disables_zero_burden_shirt_override():
+    model = PersonalModel.from_answers(3, 3, 3, 3, 3)
+    model.transient_tolerance = 0.0
+    rec = engine.build_recommendation(
+        point_minutes(0, 18.0),
+        [
+            point_minutes(10, 17.8),
+            point_minutes(30, 17.8),
+            point_minutes(60, 17.8),
+        ],
+        model,
+        indoor_temperature_c=18.0,
+        base_horizon_hours=1,
+        max_horizon_hours=1,
+    )
+
+    assert rec.top_layer == const.TOP_SHIRT
+    assert rec.jacket_now == const.JACKET_NONE
+    assert rec.transient_override is False
+    assert rec.transient_direction is None
+    assert rec.transient_burden is None
+
+
+def test_zero_transient_tolerance_disables_zero_burden_pullover_override():
+    model = PersonalModel.from_answers(3, 3, 3, 3, 3)
+    model.transient_tolerance = 0.0
+    rec = engine.build_recommendation(
+        point_minutes(0, 15.0),
+        [
+            point_minutes(10, 14.8),
+            point_minutes(60, 14.8),
+            point_minutes(120, 14.8),
+        ],
+        model,
+        indoor_temperature_c=15.0,
+        base_horizon_hours=2,
+        max_horizon_hours=2,
+    )
+
+    assert rec.top_layer == const.TOP_PULLOVER
+    assert rec.jacket_now == const.JACKET_NONE
+    assert rec.transient_override is False
+    assert rec.transient_direction is None
+    assert rec.transient_burden is None
+
+
+def test_pullover_transient_too_warm_without_jacket_learns_pullover_not_transient():
+    model = PersonalModel.from_answers(3, 3, 3, 3, 3)
+    pullover_before = model.pullover_threshold_delta_c
+    transient_before = model.transient_tolerance
+
+    learning.apply_feedback(
+        model,
+        rating=const.FEEDBACK_TOO_WARM,
+        jacket=const.JACKET_NONE,
+        effective_c=15.2,
+        observed_at=datetime(2026, 9, 2, 12, tzinfo=timezone.utc),
+        transient_override=True,
+        transient_direction="warming",
+        top_layer=const.TOP_PULLOVER,
+    )
+
+    assert model.pullover_threshold_delta_c < pullover_before
+    assert model.pullover_stat.weight_sum == pytest.approx(1.0)
+    assert model.transient_tolerance == transient_before
+    assert model.transient_stat.weight_sum == pytest.approx(0.0)
+
+
+def test_pullover_transient_perfect_confirms_pullover_once_and_transient():
+    model = PersonalModel.from_answers(3, 3, 3, 3, 3)
+
+    learning.apply_feedback(
+        model,
+        rating=const.FEEDBACK_PERFECT,
+        jacket=const.JACKET_NONE,
+        effective_c=15.2,
+        observed_at=datetime(2026, 9, 2, 12, tzinfo=timezone.utc),
+        transient_override=True,
+        transient_direction="warming",
+        top_layer=const.TOP_PULLOVER,
+        count_feedback=True,
+    )
+    # Simulate the later half of PHASE_ALL. The same fixed pullover must not be
+    # counted twice, while the later transient context may still be evaluated.
+    learning.apply_feedback(
+        model,
+        rating=const.FEEDBACK_PERFECT,
+        jacket=const.JACKET_LIGHT,
+        effective_c=14.8,
+        observed_at=datetime(2026, 9, 2, 13, tzinfo=timezone.utc),
+        transient_override=False,
+        transient_direction=None,
+        top_layer=const.TOP_PULLOVER,
+        count_feedback=False,
+        apply_general=False,
+    )
+
+    assert model.total_feedback == 1
+    assert model.pullover_stat.weight_sum == pytest.approx(1.0)
+    assert model.pullover_stat.samples == 1
+    assert model.transient_stat.weight_sum == pytest.approx(1.0)
 
 
 def test_v031_winter_feedback_changes_only_winter_offset_and_not_main():
@@ -1893,3 +2106,279 @@ def test_loading_legacy_hidden_threshold_excess_canonicalizes_without_effective_
     assert learning._model_thresholds(model)[1] == pytest.approx(before_warm)
     assert model.warm_stat.weight_sum == before_weight
     assert learned is False
+
+
+def test_pullover_replaces_light_jacket_when_cool_weather_stays_stable():
+    model = PersonalModel.from_answers(3, 3, 3, 3, 3)
+    rec = engine.build_recommendation(
+        point(0, 15.0),
+        [point(1, 15.5), point(2, 16.0), point(3, 16.5)],
+        model,
+        indoor_temperature_c=15.0,
+        base_horizon_hours=3,
+        max_horizon_hours=3,
+    )
+    assert rec.top_layer == const.TOP_PULLOVER
+    assert rec.pullover_reason == "stable_cool"
+    assert rec.jacket_now == const.JACKET_NONE
+    assert rec.jacket_later == const.JACKET_NONE
+    assert "pullover_stable" in rec.reasons
+
+
+def test_transition_cold_does_not_lock_pullover_for_stable_mild_period():
+    model = PersonalModel.from_answers(3, 3, 3, 3, 3)
+    rec = engine.build_recommendation(
+        point(0, 18.0),
+        [point(1, 18.0), point(2, 18.0), point(3, 18.0)],
+        model,
+        indoor_temperature_c=28.0,
+        base_horizon_hours=3,
+        max_horizon_hours=3,
+    )
+    assert rec.top_layer == const.TOP_SHIRT
+    assert rec.jacket_now == const.JACKET_LIGHT
+    assert rec.jacket_later == const.JACKET_NONE
+    assert rec.transition_penalty_c > 0.0
+
+
+def test_pullover_stable_cool_requires_continuity_from_now_to_first_forecast():
+    model = PersonalModel.from_answers(3, 3, 3, 3, 3)
+    rec = engine.build_recommendation(
+        point(0, 15.0),
+        [point(4, 15.0), point(5, 15.0)],
+        model,
+        indoor_temperature_c=15.0,
+        base_horizon_hours=5,
+        max_horizon_hours=5,
+    )
+    assert rec.top_layer == const.TOP_SHIRT
+    assert rec.pullover_reason == "flexible_layering"
+    assert rec.forecast_coverage_complete is False
+
+
+def test_warming_day_prefers_shirt_plus_removable_light_jacket():
+    model = PersonalModel.from_answers(3, 3, 3, 3, 3)
+    rec = engine.build_recommendation(
+        point(0, 15.0),
+        [point(1, 16.0), point(2, 19.0), point(3, 21.0)],
+        model,
+        indoor_temperature_c=15.0,
+        base_horizon_hours=3,
+        max_horizon_hours=3,
+    )
+    assert rec.top_layer == const.TOP_SHIRT
+    assert rec.pullover_reason == "flexible_layering"
+    assert rec.jacket_now == const.JACKET_LIGHT
+    assert "flexible_layering" in rec.reasons
+
+
+def test_sustained_deep_cold_combines_pullover_and_winter_jacket():
+    model = PersonalModel.from_answers(3, 3, 3, 3, 3)
+    rec = engine.build_recommendation(
+        point(0, -5.0),
+        [point(1, -4.0), point(2, -3.0), point(3, -2.0)],
+        model,
+        indoor_temperature_c=-5.0,
+        base_horizon_hours=3,
+        max_horizon_hours=3,
+    )
+    assert rec.top_layer == const.TOP_PULLOVER
+    assert rec.pullover_reason == "deep_cold"
+    assert rec.jacket_now == const.JACKET_WINTER
+    assert "pullover_deep_cold" in rec.reasons
+
+
+def test_pullover_setup_answer_changes_when_stable_cool_conditions_qualify():
+    early = PersonalModel.from_answers(3, 3, 3, 3, 5)
+    late = PersonalModel.from_answers(3, 3, 3, 3, 1)
+    current = point(0, 16.5)
+    forecast = [point(1, 16.5), point(2, 16.8), point(3, 17.0)]
+
+    early_rec = engine.build_recommendation(
+        current, forecast, early,
+        indoor_temperature_c=16.5,
+        base_horizon_hours=3,
+        max_horizon_hours=3,
+    )
+    late_rec = engine.build_recommendation(
+        current, forecast, late,
+        indoor_temperature_c=16.5,
+        base_horizon_hours=3,
+        max_horizon_hours=3,
+    )
+
+    assert early_rec.top_layer == const.TOP_PULLOVER
+    assert late_rec.top_layer == const.TOP_SHIRT
+
+
+def test_too_warm_pullover_feedback_moves_only_pullover_entry_cooler():
+    model = PersonalModel.from_answers(3, 3, 3, 3, 3)
+    before = model.pullover_threshold_delta_c
+    learned = learning.apply_feedback(
+        model,
+        rating=const.FEEDBACK_TOO_WARM,
+        jacket=const.JACKET_NONE,
+        top_layer=const.TOP_PULLOVER,
+        observed_at=datetime(2026, 10, 1, 12, tzinfo=timezone.utc),
+    )
+    assert learned is True
+    assert model.pullover_stat.weight_sum == pytest.approx(1.0)
+    assert model.pullover_threshold_delta_c < before
+    # No-jacket "too warm" is not allowed to drag the jacket profile itself.
+    assert model.general_stat.weight_sum == 0.0
+
+
+def test_pre_v040_profile_loads_with_neutral_pullover_model():
+    source = PersonalModel.from_answers(4, 5, 3, 2, 3).to_dict()
+    source.pop("pullover_answer", None)
+    source.pop("pullover_threshold_delta_c", None)
+    source.pop("pullover_stat", None)
+
+    model = PersonalModel.from_dict(source)
+    assert model.pullover_answer == 3
+    assert model.pullover_threshold_delta_c == 0.0
+    assert model.pullover_stat.weight_sum == 0.0
+
+
+def test_deep_cold_start_still_prefers_removable_jacket_if_day_turns_warm():
+    model = PersonalModel.from_answers(3, 3, 3, 3, 3)
+    rec = engine.build_recommendation(
+        point(0, -5.0),
+        [point(1, -4.0), point(2, 8.0), point(3, 21.0)],
+        model,
+        indoor_temperature_c=-5.0,
+        base_horizon_hours=3,
+        max_horizon_hours=3,
+    )
+    assert rec.top_layer == const.TOP_SHIRT
+    assert rec.pullover_reason == "flexible_layering"
+    assert rec.jacket_now == const.JACKET_WINTER
+
+
+def test_pullover_plus_jacket_too_warm_learns_outer_layer_not_both_layers():
+    model = PersonalModel.from_answers(3, 3, 3, 3, 3)
+    model.general_stat = learning.RunningStat(samples=11, weight_sum=11.0)
+    before_pullover = model.pullover_threshold_delta_c
+    before_light = model.light_threshold_delta_c
+    learning.apply_feedback(
+        model,
+        rating=const.FEEDBACK_TOO_WARM,
+        jacket=const.JACKET_LIGHT,
+        top_layer=const.TOP_PULLOVER,
+        effective_c=14.0,
+        observed_at=datetime(2026, 10, 1, 12, tzinfo=timezone.utc),
+    )
+    assert model.pullover_threshold_delta_c == before_pullover
+    assert model.pullover_stat.weight_sum == 0.0
+    assert model.light_threshold_delta_c != before_light
+
+
+def test_perfect_pullover_outfit_builds_pullover_confidence_without_moving_threshold():
+    model = PersonalModel.from_answers(3, 3, 3, 3, 3)
+    before = model.pullover_threshold_delta_c
+    learning.apply_feedback(
+        model,
+        rating=const.FEEDBACK_PERFECT,
+        jacket=const.JACKET_LIGHT,
+        top_layer=const.TOP_PULLOVER,
+        observed_at=datetime(2026, 10, 1, 12, tzinfo=timezone.utc),
+    )
+    assert model.pullover_stat.weight_sum == pytest.approx(1.0)
+    assert model.pullover_threshold_delta_c == before
+
+
+def test_perfect_pullover_plus_light_confirms_clothing_adjusted_light_boundary():
+    model = PersonalModel.from_answers(3, 3, 3, 3, 3)
+    learning.apply_feedback(
+        model,
+        rating=const.FEEDBACK_PERFECT,
+        jacket=const.JACKET_LIGHT,
+        top_layer=const.TOP_PULLOVER,
+        effective_c=14.0,
+        apply_general=False,
+        observed_at=datetime(2026, 10, 1, 12, tzinfo=timezone.utc),
+    )
+    assert model.pullover_stat.weight_sum == pytest.approx(1.0)
+    assert model.light_stat.weight_sum == pytest.approx(1.0)
+    assert model.warm_stat.weight_sum == pytest.approx(0.0)
+
+
+def test_workday_warming_prefers_shirt_and_removable_jacket():
+    model = PersonalModel.from_answers(3, 3, 3, 3, 3)
+    current = point(0, 15.0)
+    home_forecast = [point(1, 15.5), point(2, 15.5), point(3, 15.5), point(4, 15.5)]
+    work_forecast = [point(2, 18.0), point(3, 20.0), point(4, 22.0)]
+    rec = engine.build_recommendation(
+        current,
+        home_forecast,
+        model,
+        indoor_temperature_c=15.0,
+        base_horizon_hours=4,
+        max_horizon_hours=4,
+        work_points=work_forecast,
+    )
+    assert rec.top_layer == const.TOP_SHIRT
+    assert rec.pullover_reason == "flexible_layering"
+    assert rec.jacket_now == const.JACKET_LIGHT
+
+
+def test_workday_staying_cool_allows_pullover_as_day_layer():
+    model = PersonalModel.from_answers(3, 3, 3, 3, 3)
+    current = point(0, 15.0)
+    work_forecast = [point(1, 15.0), point(2, 15.5), point(3, 16.0), point(4, 16.5)]
+    rec = engine.build_recommendation(
+        current,
+        work_forecast,
+        model,
+        indoor_temperature_c=15.0,
+        base_horizon_hours=4,
+        max_horizon_hours=4,
+        work_points=work_forecast,
+    )
+    assert rec.top_layer == const.TOP_PULLOVER
+    assert rec.pullover_reason == "stable_cool"
+    assert rec.jacket_now == const.JACKET_NONE
+
+
+def test_pullover_transient_warming_uses_shifted_jacket_boundary():
+    model = PersonalModel.from_answers(3, 3, 3, 3, 3)
+    rec = engine.build_recommendation(
+        point_minutes(0, 15.2),
+        [
+            point_minutes(20, 15.4),
+            point_minutes(60, 15.5),
+            point_minutes(120, 15.5),
+        ],
+        model,
+        indoor_temperature_c=22.0,
+        base_horizon_hours=2,
+        max_horizon_hours=2,
+    )
+    assert rec.top_layer == const.TOP_PULLOVER
+    assert rec.jacket_now == const.JACKET_NONE
+    assert rec.jacket_later == const.JACKET_NONE
+    assert rec.transient_override is True
+    assert rec.transient_direction == "warming"
+    assert rec.instant_jacket == const.JACKET_LIGHT
+    assert rec.transient_burden == pytest.approx(3.0)
+
+
+def test_pullover_transient_cooling_uses_shifted_jacket_boundary():
+    model = PersonalModel.from_answers(3, 3, 3, 3, 3)
+    rec = engine.build_recommendation(
+        point_minutes(0, 17.8),
+        [
+            point_minutes(20, 14.8),
+            point_minutes(60, 14.8),
+            point_minutes(120, 14.8),
+        ],
+        model,
+        indoor_temperature_c=22.0,
+        base_horizon_hours=2,
+        max_horizon_hours=2,
+    )
+    assert rec.top_layer == const.TOP_PULLOVER
+    assert rec.jacket_now == const.JACKET_NONE
+    assert rec.jacket_later == const.JACKET_LIGHT
+    assert rec.transient_override is False
+    assert rec.instant_jacket is None

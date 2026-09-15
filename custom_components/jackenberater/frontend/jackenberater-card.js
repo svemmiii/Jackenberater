@@ -4,11 +4,13 @@ const JB_I18N = {
   de: {
     title: "JackenBerater",
     setupTitle: "Kurz kennenlernen",
-    setupText: "Vier kleine Startwerte helfen dem Berater, schon vor den ersten Bewertungen näher an deinem Empfinden zu liegen.",
+    setupText: "Fünf kleine Startwerte helfen dem Berater, schon vor den ersten Bewertungen näher an deinem Empfinden zu liegen.",
     cold: "Wie schnell frierst du?",
     warm: "Wie schnell wird dir zu warm?",
     wind: "Wie empfindlich bist du bei Wind?",
     evening: "Wie aktiv bist du abends typischerweise draußen?",
+    pullover: "Wie schnell greifst du normalerweise zum Pullover?",
+    pulloverScale: ["Erst wenn es deutlich kühl ist", "Eher spät", "Neutral", "Eher früh", "Schon bei leicht kühlem Wetter"],
     scale: ["Sehr wenig", "Eher wenig", "Neutral", "Eher stark", "Sehr stark"],
     frequency: ["Meist ruhig/stehend", "Eher ruhig", "Gemischt", "Eher aktiv", "Meist aktiv in Bewegung"],
     save: "Profil starten",
@@ -49,6 +51,10 @@ const JB_I18N = {
     calendarReason: "Ein ausgewählter Kalenderzeitraum wurde nur zeitlich als möglicher Kontext berücksichtigt.",
     rainReason: "Im Zeitraum besteht ein relevantes Niederschlagsrisiko.",
     thresholdReason: "Die Lage liegt nahe an einer deiner persönlichen Jackengrenzen.",
+    pulloverStableReason: "Die Temperaturen bleiben kühl und stabil genug, dass ein Pullover die praktischere Grundschicht ist.",
+    pulloverDeepColdReason: "Es ist stark genug kalt, dass Pullover und Jacke zusammen sinnvoll sind.",
+    flexibleLayeringReason: "Der weitere Verlauf ist nicht durchgehend kühl und stabil genug für einen festen Pullover – Shirt plus abnehmbare Jacke ist flexibler.",
+    pulloverLabel: "Pullover",
     setupRequired: "Persönliches Profil einrichten",
     noData: "Aktuell keine zuverlässige Wetterbewertung möglich.",
     profileFor: "Empfehlung für",
@@ -110,11 +116,13 @@ const JB_I18N = {
   en: {
     title: "Jacket Advisor",
     setupTitle: "Quick setup",
-    setupText: "Four small starting values help the advisor get closer to your comfort before enough feedback exists.",
+    setupText: "Five small starting values help the advisor get closer to your comfort before enough feedback exists.",
     cold: "How quickly do you feel cold?",
     warm: "How quickly do you feel too warm?",
     wind: "How sensitive are you to wind?",
     evening: "How active are you typically when you are outside in the evening?",
+    pullover: "How quickly do you normally reach for a sweater?",
+    pulloverScale: ["Only when it is clearly cool", "Rather late", "Neutral", "Rather early", "Already in slightly cool weather"],
     scale: ["Very little", "Rather little", "Neutral", "Rather strong", "Very strong"],
     frequency: ["Mostly standing/quiet", "Rather quiet", "Mixed", "Rather active", "Mostly active movement"],
     save: "Start profile",
@@ -155,6 +163,10 @@ const JB_I18N = {
     calendarReason: "A selected calendar time window was considered only as possible timing context.",
     rainReason: "There is a relevant precipitation risk during the period.",
     thresholdReason: "Conditions are close to one of your personal jacket boundaries.",
+    pulloverStableReason: "Conditions stay cool and stable enough that a sweater is the more practical base layer.",
+    pulloverDeepColdReason: "It is cold enough that a sweater and jacket together make sense.",
+    flexibleLayeringReason: "The upcoming conditions are not consistently cool and stable enough for a fixed sweater, so a shirt plus removable jacket is more flexible.",
+    pulloverLabel: "Sweater",
     setupRequired: "Set up personal profile",
     noData: "No reliable weather assessment is available right now.",
     profileFor: "Advice for",
@@ -247,7 +259,7 @@ class JackenBeraterCard extends HTMLElement {
     this._loading = false;
     this._loadingGeneration = null;
     this._refreshPending = false;
-    this._setup = { cold: 3, warm: 3, wind: 3, evening: 3 };
+    this._setup = { cold: 3, warm: 3, wind: 3, evening: 3, pullover: 3 };
     // Profile selection is runtime-owned. Normal users always use their own
     // profile; configured shared accounts explicitly select a profile in-card.
     // The old undocumented Lovelace `profile_id` shortcut is intentionally no
@@ -518,25 +530,52 @@ class JackenBeraterCard extends HTMLElement {
     );
   }
 
+  _mutationFlightOwner() {
+    return {
+      generation: this._requestGeneration || 0,
+      entry: this._config?.entry_id || null,
+      profile: this._selectedProfile || null,
+    };
+  }
+
+  _sameMutationFlightOwner(left, right) {
+    return Boolean(
+      left && right &&
+      left.generation === right.generation &&
+      left.entry === right.entry &&
+      left.profile === right.profile
+    );
+  }
+
   _beginMutationFlight(key) {
     if (!(this._mutationFlights instanceof Map)) this._mutationFlights = new Map();
-    if (this._mutationFlights.has(key)) return null;
+    const owner = this._mutationFlightOwner();
+    const existing = this._mutationFlights.get(key);
+    if (existing && this._sameMutationFlightOwner(existing.owner, owner)) return null;
     const token = Symbol(key);
-    this._mutationFlights.set(key, token);
+    // A flight from an obsolete config/profile generation must never block the
+    // current context. Replacing the map entry is safe because _endMutationFlight
+    // also checks the unique token before deleting it.
+    this._mutationFlights.set(key, { token, owner });
     this._render();
-    return { key, token };
+    return { key, token, owner };
   }
 
   _endMutationFlight(flight) {
     if (!flight || !(this._mutationFlights instanceof Map)) return;
-    if (this._mutationFlights.get(flight.key) === flight.token) {
+    const current = this._mutationFlights.get(flight.key);
+    if (current?.token === flight.token) {
       this._mutationFlights.delete(flight.key);
       this._render();
     }
   }
 
   _mutationFlightActive(key) {
-    return this._mutationFlights instanceof Map && this._mutationFlights.has(key);
+    if (!(this._mutationFlights instanceof Map)) return false;
+    const current = this._mutationFlights.get(key);
+    return Boolean(
+      current && this._sameMutationFlightOwner(current.owner, this._mutationFlightOwner())
+    );
   }
 
   _beginViewRequest() {
@@ -750,6 +789,8 @@ class JackenBeraterCard extends HTMLElement {
   }
 
   async _saveSetup() {
+    const flight = this._beginMutationFlight("setup");
+    if (!flight) return;
     const context = this._captureActionContext();
     try {
       await this._send("jackenberater/profile_setup", this._setup);
@@ -761,6 +802,8 @@ class JackenBeraterCard extends HTMLElement {
       if (!this._actionContextIsCurrent(context)) return;
       this._error = this._errorText(err);
       this._render();
+    } finally {
+      this._endMutationFlight(flight);
     }
   }
 
@@ -871,6 +914,33 @@ class JackenBeraterCard extends HTMLElement {
     }[value] || "mdi:coat-rack";
   }
 
+  _outfitLabel(rec, jacket = null) {
+    const jacketValue = jacket ?? rec?.jacket_now ?? "none";
+    if (rec?.top_layer === "pullover") {
+      if (jacketValue === "none") return this._t("pulloverLabel");
+      return `${this._t("pulloverLabel")} + ${this._jacketLabel(jacketValue)}`;
+    }
+    return this._jacketLabel(jacketValue);
+  }
+
+  _outfitIcon(rec, jacket = null) {
+    const jacketValue = jacket ?? rec?.jacket_now ?? "none";
+    if (rec?.top_layer === "pullover" && jacketValue === "none") return "mdi:sweater-outline";
+    return this._jacketIcon(jacketValue);
+  }
+
+  _outfitArticle(rec, jacket) {
+    if (rec?.top_layer === "pullover") {
+      if (jacket === "none") {
+        return this._lang() === "de" ? "der Pullover ohne Jacke" : "the sweater without a jacket";
+      }
+      return this._lang() === "de"
+        ? `Pullover + ${this._jacketArticle(jacket)}`
+        : `a sweater + ${this._jacketArticle(jacket)}`;
+    }
+    return this._jacketArticle(jacket);
+  }
+
   _relativeDate(iso) {
     const dt = new Date(iso);
     if (Number.isNaN(dt.getTime())) return "";
@@ -908,7 +978,15 @@ class JackenBeraterCard extends HTMLElement {
     }[value] || this._jacketLabel(value).toLowerCase();
   }
 
-  _currentFitSentence(value) {
+  _currentFitSentence(value, rec = null) {
+    if (rec?.top_layer === "pullover") {
+      if (this._lang() === "de") {
+        if (value === "none") return "Aktuell passt ein Pullover ohne Jacke.";
+        return `Aktuell passt ${this._outfitLabel(rec, value)}.`;
+      }
+      if (value === "none") return "A sweater without a jacket fits right now.";
+      return `${this._outfitLabel(rec, value)} fits the current conditions.`;
+    }
     if (this._lang() === "de") {
       return {
         none: "Aktuell ist keine Jacke nötig.",
@@ -931,7 +1009,7 @@ class JackenBeraterCard extends HTMLElement {
     const warmer = ["none", "light", "warm", "winter"].indexOf(rec.jacket_later) > ["none", "light", "warm", "winter"].indexOf(rec.jacket_now);
     if (this._lang() === "de") {
       if (warmer) {
-        const prefix = this._currentFitSentence(rec.jacket_now);
+        const prefix = this._currentFitSentence(rec.jacket_now, rec);
         const jacket = this._jacketArticle(rec.jacket_later);
         if (rec.later_context === "work") {
           const later = Date.parse(rec.later_at);
@@ -951,14 +1029,16 @@ class JackenBeraterCard extends HTMLElement {
       if (rec.later_change_confirmed === false) {
         return rec.jacket_later === "none"
           ? `Der letzte Forecastwert um ${when} deutet darauf hin, dass du dann wahrscheinlich keine Jacke mehr brauchst.`
-          : `Der letzte Forecastwert um ${when} deutet darauf hin, dass ${this._jacketArticle(rec.jacket_later)} reichen könnte.`;
+          : `Der letzte Forecastwert um ${when} deutet darauf hin, dass ${this._outfitArticle(rec, rec.jacket_later)} reichen könnte.`;
       }
       return rec.jacket_later === "none"
-        ? `Ab etwa ${when} brauchst du voraussichtlich keine Jacke mehr.`
-        : `Ab etwa ${when} reicht voraussichtlich ${this._jacketArticle(rec.jacket_later)}.`;
+        ? (rec.top_layer === "pullover"
+          ? `Ab etwa ${when} reicht voraussichtlich der Pullover ohne Jacke.`
+          : `Ab etwa ${when} brauchst du voraussichtlich keine Jacke mehr.`)
+        : `Ab etwa ${when} reicht voraussichtlich ${this._outfitArticle(rec, rec.jacket_later)}.`;
     }
     if (warmer) {
-      const prefix = this._currentFitSentence(rec.jacket_now);
+      const prefix = this._currentFitSentence(rec.jacket_now, rec);
       const jacket = this._jacketArticle(rec.jacket_later);
       if (rec.later_context === "work") {
         const later = Date.parse(rec.later_at);
@@ -978,11 +1058,13 @@ class JackenBeraterCard extends HTMLElement {
     if (rec.later_change_confirmed === false) {
       return rec.jacket_later === "none"
         ? `The final forecast point around ${when} suggests you may no longer need a jacket then.`
-        : `The final forecast point around ${when} suggests ${this._jacketArticle(rec.jacket_later)} may be enough then.`;
+        : `The final forecast point around ${when} suggests ${this._outfitArticle(rec, rec.jacket_later)} may be enough then.`;
     }
     return rec.jacket_later === "none"
-      ? `From about ${when}, you probably won't need a jacket anymore.`
-      : `From about ${when}, ${this._jacketArticle(rec.jacket_later)} should be sufficient.`;
+      ? (rec.top_layer === "pullover"
+        ? `From about ${when}, the sweater without a jacket should be sufficient.`
+        : `From about ${when}, you probably won't need a jacket anymore.`)
+      : `From about ${when}, ${this._outfitArticle(rec, rec.jacket_later)} should be sufficient.`;
   }
 
   _reasonText(reason) {
@@ -998,6 +1080,9 @@ class JackenBeraterCard extends HTMLElement {
       near_threshold: this._t("thresholdReason"),
       calendar_context: this._t("calendarReason"),
       transient_trend: this._t("transientReason"),
+      pullover_stable: this._t("pulloverStableReason"),
+      pullover_deep_cold: this._t("pulloverDeepColdReason"),
+      flexible_layering: this._t("flexibleLayeringReason"),
     }[reason] || "";
   }
 
@@ -1207,15 +1292,15 @@ class JackenBeraterCard extends HTMLElement {
     } else if (compact) {
       content = `
         <div class="jb-main compact" data-action="open">
-          <div class="jb-icon ${rec.jacket_now}"><ha-icon icon="${this._jacketIcon(rec.jacket_now)}"></ha-icon></div>
-          <div class="jb-copy"><div class="jb-kicker">${jbEscape(title)}</div><div class="jb-headline">${jbEscape(this._jacketLabel(rec.jacket_now))}</div><div class="jb-sub">${Math.round(rec.current_temperature_c * 10) / 10} °C</div></div>
+          <div class="jb-icon ${rec.jacket_now}"><ha-icon icon="${this._outfitIcon(rec, rec.jacket_now)}"></ha-icon></div>
+          <div class="jb-copy"><div class="jb-kicker">${jbEscape(title)}</div><div class="jb-headline">${jbEscape(this._outfitLabel(rec, rec.jacket_now))}</div><div class="jb-sub">${Math.round(rec.current_temperature_c * 10) / 10} °C</div></div>
           ${feedbackBadge}${infoButton}<ha-icon class="jb-chevron" icon="mdi:chevron-right"></ha-icon>
         </div>${calendarWarnings}${this._infoOpen ? this._infoPanel(rec, profile, this._preview?.diagnostics) : ""}`;
     } else {
       content = `
         <div class="jb-main" data-action="open">
-          <div class="jb-icon ${rec.jacket_now}"><ha-icon icon="${this._jacketIcon(rec.jacket_now)}"></ha-icon></div>
-          <div class="jb-copy"><div class="jb-kicker">${jbEscape(title)}</div><div class="jb-headline">${jbEscape(this._jacketLabel(rec.jacket_now))}</div>
+          <div class="jb-icon ${rec.jacket_now}"><ha-icon icon="${this._outfitIcon(rec, rec.jacket_now)}"></ha-icon></div>
+          <div class="jb-copy"><div class="jb-kicker">${jbEscape(title)}</div><div class="jb-headline">${jbEscape(this._outfitLabel(rec, rec.jacket_now))}</div>
             <div class="jb-sub">${jbEscape(this._laterText(rec) || `${rec.current_temperature_c ?? "–"} °C`)}</div>
           </div>
           ${feedbackBadge}${infoButton}<ha-icon class="jb-chevron" icon="mdi:${this._open ? "chevron-up" : "chevron-right"}"></ha-icon>
@@ -1236,7 +1321,7 @@ class JackenBeraterCard extends HTMLElement {
 
   _setupPanel() {
     const scale = (key, labels) => `<div class="jb-question"><div>${this._t(key)}</div><div class="jb-scale">${labels.map((label, idx) => `<button class="${this._setup[key] === idx + 1 ? "active" : ""}" data-scale="${key}" data-value="${idx + 1}" title="${jbEscape(label)}">${idx + 1}</button>`).join("")}</div><div class="jb-scale-label"><span>${jbEscape(labels[0])}</span><span>${jbEscape(labels[4])}</span></div></div>`;
-    return `<div class="jb-panel"><div class="jb-panel-title">${this._t("setupTitle")}</div><div class="jb-panel-text">${this._t("setupText")}</div>${scale("cold", this._t("scale"))}${scale("warm", this._t("scale"))}${scale("wind", this._t("scale"))}${scale("evening", this._t("frequency"))}<div class="jb-actions"><button class="primary" id="jb-save-setup">${this._t("save")}</button></div></div>`;
+    return `<div class="jb-panel"><div class="jb-panel-title">${this._t("setupTitle")}</div><div class="jb-panel-text">${this._t("setupText")}</div>${scale("cold", this._t("scale"))}${scale("warm", this._t("scale"))}${scale("wind", this._t("scale"))}${scale("evening", this._t("frequency"))}${scale("pullover", this._t("pulloverScale"))}<div class="jb-actions"><button class="primary" id="jb-save-setup" ${this._mutationFlightActive("setup") ? "disabled" : ""}>${this._t("save")}</button></div></div>`;
   }
 
   _details(rec, profile, pending) {
@@ -1264,7 +1349,7 @@ class JackenBeraterCard extends HTMLElement {
       ${rec.simulation_active ? `<div class="jb-info-note jb-warning"><ha-icon icon="mdi:flask-outline"></ha-icon>${jbEscape(this._t("simulationWarning"))}</div>` : ""}
       ${rain}
       <div class="jb-metrics"><span>${rec.current_temperature_c ?? "–"} °C</span><span>${rec.current_wind_kmh != null ? `${rec.current_wind_kmh} km/h${rec.current_gust_kmh != null && rec.current_gust_kmh > rec.current_wind_kmh ? ` · ${this._t("gusts")} ${rec.current_gust_kmh} km/h` : ""}` : (rec.current_gust_kmh != null ? `${this._t("gusts")} ${rec.current_gust_kmh} km/h` : "–")}</span><span>${rec.horizon_hours > 0 ? `${rec.horizon_hours} h` : this._t("nowOnly")}</span></div>
-      ${rec.work_context && rec.work_jacket ? `<div class="jb-context"><ha-icon icon="mdi:briefcase-outline"></ha-icon>${jbEscape(rec.work_name || this._t("work"))}: ${this._jacketLabel(rec.work_jacket)}</div>` : ""}
+      ${rec.work_context && rec.work_jacket ? `<div class="jb-context"><ha-icon icon="mdi:briefcase-outline"></ha-icon>${jbEscape(rec.work_name || this._t("work"))}: ${this._outfitLabel(rec, rec.work_jacket)}</div>` : ""}
       ${reasons.length ? `<div class="jb-section-title">${this._t("why")}</div><ul class="jb-reasons">${reasons.map(x => `<li>${jbEscape(x)}</li>`).join("")}</ul>` : ""}
       ${!this._autoShared || this._isAdmin ? `<div class="jb-learning"><span>${this._t("confidence")}: ${Math.round((profile.learning_progress ?? profile.confidence ?? 0) * 100)} %</span><span>${this._t("feedbackCount")}: ${profile.total_feedback || 0}</span></div>` : ""}
       ${pendingHtml}
@@ -1275,10 +1360,10 @@ class JackenBeraterCard extends HTMLElement {
   }
 
   _feedbackRecommendationText(rec) {
-    const now = this._jacketLabel(rec?.jacket_now);
+    const now = this._outfitLabel(rec, rec?.jacket_now);
     if (!rec?.later_at || !rec?.jacket_later || rec.jacket_later === rec.jacket_now) return now;
     const when = new Intl.DateTimeFormat(this._lang() === "de" ? "de-DE" : "en-GB", { hour: "2-digit", minute: "2-digit" }).format(new Date(rec.later_at));
-    return `${now} → ${when} ${this._jacketLabel(rec.jacket_later)}`;
+    return `${now} → ${when} ${this._outfitLabel(rec, rec.jacket_later)}`;
   }
 
   _feedbackCard(session, historical, manual = false) {
@@ -1307,7 +1392,7 @@ class JackenBeraterCard extends HTMLElement {
     const laterRank = ["none", "light", "warm", "winter"].indexOf(rec.jacket_later);
     const colder = rating === "too_cold";
     const lang = this._lang();
-    const laterLabel = this._jacketLabel(rec.jacket_later);
+    const laterLabel = this._outfitLabel(rec, rec.jacket_later);
 
     if (lang === "de") {
       const start = colder ? "Schon am Anfang war mir zu kalt" : "Schon am Anfang war mir zu warm";
@@ -1385,7 +1470,7 @@ class JackenBeraterCard extends HTMLElement {
       this._profileRevision = null;
       this._seenProfileRevision = null;
       this._persistSharedProfile();
-      this._setup = { cold: 3, warm: 3, wind: 3, evening: 3 };
+      this._setup = { cold: 3, warm: 3, wind: 3, evening: 3, pullover: 3 };
       this._open = false;
       this._infoOpen = false;
       this._session = null;

@@ -648,6 +648,9 @@ def test_current_work_weather_is_used_inside_actual_work_window():
     rec = asyncio.run(api._recommendation(types.SimpleNamespace(states=None), entry, runtime, model))
     assert rec.source == "work"
     assert rec.current_temperature_c == 6
+    assert rec.work_context is True
+    assert rec.work_forecast_coverage == "missing"
+    assert rec.stay_context == "work"
 
 
 def test_work_horizon_extends_home_timeline_before_building_recommendation():

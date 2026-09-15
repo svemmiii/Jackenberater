@@ -318,6 +318,7 @@ assert.ok(Card, "jackenberater-card must register itself");
   assert.equal(timerCard._stateRefreshTimer, null, "an already pending state timer must be cancelled by any real refresh");
 
   assert.match(source, /Wie aktiv bist du abends typischerweise draußen\?/, "evening setup question must match the broad evening activity correction");
+  assert.match(source, /Wie schnell greifst du normalerweise zum Pullover\?/, "v0.4 setup must include the pullover preference question");
 
   const textCard = new Card();
   textCard._hass = { language: "de" };
@@ -330,6 +331,30 @@ assert.ok(Card, "jackenberater-card must register itself");
   assert.match(laterText, /Wenn du dann noch unterwegs bist/, "later-warmer advice must transparently state its unknown-stay assumption");
   assert.match(laterText, /jetzt mitnehmen/, "later-warmer advice must explicitly say to take the warmer jacket now");
   assert.match(laterText, new RegExp(`ab etwa ${expectedLaterTime.replace(".", "\.")}`), "later-warmer advice should use the browser's local time");
+
+  assert.equal(
+    textCard._outfitLabel({ top_layer: "pullover", jacket_now: "none" }),
+    "Pullover",
+    "pullover without an outer layer should be rendered as the actual outfit",
+  );
+  assert.equal(
+    textCard._outfitLabel({ top_layer: "pullover", jacket_now: "winter" }),
+    "Pullover + Winterjacke",
+    "deep-cold outfit should show both mid-layer and winter jacket",
+  );
+  const pulloverLaterText = textCard._laterText({
+    top_layer: "pullover",
+    jacket_now: "none",
+    jacket_later: "light",
+    later_at: "2026-09-01T18:00:00+00:00",
+  });
+  assert.match(pulloverLaterText, /Pullover ohne Jacke/, "current pullover base layer should be stated explicitly");
+  assert.match(pulloverLaterText, /eine leichte Jacke jetzt mitnehmen/, "only the removable outer jacket should be suggested for later");
+  assert.doesNotMatch(
+    pulloverLaterText,
+    /Pullover \+ eine leichte Jacke jetzt mitnehmen/,
+    "the card must never tell the user to pack the already-worn pullover for later",
+  );
 
   const workBufferText = textCard._laterText({
     jacket_now: "light",
@@ -875,6 +900,30 @@ assert.ok(Card, "jackenberater-card must register itself");
   await staleSetup;
   assert.equal(setupRaceCard._open, true, "late setup(A) must not close B's detail/setup state");
 
+  const setupSingleFlightCard = new Card();
+  setupSingleFlightCard._hass = { language: "de" };
+  setupSingleFlightCard._render = () => {};
+  setupSingleFlightCard._refresh = async () => {};
+  setupSingleFlightCard._config = { entry_id: "entry" };
+  setupSingleFlightCard._selectedProfile = "A";
+  setupSingleFlightCard._requestGeneration = 1;
+  let setupCalls = 0;
+  const setupSingleDone = deferred();
+  setupSingleFlightCard._send = async (type) => {
+    if (type === "jackenberater/profile_setup") {
+      setupCalls += 1;
+      return setupSingleDone.promise;
+    }
+    throw new Error(`unexpected ${type}`);
+  };
+  const firstSetup = setupSingleFlightCard._saveSetup();
+  const secondSetup = setupSingleFlightCard._saveSetup();
+  await Promise.resolve();
+  assert.equal(setupCalls, 1, "setup must be single-flight so a double click sends only one request");
+  setupSingleDone.resolve({});
+  await Promise.all([firstSetup, secondSetup]);
+  assert.equal(setupSingleFlightCard._mutationFlightActive("setup"), false, "setup flight must release after completion");
+
   const maintenanceRaceCard = new Card();
   maintenanceRaceCard._hass = { language: "de" };
   maintenanceRaceCard._render = () => {};
@@ -1266,6 +1315,69 @@ assert.ok(Card, "jackenberater-card must register itself");
   feedbackFlightDone.resolve({ ok: true });
   await Promise.all([feedbackFirst, feedbackSecond]);
   assert.equal(feedbackSingleFlightCard._notice, "submitted");
+
+
+  // Mutation single-flight ownership follows config/profile generations. A hung
+  // request from an obsolete config must not block the same action in the new
+  // config, and the old finally must not unlock the newer request.
+  const setupOwnerCard = new Card();
+  setupOwnerCard._render = () => {};
+  setupOwnerCard._refresh = async () => {};
+  setupOwnerCard._config = { entry_id: "entry-A" };
+  setupOwnerCard._selectedProfile = "profile-A";
+  setupOwnerCard._requestGeneration = 1;
+  const setupOwnerA = deferred();
+  const setupOwnerB = deferred();
+  let setupOwnerCalls = 0;
+  setupOwnerCard._send = async (type) => {
+    if (type !== "jackenberater/profile_setup") throw new Error(`unexpected ${type}`);
+    setupOwnerCalls += 1;
+    return setupOwnerCalls === 1 ? setupOwnerA.promise : setupOwnerB.promise;
+  };
+  const setupOwnerOld = setupOwnerCard._saveSetup();
+  await Promise.resolve();
+  setupOwnerCard.setConfig({ entry_id: "entry-B" });
+  setupOwnerCard._selectedProfile = "profile-B";
+  const setupOwnerNew = setupOwnerCard._saveSetup();
+  await Promise.resolve();
+  assert.equal(setupOwnerCalls, 2, "setup B must start even while setup A is still pending");
+  assert.equal(setupOwnerCard._mutationFlightActive("setup"), true);
+  setupOwnerA.resolve({ ok: true });
+  await setupOwnerOld;
+  assert.equal(setupOwnerCard._mutationFlightActive("setup"), true, "late setup A finally must not release setup B");
+  setupOwnerB.resolve({ ok: true });
+  await setupOwnerNew;
+  assert.equal(setupOwnerCard._mutationFlightActive("setup"), false);
+
+  const maintenanceOwnerCard = new Card();
+  maintenanceOwnerCard._hass = { language: "de" };
+  maintenanceOwnerCard._render = () => {};
+  maintenanceOwnerCard._refresh = async () => {};
+  maintenanceOwnerCard._t = (key) => key;
+  maintenanceOwnerCard._config = { entry_id: "entry" };
+  maintenanceOwnerCard._selectedProfile = "profile-A";
+  maintenanceOwnerCard._requestGeneration = 4;
+  const maintenanceOwnerA = deferred();
+  const maintenanceOwnerB = deferred();
+  let maintenanceOwnerCalls = 0;
+  maintenanceOwnerCard._send = async (type) => {
+    if (type !== "jackenberater/profile_maintenance") throw new Error(`unexpected ${type}`);
+    maintenanceOwnerCalls += 1;
+    return maintenanceOwnerCalls === 1 ? maintenanceOwnerA.promise : maintenanceOwnerB.promise;
+  };
+  const maintenanceOwnerOld = maintenanceOwnerCard._maintainProfile("learning_off");
+  await Promise.resolve();
+  maintenanceOwnerCard._requestGeneration += 1;
+  maintenanceOwnerCard._selectedProfile = "profile-B";
+  const maintenanceOwnerNew = maintenanceOwnerCard._maintainProfile("undo");
+  await Promise.resolve();
+  assert.equal(maintenanceOwnerCalls, 2, "maintenance B must start while stale profile-A maintenance is pending");
+  maintenanceOwnerA.resolve({ ok: true });
+  await maintenanceOwnerOld;
+  assert.equal(maintenanceOwnerCard._mutationFlightActive("maintenance"), true, "late profile-A finally must not release profile-B maintenance");
+  maintenanceOwnerB.resolve({ ok: true });
+  await maintenanceOwnerNew;
+  assert.equal(maintenanceOwnerCard._mutationFlightActive("maintenance"), false);
 
   console.log("frontend session contract OK");
 })().catch((err) => {

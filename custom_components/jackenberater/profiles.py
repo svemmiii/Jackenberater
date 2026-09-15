@@ -27,14 +27,23 @@ from .const import (
     PHASE_LATER,
     PHASE_START,
     PHASE_VALUES,
+    PULLOVER_WARMTH_C,
     SESSION_EXPIRY,
     SIGNAL_PROFILE_CREATED,
     SIGNAL_PROFILE_DELETED,
     SIGNAL_PROFILE_UPDATED,
     STORAGE_KEY_PREFIX,
     STORAGE_VERSION,
+    TOP_PULLOVER,
 )
-from .learning import PersonalModel, apply_feedback, should_request_feedback
+from .learning import (
+    PersonalModel,
+    _feedback_bootstrap_mode,
+    _perfect_threshold_attribute,
+    _season_weights,
+    apply_feedback,
+    should_request_feedback,
+)
 from .models import Recommendation
 from .time_utils import (
     elapsed,
@@ -46,7 +55,7 @@ from .time_utils import (
 
 _LOGGER = logging.getLogger(__name__)
 
-_SESSION_SCHEMA_VERSION = 5
+_SESSION_SCHEMA_VERSION = 14
 
 
 # Feedback undo must only touch state that one rating can actually train.
@@ -71,6 +80,7 @@ _FEEDBACK_UNDO_FIELDS = (
     "light_threshold_delta_c",
     "warm_threshold_delta_c",
     "winter_threshold_delta_c",
+    "pullover_threshold_delta_c",
     "general_stat",
     "wind_stat",
     "transition_stat",
@@ -82,6 +92,7 @@ _FEEDBACK_UNDO_FIELDS = (
     "light_stat",
     "warm_stat",
     "winter_stat",
+    "pullover_stat",
 )
 
 
@@ -99,30 +110,38 @@ def _feedback_policy_signature(
     class_change: bool,
     unusual_weather: bool,
 ) -> dict[str, Any]:
-    """Return the session-reuse fields that define feedback/learning semantics.
+    """Return only distinctions that can change the feedback policy result.
 
-    A recent session may only be reused when reopening it would ask the same
-    feedback question and later train the same seasonal/model context.  The
-    exact clock time is intentionally not part of the signature so repeated
-    taps within a few minutes still deduplicate; calendar dates are included
-    because season weights are date based.
+    Individual OR-causes are intentionally collapsed to one ``informative``
+    bit. A refresh that changes *why* feedback is informative, while the policy
+    remains informative, must not manufacture a second opportunity. Seasonal
+    learning semantics belong to the immutable learning contract instead.
     """
-
-    def _day(value: datetime | None) -> str | None:
-        return value.date().isoformat() if isinstance(value, datetime) else None
-
+    bootstrap_feedback = _feedback_bootstrap_mode(model)
+    confidence = float(recommendation.confidence)
+    informative_feedback = (
+        bool(near_threshold)
+        or bool(class_change)
+        or bool(unusual_weather)
+        or confidence < 0.55
+    )
     return {
         "learning_enabled": bool(model.learning_enabled),
-        "confidence": round(float(recommendation.confidence), 3),
-        "near_threshold": bool(near_threshold),
-        "class_change": bool(class_change),
-        "unusual_weather": bool(unusual_weather),
-        # The opportunity counter controls cadence for a *new* opportunity,
-        # but is deliberately not part of session identity. Otherwise an
-        # unrelated session opened between A and a repeated A would defeat
-        # profile-wide 10-minute deduplication of the same real decision.
-        "observed_date": _day(recommendation.observed_at),
-        "later_date": _day(recommendation.later_at),
+        "bootstrap_feedback": bootstrap_feedback,
+        # Bootstrap always requests feedback, so the mature-model OR-causes are
+        # semantically irrelevant until the next interaction.
+        "informative_feedback": (
+            None if bootstrap_feedback else informative_feedback
+        ),
+    }
+
+
+def _season_weights_contract(value: datetime | None) -> dict[str, float]:
+    """Return deterministic serializable season semantics for one context."""
+    return {
+        name: round(float(weight), 12)
+        for name, weight in sorted(_season_weights(value).items())
+        if float(weight) > 0.0
     }
 
 
@@ -144,6 +163,7 @@ def _normalize_feedback_learning_snapshot(raw: Any) -> dict[str, Any] | None:
         "warm_answer",
         "wind_answer",
         "evening_answer",
+        "pullover_answer",
         "seasonal_model_version",
         "total_feedback",
         "feedback_opportunities",
@@ -416,10 +436,11 @@ class ProfileManager:
         warm: int,
         wind: int,
         evening: int,
+        pullover: int = 3,
     ) -> PersonalModel:
         raw = self._profiles[profile_id]
         old = self.get_model(profile_id)
-        fresh = PersonalModel.from_answers(cold, warm, wind, evening)
+        fresh = PersonalModel.from_answers(cold, warm, wind, evening, pullover)
         fresh.learning_enabled = old.learning_enabled
         fresh.prepare_seasons_for(dt_util.now())
         raw["model"] = fresh.to_dict()
@@ -539,15 +560,21 @@ class ProfileManager:
             class_change=class_change,
             unusual_weather=unusual_weather,
         )
+        current_learning_contract = _learning_contract(
+            model, recommendation, learning_contexts
+        )
 
-        # Reuse one recent real-world decision profile-wide.  Answered current-
-        # schema sessions remain dedupe anchors so the same weather/jacket
-        # decision cannot be learned twice merely because the user closes and
-        # reopens the card.  If the decision is the same but feedback policy has
-        # changed, the old *unanswered* session is explicitly superseded before
-        # a fresh policy session is created; two trainable versions of one real
-        # decision must never coexist.
+        # Reuse one recent real-world decision profile-wide. An answered
+        # current-schema session is the dedupe anchor for the full 10-minute
+        # window even when its own feedback changed the model afterwards: its
+        # immutable learning contract says what that historic rating meant, not
+        # whether the same real decision may be trained a second time.
+        #
+        # An *unanswered* session may still need a fresher semantic snapshot. In
+        # that case the replacement inherits the original opportunity ordinal so
+        # a technical refresh cannot advance or skip the active-learning cadence.
         superseded_changed = False
+        inherited_opportunity_count: int | None = None
         for session in reversed(sessions):
             created = _parse_dt(session.get("created_at"))
             if created is None:
@@ -573,33 +600,61 @@ class ProfileManager:
             if not same_decision:
                 continue
 
+            same_learning = (
+                session.get("learning_contract") == current_learning_contract
+            )
             if answered:
+                # One real decision may produce at most one item of learning
+                # evidence inside the dedupe window. The model is expected to
+                # have changed after feedback; that must not reopen the same
+                # decision under a newly computed learning contract.
                 if superseded_changed:
                     self._schedule_save()
                 return _public_session(session)
 
-            if _session_policy_is_current(session) and session.get("policy_signature") == current_policy:
+            if (
+                same_learning
+                and _session_snapshot_is_current(session)
+                and session.get("policy_signature") == current_policy
+            ):
                 if superseded_changed:
                     self._schedule_save()
                 return _public_session(session)
 
-            # Same real decision, but stale/changed policy.  Kill the old
-            # unanswered learning ticket before creating the replacement.
+            # Same visible decision, but stale/changed policy or learning
+            # semantics. Kill the old unanswered ticket before creating the
+            # replacement so feedback can only target the current snapshot. If
+            # this was a trainable decision, keep its original opportunity
+            # ordinal instead of counting the replacement as another decision.
+            old_opportunity = session.get("opportunity_count")
+            if (
+                session.get("trainable") is True
+                and isinstance(old_opportunity, int)
+                and old_opportunity > 0
+                and inherited_opportunity_count is None
+            ):
+                inherited_opportunity_count = old_opportunity
             session["request_feedback"] = False
             session["policy_signature"] = None
+            session["learning_contract"] = None
             session["trainable"] = False
             session["superseded"] = True
             superseded_changed = True
 
+        opportunity_count: int | None = None
         if model.learning_enabled:
-            model.feedback_opportunities += 1
+            if inherited_opportunity_count is not None:
+                opportunity_count = inherited_opportunity_count
+            else:
+                model.feedback_opportunities += 1
+                opportunity_count = model.feedback_opportunities
         requested = should_request_feedback(
             model,
             near_threshold=near_threshold,
             class_change=class_change,
             unusual_weather=unusual_weather,
             decision_confidence=recommendation.confidence,
-            opportunity_count=model.feedback_opportunities,
+            opportunity_count=opportunity_count,
         )
         raw["model"] = model.to_dict()
         stored_policy = _feedback_policy_signature(
@@ -631,6 +686,8 @@ class ProfileManager:
             "expires_at": expires_at.isoformat(),
             "request_feedback": requested,
             "policy_signature": stored_policy,
+            "learning_contract": current_learning_contract,
+            "opportunity_count": opportunity_count,
             "trainable": bool(model.learning_enabled),
             "superseded": False,
             "recommendation": recommendation.as_dict(),
@@ -784,6 +841,14 @@ class ProfileManager:
         learned_any = False
         session["learning_before"] = None
         contexts = session.get("learning_contexts", {})
+        learning_contract = session.get("learning_contract")
+        if not isinstance(learning_contract, dict):
+            raise ValueError("feedback_session_incompatible")
+        bootstrap_mode = bool(learning_contract.get("bootstrap_mode"))
+        start_contract = learning_contract.get("start")
+        later_contract = learning_contract.get("later")
+        if not isinstance(start_contract, dict):
+            raise ValueError("feedback_session_incompatible")
         start_context = contexts.get("start") if isinstance(contexts, dict) else None
         later_context = contexts.get("later") if isinstance(contexts, dict) else None
         if not isinstance(start_context, dict):
@@ -805,6 +870,7 @@ class ProfileManager:
         def _learn_context(
             target: dict[str, Any],
             *,
+            contract: dict[str, Any],
             count_feedback: bool,
             apply_general: bool,
             target_phase: str | None,
@@ -835,15 +901,28 @@ class ProfileManager:
                 ),
                 boundary_only=boundary_only,
                 boundary_attribute=boundary_attribute,
+                top_layer=str(target.get("top_layer") or recommendation.get("top_layer") or "shirt"),
+                learning_contract={
+                    **contract,
+                    "bootstrap_mode": bootstrap_mode,
+                },
             )
             learned_any = learned_any or learned_here
 
         if phase == PHASE_ALL and isinstance(later_context, dict):
             # "Throughout" carries one global signal, but can inform the
             # start-specific transition/boundary and the later weather/boundary.
-            _learn_context(start_context, count_feedback=True, apply_general=True, target_phase=PHASE_START)
+            _learn_context(
+                start_context, contract=start_contract, count_feedback=True,
+                apply_general=True, target_phase=PHASE_START
+            )
             if later_context != start_context:
-                _learn_context(later_context, count_feedback=False, apply_general=False, target_phase=PHASE_LATER)
+                if not isinstance(later_contract, dict):
+                    raise ValueError("feedback_session_incompatible")
+                _learn_context(
+                    later_context, contract=later_contract, count_feedback=False,
+                    apply_general=False, target_phase=PHASE_LATER
+                )
         elif phase == PHASE_LATER and class_change:
             # The UI deliberately phrases the later choice as a timing problem
             # ("I should have switched earlier/later"). That is direct evidence
@@ -871,8 +950,11 @@ class ProfileManager:
             }.get(boundary_rank)
             transition_target = dict(later_context)
             transition_target["jacket"] = boundary_jacket
+            if not isinstance(later_contract, dict):
+                raise ValueError("feedback_session_incompatible")
             _learn_context(
                 transition_target,
+                contract=later_contract,
                 count_feedback=True,
                 apply_general=False,
                 target_phase=PHASE_LATER,
@@ -881,7 +963,13 @@ class ProfileManager:
             )
         else:
             target = later_context if phase == PHASE_LATER else start_context
-            _learn_context(target, count_feedback=True, apply_general=True, target_phase=phase)
+            target_contract = later_contract if phase == PHASE_LATER else start_contract
+            if not isinstance(target_contract, dict):
+                raise ValueError("feedback_session_incompatible")
+            _learn_context(
+                target, contract=target_contract, count_feedback=True,
+                apply_general=True, target_phase=phase
+            )
 
         if learned_any:
             for old_session in self._sessions(profile_id):
@@ -993,7 +1081,7 @@ class ProfileManager:
         kept: list[dict[str, Any]] = []
         for session in sessions:
             unanswered = session.get("feedback") is None
-            if unanswered and not _session_policy_is_current(session):
+            if unanswered and not _session_snapshot_is_current(session):
                 continue
             expires = _parse_dt(session.get("expires_at"))
             # An unanswered session without a valid expiry is incompatible
@@ -1062,6 +1150,8 @@ def _public_session(session: dict[str, Any]) -> dict[str, Any]:
     result.pop("learning_before", None)
     result.pop("learning_contexts", None)
     result.pop("policy_signature", None)
+    result.pop("learning_contract", None)
+    result.pop("opportunity_count", None)
     result.pop("session_schema_version", None)
     result.pop("opened_by_user_id", None)
     result.pop("trainable", None)
@@ -1105,18 +1195,24 @@ def _bounded_sessions(sessions: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [session for index, session in enumerate(eligible) if index in keep_indexes]
 
 
-def _session_policy_is_current(session: dict[str, Any]) -> bool:
-    """Return whether an unanswered session is safe for current feedback rules.
+def _session_snapshot_is_current(session: dict[str, Any]) -> bool:
+    """Return whether a stored session is reusable under the current schema.
 
-    Sessions opened while learning was paused are display-only snapshots. They
-    must never become trainable later merely because learning was resumed.
+    Display-only sessions created while learning is paused intentionally qualify
+    here. They may be deduplicated during that same pause, but their immutable
+    ``trainable=False`` flag prevents them from ever becoming feedback evidence.
     """
     return (
         session.get("session_schema_version") == _SESSION_SCHEMA_VERSION
         and isinstance(session.get("policy_signature"), dict)
-        and session.get("trainable") is True
+        and isinstance(session.get("learning_contract"), dict)
         and not session.get("superseded")
     )
+
+
+def _session_policy_is_current(session: dict[str, Any]) -> bool:
+    """Return whether an unanswered session is safe for current feedback rules."""
+    return _session_snapshot_is_current(session) and session.get("trainable") is True
 
 
 def _optional_close(a: Any, b: Any, tolerance: float) -> bool:
@@ -1125,6 +1221,107 @@ def _optional_close(a: Any, b: Any, tolerance: float) -> bool:
     if left is None or right is None:
         return left is None and right is None
     return abs(left - right) <= tolerance
+
+
+def _learning_context_contract(
+    model: PersonalModel,
+    recommendation: Recommendation,
+    context: dict[str, Any],
+    *,
+    bootstrap_mode: bool,
+    transition_relevant: bool,
+    general_learning: bool,
+) -> dict[str, Any]:
+    """Freeze what feedback for one stored context is allowed to learn.
+
+    Numeric weather values remain in ``learning_contexts``. This compact contract
+    freezes only semantic gates that could otherwise change when the personal
+    model evolves between opening and rating the session.
+    """
+    jacket = str(context.get("jacket") or recommendation.jacket_now or "none")
+    top_layer = str(context.get("top_layer") or recommendation.top_layer or "shirt")
+    effective_c = _safe_float(context.get("effective_c"))
+    threshold_effective_c = effective_c
+    if top_layer == TOP_PULLOVER and effective_c is not None:
+        threshold_effective_c = effective_c + PULLOVER_WARMTH_C
+
+    transient_direction = context.get("transient_direction")
+    if transient_direction not in {"warming", "cooling"}:
+        transient_direction = None
+    transient_active = bool(context.get("transient_override")) and transient_direction is not None
+
+    if transient_active:
+        perfect_boundary = None
+        wind_learning = False
+        transition_learning = False
+        season_weights: dict[str, float] = {}
+    else:
+        perfect_boundary = _perfect_threshold_attribute(
+            model, jacket, threshold_effective_c
+        )
+        wind_learning = (
+            not bootstrap_mode
+            and (_safe_float(context.get("wind_penalty_c")) or 0.0) >= 0.5
+        )
+        transition_learning = (
+            not bootstrap_mode
+            and bool(transition_relevant)
+            and (_safe_float(context.get("transition_penalty_c")) or 0.0) >= 0.8
+        )
+        observed_at = _parse_dt(context.get("observed_at"))
+        season_weights = (
+            _season_weights_contract(observed_at) if general_learning else {}
+        )
+
+    return {
+        "perfect_boundary": perfect_boundary,
+        "wind_learning": wind_learning,
+        "transition_learning": transition_learning,
+        "season_weights": season_weights,
+        "pullover_learning": top_layer == TOP_PULLOVER,
+        "pullover_direct_too_warm": top_layer == TOP_PULLOVER and jacket == "none",
+        "transient_override": transient_active,
+        "transient_direction": transient_direction if transient_active else None,
+    }
+
+
+def _learning_contract(
+    model: PersonalModel,
+    recommendation: Recommendation,
+    learning_contexts: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    """Build the immutable learning contract stored with a feedback session."""
+    start = learning_contexts.get("start")
+    later = learning_contexts.get("later")
+    start_ctx = start if isinstance(start, dict) else {}
+    later_ctx = later if isinstance(later, dict) else {}
+    class_change = recommendation.jacket_now != recommendation.jacket_later
+    bootstrap_mode = _feedback_bootstrap_mode(model)
+    return {
+        # Freeze one phase for the entire user rating. PHASE_ALL must not become
+        # mature halfway through because the start context added general evidence.
+        "bootstrap_mode": bootstrap_mode,
+        "start": _learning_context_contract(
+            model,
+            recommendation,
+            start_ctx,
+            bootstrap_mode=bootstrap_mode,
+            transition_relevant=True,
+            general_learning=True,
+        ),
+        "later": (
+            _learning_context_contract(
+                model,
+                recommendation,
+                later_ctx,
+                bootstrap_mode=bootstrap_mode,
+                transition_relevant=False,
+                general_learning=False,
+            )
+            if class_change
+            else None
+        ),
+    }
 
 
 def _session_context_matches(
@@ -1152,16 +1349,11 @@ def _session_context_matches(
     exact_keys = (
         "jacket_now",
         "jacket_later",
+        "top_layer",
         "later_at",
-        "rain_status",
-        "source",
-        "work_jacket",
-        "work_context",
         "transient_override",
         "transient_direction",
         "transient_until",
-        "later_work_period",
-        "later_change_confirmed",
     )
     if any(old_rec.get(key) != new_rec.get(key) for key in exact_keys):
         return False
@@ -1185,10 +1377,11 @@ def _session_context_matches(
         if not _optional_close(old_ctx.get("transition_penalty_c"), new_ctx.get("transition_penalty_c"), 0.25):
             return False
 
-    old_weather = session.get("weather")
-    if isinstance(old_weather, dict):
-        if old_weather.get("condition") != weather_context.get("condition"):
-            return False
+    # Provider condition labels, separate rain/advice status and organizational
+    # work/source metadata are not thermal learning inputs by themselves.  A
+    # metadata-only change must not turn the same outfit decision into a second
+    # trainable opportunity. Thermally relevant weather/work changes are already
+    # represented by jacket classes, effective temperatures and learning context.
     return True
 
 

@@ -1,4 +1,4 @@
-# JackenBerater v0.3.2
+# JackenBerater v0.4.0
 
 JackenBerater ist eine Home-Assistant-Integration für persönliche Jackenempfehlungen. Sie verwendet aktuelle Wetterdaten, den Forecast und optional persönliche Rückmeldungen.
 
@@ -45,7 +45,7 @@ Der normale Forecast-Horizont beträgt 9 Stunden. Bei relevanten Änderungen kan
 
 ## Persönliches Profil und Feedback
 
-Jeder normale Home-Assistant-Benutzer hat sein eigenes Lernprofil. Beim ersten Einrichten werden einige Startfragen gestellt. Später kann das Profil durch Feedback angepasst werden:
+Jeder normale Home-Assistant-Benutzer hat sein eigenes Lernprofil. Beim ersten Einrichten werden fünf Startfragen gestellt – darunter ab v0.4.0 auch, wie früh der Nutzer normalerweise zu einem Pullover greift. Später kann das Profil durch Feedback angepasst werden:
 
 - Zu kalt
 - Perfekt
@@ -61,6 +61,16 @@ Wenn sich die Empfehlung im Tagesverlauf ändert, zeigt die Feedbackkarte auch d
 Eine sichtbare Karte allein erzeugt keine Feedback-Session. Erst das bewusste Öffnen der Empfehlungsdetails zählt als Nutzung. Automatisches Feedback wird normalerweise frühestens nach 30 Minuten freigegeben.
 
 Der interne thermische Rechenwert bleibt Teil der Berechnung, wird aber nicht als Temperaturwert auf der normalen Nutzerkarte angezeigt.
+
+## Pullover / Midlayer ab v0.4.0
+
+JackenBerater unterscheidet jetzt zwischen **Grundschicht am Oberkörper** und **abnehmbarer Außenschicht**. Die Grundschicht ist entweder Shirt oder Pullover; die bestehende Jackenskala bleibt unverändert `keine / leichte / warme / Winterjacke`. Hosen oder andere Kleidungsbereiche sind bewusst nicht Teil dieses Modells.
+
+Der Pullover wird nicht als „später anziehen“-Forecast geplant. Er ist eine Entscheidung für den betrachteten Zeitraum. Bleiben die Bedingungen über mehrere Stunden kühl und ausreichend stabil, kann der Berater beispielsweise **Pullover ohne Jacke** statt **Shirt + leichte Jacke** empfehlen. Wird im Tages- oder Arbeitsverlauf dagegen eine deutliche Erwärmung erwartet, bevorzugt er bei vergleichbarer Wärme **Shirt + abnehmbare Jacke**, weil die Außenschicht später ausgezogen, getragen oder verstaut werden kann.
+
+Bei anhaltend starker Kälte darf der Pullover zusätzlich mit einer Jacke kombiniert werden, zum Beispiel **Pullover + Winterjacke**. Dadurch kann der Berater unterhalb der bisherigen Winterjacken-Skala feiner unterscheiden, ohne den Pullover künstlich als weitere Jackenklasse zu behandeln. Die Pulloverwärme ist eine transparente Komfortheuristik und keine direkte Umrechnung eines `clo`-Wertes in Lufttemperatur.
+
+Bestehende v0.3.x-Profile werden neutral migriert: Die bisherige Jacken-, Saison-, Wind- und Threshold-Personalisierung bleibt erhalten; der neue Pulloverbereich startet neutral und sammelt erst anschließend eigene Evidenz. Ein „zu warm“-Feedback bei **Pullover ohne Jacke** verschiebt gezielt die Pulloverentscheidung zu kühleren Bedingungen – auch wenn die Empfehlung zugleich eine kurzfristige Transient-Ausnahme verwendet. Ist zusätzlich eine abnehmbare Jacke beteiligt, wird weiterhin zuerst deren Außenschichtentscheidung bewertet, statt beide Kleidungsbereiche doppelt zu verändern.
 
 ## Wandtablet / Shared-Konto
 
@@ -93,7 +103,7 @@ title: Jacke heute
 
 Bei vollständig YAML-verwaltetem Lovelace muss die Ressource manuell eingetragen werden:
 
-`/jackenberater/frontend/jackenberater-card.js?v=0.3.2&ui=13`
+`/jackenberater/frontend/jackenberater-card.js?v=0.4.0&ui=17`
 
 Nach einem JackenBerater-Update sollte die Lovelace-Seite einmal vollständig neu geladen werden. Bereits registrierte Browser-Custom-Elements können innerhalb derselben JavaScript-Session technisch nicht durch eine neu geladene Klasse ersetzt werden; der versionsgebundene Ressourcenpfad verhindert dabei normale Cache-Probleme.
 
