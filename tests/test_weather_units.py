@@ -333,3 +333,46 @@ def test_nonempty_but_fully_invalid_forecast_payload_is_fetch_failure():
     result = asyncio.run(weather._fetch_hourly(hass, entity_id))
     assert result.points == []
     assert result.success is False
+
+
+def test_current_weather_reads_native_dew_point_in_provider_temperature_unit():
+    entity_id = "weather.test"
+    state = types.SimpleNamespace(
+        state="cloudy",
+        attributes={
+            "temperature": 68.0,
+            "dew_point": 59.0,
+            "temperature_unit": "°F",
+            "wind_speed_unit": "km/h",
+            "precipitation_unit": "mm",
+        },
+    )
+    hass = types.SimpleNamespace(
+        states=types.SimpleNamespace(get=lambda requested: state if requested == entity_id else None),
+        config=types.SimpleNamespace(
+            units=types.SimpleNamespace(temperature_unit="°C", accumulated_precipitation_unit="mm")
+        ),
+    )
+    item = weather.current_weather(hass, entity_id)
+    assert item is not None
+    assert item.temperature_c == 20.0
+    assert item.dew_point_c == 15.0
+
+
+def test_normalize_forecast_preserves_provider_dew_point():
+    entity_id = "weather.test"
+    state = types.SimpleNamespace(attributes={
+        "temperature_unit": "°C", "wind_speed_unit": "km/h", "precipitation_unit": "mm",
+    })
+    hass = types.SimpleNamespace(
+        states=types.SimpleNamespace(get=lambda requested: state if requested == entity_id else None),
+        config=types.SimpleNamespace(units=types.SimpleNamespace(temperature_unit="°C", accumulated_precipitation_unit="mm")),
+    )
+    result = weather.normalize_forecast(hass, entity_id, [{
+        "datetime": "2026-09-06T12:00:00+00:00",
+        "temperature": 20,
+        "humidity": 50,
+        "dew_point": 17.5,
+    }])
+    assert len(result) == 1
+    assert result[0].dew_point_c == 17.5

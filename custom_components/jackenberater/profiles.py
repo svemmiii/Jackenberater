@@ -29,12 +29,14 @@ from .const import (
     PHASE_VALUES,
     PULLOVER_WARMTH_C,
     SESSION_EXPIRY,
+    SESSION_DEDUPE,
     SIGNAL_PROFILE_CREATED,
     SIGNAL_PROFILE_DELETED,
     SIGNAL_PROFILE_UPDATED,
     STORAGE_KEY_PREFIX,
     STORAGE_VERSION,
     TOP_PULLOVER,
+    WET_SPECIALIST_MIN_C,
 )
 from .learning import (
     PersonalModel,
@@ -56,7 +58,7 @@ from .time_utils import (
 
 _LOGGER = logging.getLogger(__name__)
 
-_SESSION_SCHEMA_VERSION = 16
+_SESSION_SCHEMA_VERSION = 17
 
 
 # Feedback undo must only touch state that one rating can actually train.
@@ -67,6 +69,7 @@ _FEEDBACK_UNDO_FIELDS = (
     "humidity_warm_bias_c",
     "humidity_cold_bias_c",
     "solar_bias_c",
+    "wet_bias_c",
     "transition_bias_c",
     "transient_tolerance",
     "winter_bias_c",
@@ -90,6 +93,7 @@ _FEEDBACK_UNDO_FIELDS = (
     "humidity_warm_stat",
     "humidity_cold_stat",
     "solar_stat",
+    "wet_stat",
     "transition_stat",
     "transient_stat",
     "winter_season_stat",
@@ -466,7 +470,7 @@ class ProfileManager:
         if not model.learning_enabled:
             # Pausing learning invalidates every unanswered feedback context.
             # Merely muting request_feedback is not enough: after resume the old
-            # policy signature could otherwise match again inside the 10-minute
+            # policy signature could otherwise match again inside the 30-minute
             # reuse window and silently consume a fresh feedback opportunity.
             for session in self._sessions(profile_id):
                 if session.get("feedback") is None:
@@ -556,9 +560,21 @@ class ProfileManager:
         model.feedback_opportunities = current_model.feedback_opportunities
         near_threshold = "near_threshold" in recommendation.reasons
         class_change = recommendation.jacket_now != recommendation.jacket_later
-        unusual_weather = any(
-            key in recommendation.reasons
-            for key in ("wind", "wet", "work_location", "uncertain_conditions")
+        # Display reasons and learning materiality are deliberately separate.
+        # Tiny continuous wetness may truthfully explain the recommendation, but
+        # it must not request specialist feedback until the frozen wet context is
+        # strong enough for the wet channel to learn from that rating.
+        wet_material = any(
+            (_safe_float(context.get("wet_base_penalty_c")) or 0.0)
+            >= WET_SPECIALIST_MIN_C
+            for context in learning_contexts.values()
+        )
+        unusual_weather = (
+            any(
+                key in recommendation.reasons
+                for key in ("wind", "work_location", "uncertain_conditions")
+            )
+            or wet_material
         )
         current_policy = _feedback_policy_signature(
             model,
@@ -572,7 +588,7 @@ class ProfileManager:
         )
 
         # Reuse one recent real-world decision profile-wide. An answered
-        # current-schema session is the dedupe anchor for the full 10-minute
+        # current-schema session is the dedupe anchor for the full 30-minute
         # window even when its own feedback changed the model afterwards: its
         # immutable learning contract says what that historic rating meant, not
         # whether the same real decision may be trained a second time.
@@ -589,7 +605,7 @@ class ProfileManager:
             age_seconds = elapsed(created, now).total_seconds()
             if age_seconds < 0:
                 continue
-            if age_seconds > 600:
+            if age_seconds > SESSION_DEDUPE.total_seconds():
                 break
 
             answered = session.get("feedback") is not None
@@ -893,6 +909,8 @@ class ProfileManager:
                 wind_penalty_c=_safe_float(target.get("wind_penalty_c")),
                 humidity_base_adjustment_c=_safe_float(target.get("humidity_base_adjustment_c")),
                 solar_base_gain_c=_safe_float(target.get("solar_base_gain_c")),
+                wet_base_penalty_c=_safe_float(target.get("wet_base_penalty_c")),
+                wet_penalty_c=_safe_float(target.get("wet_penalty_c")),
                 transition_penalty_c=_safe_float(target.get("transition_penalty_c")) or 0.0,
                 effective_c=_safe_float(target.get("effective_c")),
                 phase=target_phase,
@@ -1272,6 +1290,7 @@ def _learning_context_contract(
         humidity_warm_learning = False
         humidity_cold_learning = False
         solar_learning = False
+        wet_learning = False
         transition_learning = False
         season_weights: dict[str, float] = {}
     else:
@@ -1296,6 +1315,8 @@ def _learning_context_contract(
             str(context.get("condition") or "").lower() == "sunny"
             and solar_base >= 0.75
         )
+        wet_base = _safe_float(context.get("wet_base_penalty_c")) or 0.0
+        wet_learning = wet_base >= WET_SPECIALIST_MIN_C
         transition_learning = (
             not bootstrap_mode
             and bool(transition_relevant)
@@ -1304,9 +1325,11 @@ def _learning_context_contract(
         specialist_semantics = _environment_specialist_semantics(
             humidity_base_adjustment_c=humidity_base,
             solar_base_gain_c=solar_base,
+            wet_base_penalty_c=wet_base,
             warm_humidity_active=humidity_warm_learning,
             cold_humidity_active=humidity_cold_learning,
             solar_active=solar_learning,
+            wet_active=wet_learning,
         )
         observed_at = _parse_dt(context.get("observed_at"))
         season_weights = (
@@ -1319,6 +1342,7 @@ def _learning_context_contract(
         "humidity_warm_learning": humidity_warm_learning,
         "humidity_cold_learning": humidity_cold_learning,
         "solar_learning": solar_learning,
+        "wet_learning": wet_learning,
         **(
             specialist_semantics
             if not transient_active
@@ -1326,6 +1350,7 @@ def _learning_context_contract(
                 "humidity_warm_relevance": 0.0,
                 "humidity_cold_relevance": 0.0,
                 "solar_relevance": 0.0,
+                "wet_relevance": 0.0,
                 "environment_specialist_share": 1.0,
             }
         ),

@@ -142,6 +142,7 @@ def current_weather(hass: HomeAssistant, entity_id: str) -> WeatherPoint | None:
         dt=dt_util.now(),
         temperature_c=temp,
         humidity=_bounded(attrs.get("humidity"), 0.0, 100.0),
+        dew_point_c=_temperature_to_c(attrs.get("dew_point"), unit),
         wind_kmh=_wind_to_kmh(attrs.get("wind_speed"), wind_unit),
         gust_kmh=_wind_to_kmh(attrs.get("wind_gust_speed"), wind_unit),
         cloud_coverage=_bounded(attrs.get("cloud_coverage"), 0.0, 100.0),
@@ -196,6 +197,7 @@ def normalize_forecast(
                 dt=dt,
                 temperature_c=temp,
                 humidity=_bounded(raw.get("humidity"), 0.0, 100.0),
+                dew_point_c=_temperature_to_c(raw.get("dew_point"), temp_unit),
                 wind_kmh=_wind_to_kmh(raw.get("wind_speed"), wind_unit),
                 gust_kmh=_wind_to_kmh(raw.get("wind_gust_speed"), wind_unit),
                 cloud_coverage=_bounded(raw.get("cloud_coverage"), 0.0, 100.0),
@@ -217,6 +219,7 @@ def normalize_forecast(
             value is not None
             for value in (
                 point.humidity,
+                point.dew_point_c,
                 point.wind_kmh,
                 point.gust_kmh,
                 point.cloud_coverage,

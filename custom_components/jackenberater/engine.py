@@ -37,6 +37,7 @@ from .const import (
     RAIN_TAKE,
     TOP_PULLOVER,
     TOP_SHIRT,
+    WET_SPECIALIST_MIN_C,
 )
 from .learning import PersonalModel
 from .models import Recommendation, ThermalResult, WeatherPoint
@@ -69,6 +70,7 @@ def assess_point(
     indoor_temperature_c: float | None = None,
     apply_transition: bool = False,
     activity_context_c: float = 0.0,
+    allow_probabilistic_wetness: bool = True,
 ) -> ThermalResult:
     """Assess one point and return an effective outdoor temperature."""
     temp = point.temperature_c
@@ -83,10 +85,22 @@ def assess_point(
 
     base_solar_gain = _solar_gain(point.condition, point.cloud_coverage)
     solar_gain = _solar_gain(point.condition, point.cloud_coverage, model=model)
-    base_humidity_adjustment = _humidity_adjustment(temp, point.humidity)
-    humidity_adjustment = _humidity_adjustment(temp, point.humidity, model=model)
-    dew_point = _dew_point_c(temp, point.humidity)
-    rain_penalty = _rain_penalty(point)
+    dew_point = _preferred_dew_point_c(temp, point.humidity, point.dew_point_c)
+    base_humidity_adjustment = _humidity_adjustment(
+        temp, point.humidity, dew_point_c=dew_point
+    )
+    humidity_adjustment = _humidity_adjustment(
+        temp, point.humidity, dew_point_c=dew_point, model=model
+    )
+    base_wet_penalty = _wet_penalty(
+        point, allow_probability=allow_probabilistic_wetness
+    )
+    wet_penalty = _wet_penalty(
+        point, model=model, allow_probability=allow_probabilistic_wetness
+    )
+    base_wet_wind_synergy = _wet_wind_synergy(base_wind_penalty, base_wet_penalty)
+    wet_wind_synergy = _wet_wind_synergy(wind_penalty, wet_penalty)
+    rain_penalty = wet_penalty + wet_wind_synergy
     seasonal_adjustment = model.seasonal_bias_for(point.dt)
 
     base_transition_penalty = 0.0
@@ -106,7 +120,8 @@ def assess_point(
         - wind_penalty
         + solar_gain
         + humidity_adjustment
-        - rain_penalty
+        - wet_penalty
+        - wet_wind_synergy
         - transition_penalty
         - model.general_offset_c
         - seasonal_adjustment
@@ -128,6 +143,9 @@ def assess_point(
         reasons.append("humid_warm")
     elif humidity_adjustment <= -0.20:
         reasons.append("humid_cold")
+    # User-facing explanation stays truthful for every thermally relevant wet
+    # contribution. Active-Learning materiality is intentionally decided later
+    # from the frozen learning context, not from this display reason.
     if rain_penalty > 0:
         reasons.append("wet")
     # Mark personalization whenever the learned profile changes the actual
@@ -139,7 +157,8 @@ def assess_point(
         - base_wind_penalty
         + base_solar_gain
         + base_humidity_adjustment
-        - rain_penalty
+        - base_wet_penalty
+        - base_wet_wind_synergy
         - base_transition_penalty
         + activity_context_c
     )
@@ -161,6 +180,9 @@ def assess_point(
         threshold_margin_c=round(margin, 2),
         base_solar_gain_c=round(base_solar_gain, 2),
         base_humidity_adjustment_c=round(base_humidity_adjustment, 2),
+        base_wet_penalty_c=round(base_wet_penalty, 2),
+        wet_penalty_c=round(wet_penalty, 2),
+        wet_wind_synergy_c=round(wet_wind_synergy, 2),
         dew_point_c=round(dew_point, 2) if dew_point is not None else None,
         seasonal_adjustment_c=round(seasonal_adjustment, 2),
         reasons=reasons,
@@ -197,6 +219,7 @@ def build_recommendation(
         indoor_temperature_c=indoor_temperature_c,
         apply_transition=True,
         activity_context_c=_activity_for(current.dt, activity_context_c, activity_context_fn),
+        allow_probabilistic_wetness=False,
     )
     # The pullover is a fixed base layer for the whole planning period. A
     # short-lived indoor->outdoor transition penalty may justify a removable
@@ -210,6 +233,7 @@ def build_recommendation(
         indoor_temperature_c=indoor_temperature_c,
         apply_transition=False,
         activity_context_c=_activity_for(current.dt, activity_context_c, activity_context_fn),
+        allow_probabilistic_wetness=False,
     )
 
     forecast = sorted(
@@ -436,6 +460,12 @@ def build_recommendation(
         )
         specialist_feedback_needed = specialist_feedback_needed or solar_feedback_needed
         unusual_weather = unusual_weather or solar_feedback_needed
+    if model.wet_stat.weight_sum < 3.0:
+        wet_feedback_needed = any(
+            result.base_wet_penalty_c >= WET_SPECIALIST_MIN_C for result in feedback_results
+        )
+        specialist_feedback_needed = specialist_feedback_needed or wet_feedback_needed
+        unusual_weather = unusual_weather or wet_feedback_needed
 
     decision_confidence = model.decision_confidence(
         jacket_now,
@@ -520,6 +550,9 @@ def build_recommendation(
         current_base_humidity_adjustment_c=current_result.base_humidity_adjustment_c,
         current_solar_gain_c=current_result.solar_gain_c,
         current_base_solar_gain_c=current_result.base_solar_gain_c,
+        current_base_wet_penalty_c=current_result.base_wet_penalty_c,
+        current_wet_penalty_c=current_result.wet_penalty_c,
+        current_wet_wind_synergy_c=current_result.wet_wind_synergy_c,
         later_temperature_c=(
             round(later_point.temperature_c, 1) if later_point is not None else None
         ),
@@ -555,6 +588,15 @@ def build_recommendation(
         later_solar_gain_c=(later_result.solar_gain_c if later_result is not None else None),
         later_base_solar_gain_c=(
             later_result.base_solar_gain_c if later_result is not None else None
+        ),
+        later_base_wet_penalty_c=(
+            later_result.base_wet_penalty_c if later_result is not None else None
+        ),
+        later_wet_penalty_c=(
+            later_result.wet_penalty_c if later_result is not None else None
+        ),
+        later_wet_wind_synergy_c=(
+            later_result.wet_wind_synergy_c if later_result is not None else None
         ),
         work_context=work_context,
         work_jacket=work_jacket,
@@ -796,6 +838,9 @@ def _result_with_pullover(
         ),
         base_solar_gain_c=result.base_solar_gain_c,
         base_humidity_adjustment_c=result.base_humidity_adjustment_c,
+        base_wet_penalty_c=result.base_wet_penalty_c,
+        wet_penalty_c=result.wet_penalty_c,
+        wet_wind_synergy_c=result.wet_wind_synergy_c,
         dew_point_c=result.dew_point_c,
         seasonal_adjustment_c=result.seasonal_adjustment_c,
         reasons=list(result.reasons),
@@ -1061,8 +1106,63 @@ def _dew_point_c(temp_c: float, humidity: float | None) -> float | None:
     return min(temp, dew) if math.isfinite(dew) else None
 
 
+def _preferred_dew_point_c(
+    temp_c: float,
+    humidity: float | None,
+    provider_dew_point_c: float | None,
+) -> float | None:
+    """Prefer provider dew point, but fade smoothly toward the RH/Magnus value.
+
+    A provider dew point is useful extra precision when it broadly agrees with
+    temperature/RH.  Hard accept/reject thresholds create artificial thermal
+    jumps, so disagreement is handled continuously: provider data is used fully
+    through 4 K disagreement, blended through 4..8 K, and ignored beyond 8 K.
+    Without usable RH, a physically plausible provider value remains the best
+    available moisture-content signal.
+    """
+    try:
+        temp = float(temp_c)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(temp):
+        return None
+
+    derived = _dew_point_c(temp, humidity)
+    if provider_dew_point_c is None:
+        return derived
+
+    try:
+        provider = float(provider_dew_point_c)
+    except (TypeError, ValueError, OverflowError):
+        return derived
+    if not math.isfinite(provider) or not (-100.0 <= provider <= 70.0):
+        return derived
+
+    # Dew point cannot physically exceed air temperature. Clamp provider
+    # overshoot continuously instead of introducing a second hard accept/reject
+    # edge at T+2 K. If RH is available, the existing disagreement blend below
+    # still decides how much confidence the clamped provider value deserves.
+    provider = min(temp, provider)
+
+    if derived is None:
+        return provider
+
+    disagreement = abs(provider - derived)
+    if disagreement <= 4.0:
+        return provider
+    if disagreement >= 8.0:
+        return derived
+
+    provider_weight = 1.0 - _smoothstep(4.0, 8.0, disagreement)
+    blended = derived + (provider - derived) * provider_weight
+    return min(temp, blended) if math.isfinite(blended) else derived
+
+
 def _humidity_components(
-    temp_c: float, humidity: float | None
+    temp_c: float,
+    humidity: float | None,
+    *,
+    dew_point_c: float | None = None,
 ) -> tuple[float, float, float, float, float | None]:
     """Return neutral warm/cold moisture corrections and dew point.
 
@@ -1071,22 +1171,24 @@ def _humidity_components(
     fades in once air temperature is warm enough for evaporation comfort to
     matter. The small cold/damp term remains RH-based and intentionally bounded.
     """
-    if humidity is None:
-        return 0.0, 0.0, 0.0, 0.0, None
-    try:
-        rh = float(humidity)
-    except (TypeError, ValueError, OverflowError):
-        return 0.0, 0.0, 0.0, 0.0, None
-    if not math.isfinite(rh):
-        return 0.0, 0.0, 0.0, 0.0, None
-    rh = max(0.0, min(100.0, rh))
-    dew = _dew_point_c(temp_c, rh)
+    rh: float | None = None
+    if humidity is not None:
+        try:
+            candidate = float(humidity)
+        except (TypeError, ValueError, OverflowError):
+            candidate = float("nan")
+        if math.isfinite(candidate):
+            rh = max(0.0, min(100.0, candidate))
+
+    dew = _preferred_dew_point_c(temp_c, rh, dew_point_c)
 
     # Very damp cold air gets only a small correction. This is deliberately
     # weaker than rain/wet-clothing handling and fades out through 8..14 C.
-    cold_relevance = _smoothstep(82.0, 100.0, rh) * (
-        1.0 - _smoothstep(8.0, 14.0, temp_c)
-    )
+    cold_relevance = 0.0
+    if rh is not None:
+        cold_relevance = _smoothstep(82.0, 100.0, rh) * (
+            1.0 - _smoothstep(8.0, 14.0, temp_c)
+        )
     cold_base = -0.50 * cold_relevance
 
     warm_base = 0.0
@@ -1111,11 +1213,12 @@ def _humidity_adjustment(
     temp_c: float,
     humidity: float | None,
     *,
+    dew_point_c: float | None = None,
     model: PersonalModel | None = None,
 ) -> float:
     """Return dew-point based warm humidity plus a small cold/damp correction."""
     warm_base, cold_base, warm_relevance, cold_relevance, _dew = _humidity_components(
-        temp_c, humidity
+        temp_c, humidity, dew_point_c=dew_point_c
     )
     if model is None:
         return warm_base + cold_base
@@ -1125,15 +1228,82 @@ def _humidity_adjustment(
     return max(-2.0, min(5.0, warm + cold))
 
 
-def _rain_penalty(point: WeatherPoint) -> float:
+def _base_wet_penalty(
+    point: WeatherPoint,
+    *,
+    allow_probability: bool = True,
+) -> float:
+    """Return neutral thermal penalty from actual/near-point wetness.
+
+    Categorical rain remains a strong direct signal. Numeric precipitation is
+    deliberately continuous: the legacy 0.2 mm / 65 % thresholds are now the
+    points where the old 0.6 K penalty is fully reached, not binary switches.
+    This keeps learned wet sensitivity and wind×wet synergy from magnifying tiny
+    provider refreshes into abrupt garment-class changes.
+    """
     condition = (point.condition or "").lower()
     if condition in WET_CONDITIONS:
-        return 0.9 if condition != "pouring" else 1.4
-    probability = point.precipitation_probability or 0.0
-    amount = point.precipitation_mm or 0.0
-    if probability >= 65.0 and amount >= 0.2:
-        return 0.6
-    return 0.0
+        return 1.4 if condition == "pouring" else 0.9
+
+    try:
+        amount = float(point.precipitation_mm or 0.0)
+    except (TypeError, ValueError, OverflowError):
+        amount = 0.0
+    if not math.isfinite(amount):
+        amount = 0.0
+    amount = max(0.0, amount)
+    amount_factor = _smoothstep(0.0, 0.2, amount)
+    if amount_factor <= 0.0:
+        return 0.0
+
+    if not allow_probability:
+        return 0.6 * amount_factor
+
+    try:
+        probability = float(point.precipitation_probability or 0.0)
+    except (TypeError, ValueError, OverflowError):
+        probability = 0.0
+    if not math.isfinite(probability):
+        probability = 0.0
+    probability = max(0.0, min(100.0, probability))
+    probability_factor = _smoothstep(45.0, 65.0, probability)
+    return 0.6 * amount_factor * probability_factor
+
+
+def _wet_penalty(
+    point: WeatherPoint,
+    *,
+    model: PersonalModel | None = None,
+    allow_probability: bool = True,
+) -> float:
+    """Return a small personally learnable wet-clothing/rain comfort penalty."""
+    base = _base_wet_penalty(point, allow_probability=allow_probability)
+    if model is None or base <= 0.0:
+        return base
+    relevance = max(0.0, min(1.0, base / 1.4))
+    return max(0.0, min(3.0, base + model.wet_bias_c * relevance))
+
+
+def _wet_wind_synergy(wind_penalty_c: float, wet_penalty_c: float) -> float:
+    """Return the bounded extra cold stress when wind and wetness coincide.
+
+    The harmonic mean makes the interaction depend on the weaker participant:
+    strong wind with almost no wetness (or vice versa) cannot manufacture a
+    large interaction. Temperature already lives inside ``wind_penalty_c``, so
+    cold is not counted a second time. The 0.30 gain / 0.8 K cap are deliberately
+    conservative because clothing waterproofness and actual exposure are unknown.
+    """
+    wind = max(0.0, float(wind_penalty_c or 0.0))
+    wet = max(0.0, float(wet_penalty_c or 0.0))
+    if wind <= 0.0 or wet <= 0.0:
+        return 0.0
+    harmonic = (2.0 * wind * wet) / (wind + wet)
+    return min(0.8, 0.30 * harmonic)
+
+
+def _rain_penalty(point: WeatherPoint) -> float:
+    """Backward-compatible neutral wetness helper used by older direct tests."""
+    return _base_wet_penalty(point, allow_probability=True)
 
 
 def _rain_status(current: WeatherPoint, forecast: list[WeatherPoint]) -> str:

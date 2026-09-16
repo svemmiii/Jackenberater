@@ -1,4 +1,4 @@
-# JackenBerater v0.4.1
+# JackenBerater v0.4.2
 
 JackenBerater ist eine Home-Assistant-Integration für persönliche Jackenempfehlungen. Sie verwendet aktuelle Wetterdaten, den Forecast und optional persönliche Rückmeldungen.
 
@@ -41,7 +41,7 @@ Optional:
 - Abwesenheitskalender für den Arbeitskontext
 - Shared-/Wandtablet-Konten
 
-Der normale Forecast-Horizont beträgt 9 Stunden. Bei relevanten Änderungen kann er erweitert werden; Arbeits- und Kalenderkontext können einen längeren Zeitraum erforderlich machen.
+Der normale Forecast-Horizont beträgt 9 Stunden. Bei relevanten Änderungen kann er erweitert werden; Arbeits- und Kalenderkontext können einen längeren Zeitraum erforderlich machen. Eine kommende Schicht wird ab v0.4.2 jedoch erst **3 Stunden vor ihrem tatsächlichen Arbeitsbeginn** in Arbeitsprofil, Arbeitswetter und die mögliche Erweiterung auf bis zu 16 Stunden einbezogen. Laufende Schichten bleiben selbstverständlich aktiv – auch über Mitternacht. Der vorhandene ±30-Minuten-Planungspuffer zieht diese 3-Stunden-Grenze nicht vor.
 
 ## Persönliches Profil und Feedback
 
@@ -54,11 +54,11 @@ Jeder normale Home-Assistant-Benutzer hat sein eigenes Lernprofil. Beim ersten E
 
 Das allgemeine Profil ist der ganzjährige persönliche Grundwert. Winter, Frühling, Sommer und Herbst besitzen daneben jeweils einen eigenen Offset. Normales thermisches Feedback verändert nach der Initialisierung nur die gerade beteiligte Jahreszeit; während der rund 30-tägigen Überblendung um den meteorologischen Saisonwechsel lernen ausschließlich die beiden benachbarten Saisonanker. Die saisonale Lernrate richtet sich nach der eigenen echten Evidenz der jeweiligen Jahreszeit und bleibt auch nach vielen Jahren reaktionsfähig.
 
-Beim allerersten Übergang in eine noch unbekannte Jahreszeit übernimmt sie einmalig nur den Offset der direkten Vorgängersaison als Startwert. Wird die komplette 30-Tage-Übergangszone verpasst, wird dieses einmalige Seeding beim ersten späteren Zugriff in der neuen Saison nachgeholt. Evidenz, Statistik und Lernhistorie werden nie mitkopiert; in späteren Jahren verwendet die Saison ausschließlich ihren eigenen zuletzt gelernten Zustand. Wurden mehrere ganze Jahreszeiten übersprungen und ist die direkte Vorgängersaison selbst unbekannt, wird keine künstliche Seed-Kette erzeugt: Nur die aktuell erreichte Saison startet dann neutral bei 0 relativ zu Main. Erst wenn alle vier Jahreszeiten ausreichend eigene Evidenz besitzen und ihre Offsets denselben gemeinsamen positiven oder negativen Sockel zeigen, wird dieser gemeinsame Anteil verlustfrei in den ganzjährigen Grundwert verschoben. `Main + Saisonoffset` bleibt dadurch für jede Jahreszeit unverändert. Bestehende v0.3.0-Profile werden beim Laden automatisch in dieses Modell migriert; synthetische Saisonwerte ohne eigene Evidenz werden dabei nicht als echte Saisonerfahrung übernommen.
+Beim allerersten Übergang in eine noch unbekannte Jahreszeit übernimmt sie einmalig nur den Offset der direkten Vorgängersaison als Startwert. Wird die komplette 30-Tage-Übergangszone verpasst, wird dieses einmalige Seeding beim ersten späteren Zugriff in der neuen Saison nachgeholt. Evidenz, Statistik und Lernhistorie werden nie mitkopiert. Beginnt jemand JackenBerater allerdings erst ganz am Ende einer Saison und sammelt dort bis zum nächsten Jahr weniger als zwei eigene Evidenzpunkte, darf diese **erste schwache Saison beim ersten Wiederkommen einmalig gerettet** werden: Bei 0 eigener Evidenz kann sie den inzwischen gut gelernten direkten Vorgänger übernehmen, bei etwas eigener Evidenz wird proportional gemischt. Eine ausreichend selbst gelernte Saison wird niemals automatisch verändert; nach dem einmaligen Rescue findet ebenfalls kein weiteres automatisches Nachziehen statt. Wurden mehrere ganze Jahreszeiten übersprungen und ist die direkte Vorgängersaison selbst unbekannt, wird keine künstliche Seed-Kette erzeugt: Nur die aktuell erreichte Saison startet dann neutral bei 0 relativ zu Main. Erst wenn alle vier Jahreszeiten ausreichend eigene Evidenz besitzen und ihre Offsets denselben gemeinsamen positiven oder negativen Sockel zeigen, wird dieser gemeinsame Anteil verlustfrei in den ganzjährigen Grundwert verschoben. `Main + Saisonoffset` bleibt dadurch für jede Jahreszeit unverändert. Bestehende v0.3.0-Profile werden beim Laden automatisch in dieses Modell migriert; synthetische Saisonwerte ohne eigene Evidenz werden dabei nicht als echte Saisonerfahrung übernommen.
 
 Wenn sich die Empfehlung im Tagesverlauf ändert, zeigt die Feedbackkarte auch diesen Wechsel. Bei "Zu kalt" oder "Zu warm" fragt sie konkret nach, ob die erste Empfehlung, der spätere Wechsel oder ein längerer Zeitraum nicht gepasst hat. Ein falsch getimter Wechsel korrigiert gezielt die betroffene Jackengrenze statt pauschal das ganze Wärmeprofil.
 
-Eine sichtbare Karte allein erzeugt keine Feedback-Session. Erst das bewusste Öffnen der Empfehlungsdetails zählt als Nutzung. Automatisches Feedback wird normalerweise frühestens nach 30 Minuten freigegeben.
+Eine sichtbare Karte allein erzeugt keine Feedback-Session. Beim Öffnen der Empfehlungsdetails gibt es ab v0.4.2 einen sehr kurzen **1,3-Sekunden-Verklickschutz**: Wird vorher wieder geschlossen, entsteht keine Session/Opportunity. Dieselbe reale Entscheidung wird anschließend **30 Minuten** lang dedupliziert, auch wenn die Details mehrfach geöffnet und geschlossen werden. Detail- und Infoansicht klappen nach **5 Minuten Inaktivität** automatisch zusammen; Tippen, Scrollen oder andere Bedienung startet diese fünf Minuten neu. Die reine Infoansicht erzeugt weiterhin nie eine Lernsession. Automatisches Feedback wird normalerweise frühestens nach 30 Minuten freigegeben.
 
 Der interne thermische Rechenwert bleibt Teil der Berechnung, wird aber nicht als Temperaturwert auf der normalen Nutzerkarte angezeigt.
 
@@ -68,9 +68,15 @@ JackenBerater trennt ab v0.4.1 weitere Wetterursachen vom normalen persönlichen
 
 ### Luftfeuchte / Schwüle
 
-Für warm-feuchte Luft wird nicht mehr nur die relative Luftfeuchtigkeit betrachtet. Aus Lufttemperatur und relativer Feuchte wird intern der **Taupunkt** als Maß für den tatsächlichen Feuchtegehalt der Luft abgeleitet. Dadurch werden beispielsweise 90 % rF bei kalter Luft nicht mit schwüler Sommerluft gleichgesetzt. Die warme Feuchtewirkung wird erst mit passender Lufttemperatur relevant und bleibt eine transparente Komfortheuristik, kein offizieller Heat-Index.
+Für warm-feuchte Luft wird nicht mehr nur die relative Luftfeuchtigkeit betrachtet. Liefert der Weather-Provider einen plausiblen **Taupunkt**, wird dieser ab v0.4.2 bevorzugt; andernfalls berechnet JackenBerater ihn weiterhin selbst aus Lufttemperatur und relativer Feuchte. Dadurch werden beispielsweise 90 % rF bei kalter Luft nicht mit schwüler Sommerluft gleichgesetzt. Die warme Feuchtewirkung wird erst mit passender Lufttemperatur relevant und bleibt eine transparente Komfortheuristik, kein offizieller Heat-Index.
 
 Das Lernmodell besitzt dafür getrennte kompakte Kanäle für **warm-feuchte/Schwüle-Empfindlichkeit** und den deutlich kleineren **kalt-feuchten Effekt**. Weil es dafür keine Startfrage und keinen persönlichen Setup-Prior gibt, dürfen diese Wetterkanäle bereits ab der ersten klar relevanten Bewertung vorsichtig eigene Evidenz sammeln. Feedback kann diese Faktoren korrigieren, ohne trockene Wetterlagen zu verschieben. Bei einer klar schwülen Situation darf selbst `Pullover + keine Jacke + zu warm` zuerst die Feuchteempfindlichkeit lernen, statt pauschal die Pullovergrenze für alle Wetterlagen zu verändern.
+
+### Regen / Nässe / Wind-Kombination ab v0.4.2
+
+Der bisherige Regen-Kälteeffekt bleibt erhalten, wird aber um eine eigene, kompakte **Nässe-Personalisierung** ergänzt. Bestehende Profile starten dafür neutral; alle bereits gelernten Jacken-, Pullover-, Wind-, Saison-, Feuchte-, Solar-, Transition- und Transientwerte bleiben unverändert. Feedback unter klar relevanter Nässe kann den Nässeeffekt separat verstärken oder abschwächen.
+
+Wind und Nässe bleiben einzelne lernbare Ursachen. Wenn beide gleichzeitig thermisch relevant sind, kommt zusätzlich eine konservativ begrenzte Wechselwirkung hinzu. Sie basiert auf den bereits personalisierten Wind- und Nässewerten und bekommt **keinen eigenen Lernregler**. Fehlt Wind oder Nässe, ist die Wechselwirkung automatisch null; bei warmen Bedingungen verschwindet sie ebenfalls mit dem bereits temperaturabhängigen Windmalus. Eine bloße zukünftige Regenwahrscheinlichkeit macht die aktuelle Situation nicht thermisch nass – dafür zählen aktueller Niederschlag beziehungsweise der jeweilige nahe Forecastpunkt.
 
 ### Sonne / Strahlungspotenzial
 
@@ -82,7 +88,7 @@ Die normale Nutzerkarte zeigt die verfügbare relative Luftfeuchte zusätzlich z
 
 Ein materiell aktiver Feuchte-/Solar-Spezialist mit noch weniger als drei eigenen Evidenzpunkten hält eine sonst vollständig ausgeblendete stabile Empfehlung mindestens kompakt erreichbar, damit der neue Kanal überhaupt gezielt Feedback sammeln kann. Reines Feedback zum **späteren Jackenwechsel** (`PHASE_LATER`) bewertet dagegen ausschließlich die betreffende Jackengrenze und verändert Feuchte-/Solarlernen nicht.
 
-Nach einem Upgrade von v0.4.0 kann der angezeigte **Lernfortschritt leicht sinken**. Das ist kein Verlust alter Lerndaten: v0.4.1 erweitert die Breitenmetrik um Warmfeuchte, Kaltfeuchte und Solar, die bei bestehenden Profilen naturgemäß zunächst noch keine eigene Evidenz besitzen.
+Nach einem Upgrade kann der angezeigte **Lernfortschritt leicht sinken**. Das ist kein Verlust alter Lerndaten: v0.4.1 ergänzte Warmfeuchte, Kaltfeuchte und Solar; v0.4.2 ergänzt Nässe als weiteren echten Spezialkanal. Bestehende Evidenz und gelernte Werte werden dabei nicht zurückgesetzt.
 
 ## Pullover / Midlayer ab v0.4.0
 
@@ -125,7 +131,7 @@ title: Jacke heute
 
 Bei vollständig YAML-verwaltetem Lovelace muss die Ressource manuell eingetragen werden:
 
-`/jackenberater/frontend/jackenberater-card.js?v=0.4.1&ui=18`
+`/jackenberater/frontend/jackenberater-card.js?v=0.4.2&ui=19`
 
 Nach einem JackenBerater-Update sollte die Lovelace-Seite einmal vollständig neu geladen werden. Bereits registrierte Browser-Custom-Elements können innerhalb derselben JavaScript-Session technisch nicht durch eine neu geladene Klasse ersetzt werden; der versionsgebundene Ressourcenpfad verhindert dabei normale Cache-Probleme.
 

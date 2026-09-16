@@ -7,7 +7,7 @@ const context = {
   console,
   setInterval,
   clearInterval,
-  setTimeout,
+  setTimeout: (fn, ms) => { const timer = setTimeout(fn, ms); timer.unref?.(); return timer; },
   clearTimeout,
   Date,
   HTMLElement: class {},
@@ -119,6 +119,8 @@ assert.ok(Card, "jackenberater-card must register itself");
 
   assert.match(source, /this\._autoShared = Boolean\(profiles\?\.shared_account\)/, "shared HA accounts must switch the card automatically");
   assert.match(source, /Simulated profile values may affect display only/, "simulation must remain display-only");
+  assert.match(source, /const JB_SESSION_OPEN_DELAY_MS = 1300;/, "details session must use the 1.3 s accidental-tap guard");
+  assert.match(source, /const JB_AUTO_COLLAPSE_MS = 5 \* 60 \* 1000;/, "open panels must auto-collapse after five idle minutes");
   assert.match(source, /unusualDay:\s*"Today was unusual/, "English unusual-day label must exist");
 
   const hiddenCard = new Card();
@@ -225,6 +227,77 @@ assert.ok(Card, "jackenberater-card must register itself");
   assert.equal(exclusiveCard._open, false, "opening Info must close the details panel");
   assert.equal(exclusiveCard._phasePending, null, "switching to Info must close an in-progress details subpanel");
   assert.equal(exclusiveCard._notice, "", "switching to Info must clear details-only notices");
+
+  // v0.4.2: panel lifetime is based on inactivity, not time since first open.
+  const idleCard = new Card();
+  idleCard._render = () => {};
+  idleCard._open = true;
+  idleCard._infoOpen = false;
+  idleCard._resetAutoCollapseTimer();
+  const firstIdleTimer = idleCard._autoCollapseTimer;
+  assert.ok(firstIdleTimer, "an open details panel must own an inactivity timer");
+  idleCard._notePanelActivity();
+  assert.ok(idleCard._autoCollapseTimer, "activity must restart the inactivity timer");
+  assert.notEqual(idleCard._autoCollapseTimer, firstIdleTimer, "activity must replace the previous five-minute timer");
+  clearTimeout(idleCard._autoCollapseTimer);
+  idleCard._autoCollapseTimer = null;
+
+  // A stale mutation flight from an obsolete config/profile/generation must
+  // not suppress autocollapse in the current context. A current-owner flight
+  // still postpones collapse until that write settles.
+  const collapseSetTimeout = context.setTimeout;
+  let collapseCallback = null;
+  context.setTimeout = (fn, _ms) => { collapseCallback = fn; return 123; };
+
+  const staleFlightCard = new Card();
+  staleFlightCard._render = () => {};
+  staleFlightCard._config = { type: "custom:jackenberater-card", entry_id: "entry-new" };
+  staleFlightCard._selectedProfile = "profile-new";
+  staleFlightCard._requestGeneration = 8;
+  staleFlightCard._open = true;
+  staleFlightCard._beginMutationFlight("maintenance");
+  staleFlightCard._mutationFlights.get("maintenance").owner = {
+    generation: 7, entry: "entry-old", profile: "profile-old",
+  };
+  assert.equal(staleFlightCard._hasCurrentMutationFlight(), false, "stale mutation flights must not belong to the current card owner");
+  staleFlightCard._resetAutoCollapseTimer();
+  assert.ok(collapseCallback, "autocollapse callback must be armed");
+  collapseCallback();
+  assert.equal(staleFlightCard._open, false, "stale mutation flights must not keep the new context open");
+
+  const currentFlightCard = new Card();
+  currentFlightCard._render = () => {};
+  currentFlightCard._config = { type: "custom:jackenberater-card", entry_id: "entry-current" };
+  currentFlightCard._selectedProfile = "profile-current";
+  currentFlightCard._requestGeneration = 4;
+  currentFlightCard._open = true;
+  currentFlightCard._beginMutationFlight("feedback");
+  assert.equal(currentFlightCard._hasCurrentMutationFlight(), true, "current-owner mutation flight must postpone collapse");
+  collapseCallback = null;
+  currentFlightCard._resetAutoCollapseTimer();
+  const currentCollapseCallback = collapseCallback;
+  assert.ok(currentCollapseCallback);
+  currentCollapseCallback();
+  assert.equal(currentFlightCard._open, true, "a current mutation flight must keep the panel open");
+  currentFlightCard._autoCollapseTimer = null;
+  context.setTimeout = collapseSetTimeout;
+
+  // Opening and immediately closing details must cancel the delayed session.
+  const accidentalCard = new Card();
+  accidentalCard._config = { type: "custom:jackenberater-card" };
+  accidentalCard._preview = { profile: { setup_complete: true }, recommendation: { simulation_active: false } };
+  accidentalCard._render = () => {};
+  let accidentalOpenCalls = 0;
+  accidentalCard._send = async (type) => {
+    if (type === "jackenberater/open_session") accidentalOpenCalls += 1;
+    return { session: null, recommendation: accidentalCard._preview.recommendation, feedback: [] };
+  };
+  await accidentalCard._openAdvice();
+  assert.ok(accidentalCard._detailSessionTimer, "opening details must arm the 1.3 s session guard");
+  await accidentalCard._openAdvice();
+  assert.equal(accidentalCard._open, false);
+  assert.equal(accidentalCard._detailSessionTimer, null, "closing inside the guard must cancel session creation");
+  assert.equal(accidentalOpenCalls, 0, "an accidental open/close must not reach the backend");
 
   // A profile deleted while a wall tablet is open must invalidate the local
   // selection instead of getting stuck on profile_not_found until reload.
@@ -434,7 +507,10 @@ assert.ok(Card, "jackenberater-card must register itself");
     return { session: null, recommendation: { reasons: [] }, feedback: [] };
   };
   await sharedReadOnlyCard._openAdvice();
-  assert.equal(sharedOpenCalls, 1, "shared tablet details must open a profile-scoped session");
+  assert.equal(sharedOpenCalls, 0, "opening details must not create a session before the 1.3 s accidental-tap guard");
+  sharedReadOnlyCard._cancelDetailSessionTimer();
+  await sharedReadOnlyCard._loadAdviceSession();
+  assert.equal(sharedOpenCalls, 1, "an intentionally open shared detail panel must create a profile-scoped session");
   assert.equal(sharedReadOnlyCard._session, null, "shared session internals must stay server-side");
   assert.equal(sharedReadOnlyCard._open, true, "shared tablet may open details");
   const sharedInfo = sharedReadOnlyCard._infoPanel(
@@ -765,7 +841,9 @@ assert.ok(Card, "jackenberater-card must register itself");
     if (type === "jackenberater/open_session") return openA.promise;
     throw new Error(`unexpected ${type}`);
   };
-  const staleOpen = openRaceCard._openAdvice();
+  await openRaceCard._openAdvice();
+  openRaceCard._cancelDetailSessionTimer();
+  const staleOpen = openRaceCard._loadAdviceSession();
   await Promise.resolve();
   openRaceCard._requestGeneration += 1;
   openRaceCard._selectedProfile = "B";
@@ -1090,7 +1168,9 @@ assert.ok(Card, "jackenberater-card must register itself");
     }
     throw new Error(`unexpected ${type}`);
   };
-  const oldOpenRequest = oldOpenAfterRefreshCard._openAdvice();
+  await oldOpenAfterRefreshCard._openAdvice();
+  oldOpenAfterRefreshCard._cancelDetailSessionTimer();
+  const oldOpenRequest = oldOpenAfterRefreshCard._loadAdviceSession();
   await Promise.resolve();
   await oldOpenAfterRefreshCard._refresh();
   assert.equal(oldOpenAfterRefreshCard._preview?.recommendation?.marker, "newer");
@@ -1134,6 +1214,8 @@ assert.ok(Card, "jackenberater-card must register itself");
   const oldRefreshRequest = oldRefreshAfterOpenCard._refresh();
   await Promise.resolve();
   await oldRefreshAfterOpenCard._openAdvice();
+  oldRefreshAfterOpenCard._cancelDetailSessionTimer();
+  await oldRefreshAfterOpenCard._loadAdviceSession();
   assert.equal(oldRefreshAfterOpenCard._preview?.recommendation?.marker, "newer-open");
   stalePreviewResponse.resolve({
     profile: { setup_complete: true },
@@ -1213,6 +1295,8 @@ assert.ok(Card, "jackenberater-card must register itself");
     throw new Error(`unexpected ${type}`);
   };
   await partialRevisionCard._openAdvice();
+  partialRevisionCard._cancelDetailSessionTimer();
+  await partialRevisionCard._loadAdviceSession();
   assert.equal(partialRevisionCard._preview?.recommendation?.marker, "action-new");
   assert.equal(partialRevisionCard._preview?.profile?.total_feedback, 11, "action may apply returned profile metadata opportunistically");
   assert.equal(partialRevisionCard._profileRevision, "r:1", "open_session must not mark a partial action snapshot as fully applied");

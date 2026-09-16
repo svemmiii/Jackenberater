@@ -653,8 +653,8 @@ def test_current_work_weather_is_used_inside_actual_work_window():
     assert rec.stay_context == "work"
 
 
-def test_work_horizon_extends_home_timeline_before_building_recommendation():
-    """A later work point must extend the normal timeline before evaluation."""
+def test_distant_work_does_not_expand_horizon_before_three_hour_lead():
+    """A distant shift must not pull work into advice before the 3 h gate."""
     home = point(28)
     home_forecast = [
         point(0 if hour == 13 else 28, dt=NOW + timedelta(hours=hour))
@@ -695,10 +695,32 @@ def test_work_horizon_extends_home_timeline_before_building_recommendation():
         api._recommendation(types.SimpleNamespace(states=None), entry, runtime, model)
     )
 
-    assert rec.horizon_hours >= 14
-    assert rec.jacket_later == const.JACKET_WINTER
-    assert rec.later_at == NOW + timedelta(hours=13)
-    assert rec.min_effective_c < 5
+    assert rec.horizon_hours == const.DEFAULT_FORECAST_HOURS
+    assert rec.jacket_later == const.JACKET_NONE
+    assert rec.work_context is False
+    assert rec.work_start is None
+    assert rec.work_end is None
+
+
+def test_work_context_gate_uses_actual_start_not_planning_buffer():
+    start = NOW + timedelta(hours=3)
+    actual = [(start, start + timedelta(hours=8))]
+    planning = [(start - timedelta(minutes=30), start + timedelta(hours=8, minutes=30))]
+    gated_actual, gated_planning = api._gate_work_context_windows(NOW, actual, planning)
+    assert gated_actual == actual
+    assert gated_planning == planning
+
+    late_start = NOW + timedelta(hours=3, seconds=1)
+    late_actual = [(late_start, late_start + timedelta(hours=8))]
+    late_planning = [(late_start - timedelta(minutes=30), late_start + timedelta(hours=8, minutes=30))]
+    assert api._gate_work_context_windows(NOW, late_actual, late_planning) == ([], [])
+
+
+def test_work_context_gate_keeps_running_night_shift_across_midnight():
+    now = datetime(2026, 9, 2, 1, 0, tzinfo=timezone.utc)
+    actual = [(datetime(2026, 9, 1, 22, 0, tzinfo=timezone.utc), datetime(2026, 9, 2, 6, 0, tzinfo=timezone.utc))]
+    planning = [(actual[0][0] - timedelta(minutes=30), actual[0][1] + timedelta(minutes=30))]
+    assert api._gate_work_context_windows(now, actual, planning) == (actual, planning)
 
 
 def test_missing_planned_work_forecast_is_reported_as_incomplete():
@@ -924,9 +946,9 @@ def test_active_work_weather_is_used_even_when_home_weather_is_unavailable():
 
 def test_multiple_work_windows_display_the_window_that_drives_later_advice():
     home = point(20)
-    first = (NOW + timedelta(hours=1), NOW + timedelta(hours=3))
-    second = (NOW + timedelta(hours=10), NOW + timedelta(hours=14))
-    later_at = NOW + timedelta(hours=12)
+    first = (NOW + timedelta(minutes=15), NOW + timedelta(hours=1))
+    second = (NOW + timedelta(hours=2), NOW + timedelta(hours=4))
+    later_at = NOW + timedelta(hours=2, minutes=30)
     work_forecast = [point(5, dt=later_at)]
     entry = types.SimpleNamespace(
         data={

@@ -13,6 +13,7 @@ class WeatherPoint:
     dt: datetime
     temperature_c: float
     humidity: float | None = None
+    dew_point_c: float | None = None
     wind_kmh: float | None = None
     gust_kmh: float | None = None
     cloud_coverage: float | None = None
@@ -38,6 +39,9 @@ class ThermalResult:
     # re-deriving historical weather from a newer personal model.
     base_solar_gain_c: float = 0.0
     base_humidity_adjustment_c: float = 0.0
+    base_wet_penalty_c: float = 0.0
+    wet_penalty_c: float = 0.0
+    wet_wind_synergy_c: float = 0.0
     dew_point_c: float | None = None
     seasonal_adjustment_c: float = 0.0
     reasons: list[str] = field(default_factory=list)
@@ -71,6 +75,9 @@ class Recommendation:
     current_base_humidity_adjustment_c: float = 0.0
     current_solar_gain_c: float = 0.0
     current_base_solar_gain_c: float = 0.0
+    current_base_wet_penalty_c: float = 0.0
+    current_wet_penalty_c: float = 0.0
+    current_wet_wind_synergy_c: float = 0.0
     later_temperature_c: float | None = None
     later_wind_kmh: float | None = None
     later_gust_kmh: float | None = None
@@ -83,6 +90,9 @@ class Recommendation:
     later_base_humidity_adjustment_c: float | None = None
     later_solar_gain_c: float | None = None
     later_base_solar_gain_c: float | None = None
+    later_base_wet_penalty_c: float | None = None
+    later_wet_penalty_c: float | None = None
+    later_wet_wind_synergy_c: float | None = None
     work_context: bool = False
     work_weather_available: bool = True
     work_jacket: str | None = None

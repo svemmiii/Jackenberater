@@ -241,6 +241,9 @@ function jbEscape(value) {
     .replaceAll('"', "&quot;");
 }
 
+const JB_SESSION_OPEN_DELAY_MS = 1300;
+const JB_AUTO_COLLAPSE_MS = 5 * 60 * 1000;
+
 class JackenBeraterCard extends HTMLElement {
   setConfig(config) {
     // Invalidate every in-flight async result from the previous config/profile.
@@ -256,8 +259,12 @@ class JackenBeraterCard extends HTMLElement {
     const restartRevisionTimer = Boolean(this.isConnected);
     if (this._revisionTimer) clearInterval(this._revisionTimer);
     if (this._stateRefreshTimer) clearTimeout(this._stateRefreshTimer);
+    if (this._detailSessionTimer) clearTimeout(this._detailSessionTimer);
+    if (this._autoCollapseTimer) clearTimeout(this._autoCollapseTimer);
     this._revisionTimer = null;
     this._stateRefreshTimer = null;
+    this._detailSessionTimer = null;
+    this._autoCollapseTimer = null;
     this._config = { ...config };
     this._open = false;
     this._preview = null;
@@ -316,6 +323,14 @@ class JackenBeraterCard extends HTMLElement {
   }
 
   connectedCallback() {
+    if (!this._panelActivityHandler) {
+      this._panelActivityHandler = () => this._notePanelActivity();
+      this.addEventListener?.("pointerdown", this._panelActivityHandler, true);
+      this.addEventListener?.("keydown", this._panelActivityHandler, true);
+      this.addEventListener?.("wheel", this._panelActivityHandler, true);
+      this.addEventListener?.("touchmove", this._panelActivityHandler, true);
+      this.addEventListener?.("scroll", this._panelActivityHandler, true);
+    }
     if (!this._timer) {
       this._timer = setInterval(() => this._refresh(), 5 * 60 * 1000);
     }
@@ -332,9 +347,21 @@ class JackenBeraterCard extends HTMLElement {
     if (this._timer) clearInterval(this._timer);
     if (this._revisionTimer) clearInterval(this._revisionTimer);
     if (this._stateRefreshTimer) clearTimeout(this._stateRefreshTimer);
+    if (this._detailSessionTimer) clearTimeout(this._detailSessionTimer);
+    if (this._autoCollapseTimer) clearTimeout(this._autoCollapseTimer);
+    if (this._panelActivityHandler) {
+      this.removeEventListener?.("pointerdown", this._panelActivityHandler, true);
+      this.removeEventListener?.("keydown", this._panelActivityHandler, true);
+      this.removeEventListener?.("wheel", this._panelActivityHandler, true);
+      this.removeEventListener?.("touchmove", this._panelActivityHandler, true);
+      this.removeEventListener?.("scroll", this._panelActivityHandler, true);
+    }
     this._timer = null;
     this._revisionTimer = null;
     this._stateRefreshTimer = null;
+    this._detailSessionTimer = null;
+    this._autoCollapseTimer = null;
+    this._panelActivityHandler = null;
     this._revisionCheckingGeneration = null;
     this._refreshPending = false;
   }
@@ -584,6 +611,15 @@ class JackenBeraterCard extends HTMLElement {
     );
   }
 
+  _hasCurrentMutationFlight() {
+    if (!(this._mutationFlights instanceof Map)) return false;
+    const owner = this._mutationFlightOwner();
+    for (const flight of this._mutationFlights.values()) {
+      if (flight && this._sameMutationFlightOwner(flight.owner, owner)) return true;
+    }
+    return false;
+  }
+
   _beginViewRequest() {
     // One monotonically ordered stream for every async operation that may
     // replace the visible recommendation/session context. A later-started
@@ -718,54 +754,46 @@ class JackenBeraterCard extends HTMLElement {
   }
 
 
-  _toggleInfo() {
-    const openingInfo = !this._infoOpen;
-    this._infoOpen = openingInfo;
-    if (openingInfo) {
-      this._open = false;
-      this._phasePending = null;
-      this._notice = "";
-    }
-    this._render();
+  _cancelDetailSessionTimer() {
+    if (this._detailSessionTimer) clearTimeout(this._detailSessionTimer);
+    this._detailSessionTimer = null;
   }
 
-  async _openAdvice() {
-    if (this._sharedMode() && !this._selectedProfile) {
-      this._render();
-      return;
-    }
-    // Details and the information panel are mutually exclusive. Opening the
-    // recommendation details always closes Info first.
-    if (!this._open) this._infoOpen = false;
-    // Simulated profile values may affect display only. Never create a session.
-    if (this._preview?.recommendation?.simulation_active) {
-      this._open = !this._open;
-      this._phasePending = null;
-      this._notice = "";
-      this._manualFeedbackVisible = false;
-      this._render();
-      return;
-    }
-    if (this._preview?.profile && !this._preview.profile.setup_complete) {
-      this._notice = "";
-      this._open = true;
-      this._render();
-      return;
-    }
-    if (this._open) {
+  _resetAutoCollapseTimer() {
+    if (this._autoCollapseTimer) clearTimeout(this._autoCollapseTimer);
+    this._autoCollapseTimer = null;
+    if (!this._open && !this._infoOpen) return;
+    this._autoCollapseTimer = setTimeout(() => {
+      this._autoCollapseTimer = null;
+      // Never collapse in the middle of an async write owned by the *current*
+      // config/profile/generation. Obsolete flights from a previous owner may
+      // still be waiting on the backend, but they must not keep a newly selected
+      // profile or config open forever.
+      if (this._hasCurrentMutationFlight()) {
+        this._resetAutoCollapseTimer();
+        return;
+      }
+      this._cancelDetailSessionTimer();
       this._open = false;
+      this._infoOpen = false;
       this._phasePending = null;
+      this._manualFeedbackVisible = false;
+      this._session = null;
       this._notice = "";
       this._render();
-      return;
-    }
+    }, JB_AUTO_COLLAPSE_MS);
+  }
 
-    this._notice = "";
-    this._manualFeedbackVisible = false;
-    this._open = true;
+  _notePanelActivity() {
+    if (this._open || this._infoOpen) this._resetAutoCollapseTimer();
+  }
+
+  async _loadAdviceSession() {
+    if (!this._open) return;
     const context = this._captureActionContext();
     const viewRequestGeneration = this._beginViewRequest();
     const viewIsCurrent = () => (
+      this._open &&
       this._actionContextIsCurrent(context) &&
       this._viewRequestIsCurrent(viewRequestGeneration)
     );
@@ -786,12 +814,83 @@ class JackenBeraterCard extends HTMLElement {
     if (viewIsCurrent()) {
       this._render();
       if (fullSnapshotRefreshNeeded) {
-        // Apply profile metadata/diagnostics/directory for the seen revision; do
-        // not wait for the normal five-minute fallback.
         this._lastRefreshAttemptAt = 0;
         this._scheduleStateRefresh();
       }
     }
+  }
+
+  _scheduleAdviceSession() {
+    this._cancelDetailSessionTimer();
+    this._detailSessionTimer = setTimeout(() => {
+      this._detailSessionTimer = null;
+      if (this._open) void this._loadAdviceSession();
+    }, JB_SESSION_OPEN_DELAY_MS);
+  }
+
+  _toggleInfo() {
+    const openingInfo = !this._infoOpen;
+    this._infoOpen = openingInfo;
+    if (openingInfo) {
+      this._cancelDetailSessionTimer();
+      this._open = false;
+      this._session = null;
+      this._phasePending = null;
+      this._notice = "";
+      this._resetAutoCollapseTimer();
+    } else {
+      this._resetAutoCollapseTimer();
+    }
+    this._render();
+  }
+
+  async _openAdvice() {
+    if (this._sharedMode() && !this._selectedProfile) {
+      this._render();
+      return;
+    }
+    // Details and the information panel are mutually exclusive. Opening the
+    // recommendation details always closes Info first.
+    if (!this._open) this._infoOpen = false;
+
+    // Simulated profile values may affect display only. Never create a session.
+    if (this._preview?.recommendation?.simulation_active) {
+      this._cancelDetailSessionTimer();
+      this._open = !this._open;
+      this._phasePending = null;
+      this._notice = "";
+      this._manualFeedbackVisible = false;
+      this._resetAutoCollapseTimer();
+      this._render();
+      return;
+    }
+    if (this._preview?.profile && !this._preview.profile.setup_complete) {
+      this._notice = "";
+      this._open = true;
+      this._resetAutoCollapseTimer();
+      this._render();
+      return;
+    }
+    if (this._open) {
+      this._cancelDetailSessionTimer();
+      this._open = false;
+      this._session = null;
+      this._phasePending = null;
+      this._notice = "";
+      this._resetAutoCollapseTimer();
+      this._render();
+      return;
+    }
+
+    this._notice = "";
+    this._manualFeedbackVisible = false;
+    this._session = null;
+    this._open = true;
+    this._resetAutoCollapseTimer();
+    this._render();
+    // Tiny accidental-tap guard: the panel opens instantly, but only a detail
+    // view that remains open for 1.3 s becomes a learning opportunity.
+    this._scheduleAdviceSession();
   }
 
   async _saveSetup() {
@@ -862,6 +961,10 @@ class JackenBeraterCard extends HTMLElement {
   }
 
   async _prepareManualFeedback() {
+    // An explicit feedback action is already proof that this was not an
+    // accidental tap. Cancel the delayed passive-open request so it cannot race
+    // the immediate current-session request below.
+    this._cancelDetailSessionTimer();
     // Manual feedback means “rate what I am seeing now”. Always refresh the
     // recommendation session first so a detail panel left open for hours cannot
     // train on stale weather/context from when it was originally opened.
@@ -1479,6 +1582,9 @@ class JackenBeraterCard extends HTMLElement {
       this._seenProfileRevision = null;
       this._persistSharedProfile();
       this._setup = { cold: 3, warm: 3, wind: 3, evening: 3, pullover: 3 };
+      this._cancelDetailSessionTimer();
+      if (this._autoCollapseTimer) clearTimeout(this._autoCollapseTimer);
+      this._autoCollapseTimer = null;
       this._open = false;
       this._infoOpen = false;
       this._session = null;

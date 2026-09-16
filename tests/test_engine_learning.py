@@ -2819,3 +2819,475 @@ def test_v041_untrained_material_solar_specialist_cannot_be_hidden():
         max_horizon_hours=9,
     )
     assert learned_rec.display_mode == const.DISPLAY_HIDDEN
+
+
+def test_v042_provider_dew_point_is_preferred_over_rh_fallback():
+    # Prefer a plausible provider dew point even when it differs modestly from
+    # the value reconstructed from rounded RH. 24 C / 60% RH derives roughly
+    # 15.8 C, so 18 C is a meaningful but still plausible provider refinement.
+    fallback = engine._humidity_adjustment(24.0, 60.0)
+    provider = engine._humidity_adjustment(24.0, 60.0, dew_point_c=18.0)
+    assert provider > fallback
+    # Clearly impossible provider values still fall back to RH-derived dew point.
+    invalid = engine._humidity_adjustment(24.0, 60.0, dew_point_c=30.0)
+    assert invalid == pytest.approx(fallback)
+
+
+def test_v042_provider_dew_point_falls_back_when_it_grossly_contradicts_rh():
+    # 17.9 C / 20% RH implies a dew point around -5.4 C. A simultaneous
+    # provider dew point of 17.8 C is internally contradictory and must not
+    # override the RH-derived fallback.
+    dew = engine._preferred_dew_point_c(17.9, 20.0, 17.8)
+    assert dew == pytest.approx(engine._dew_point_c(17.9, 20.0))
+    assert dew == pytest.approx(-5.41, abs=0.06)
+
+
+def test_v042_provider_dew_point_keeps_small_normal_disagreement_with_rh():
+    derived = engine._dew_point_c(20.0, 50.0)
+    assert derived is not None
+    provider = derived + 2.0
+    assert engine._preferred_dew_point_c(20.0, 50.0, provider) == pytest.approx(provider)
+
+
+def test_v042_provider_dew_point_remains_usable_without_rh():
+    assert engine._preferred_dew_point_c(20.0, None, 12.5) == pytest.approx(12.5)
+
+def test_v042_wet_specialist_learns_separately_and_only_changes_wet_weather():
+    model = PersonalModel.from_answers(3, 3, 3, 3, 3)
+    dry = point(0, 8.0, condition="cloudy", wind_kmh=15)
+    wet = point(0, 8.0, condition="rainy", wind_kmh=15)
+    dry_before = engine.assess_point(dry, model).effective_temperature_c
+    wet_before = engine.assess_point(wet, model).effective_temperature_c
+    threshold_before = model.light_threshold_delta_c
+
+    learned = learning.apply_feedback(
+        model,
+        rating=const.FEEDBACK_TOO_COLD,
+        jacket=const.JACKET_LIGHT,
+        effective_c=wet_before,
+        wet_base_penalty_c=0.9,
+        wet_penalty_c=0.9,
+        learning_contract={
+            "bootstrap_mode": False,
+            "humidity_warm_learning": False,
+            "humidity_cold_learning": False,
+            "solar_learning": False,
+            "wet_learning": True,
+            "wet_relevance": 0.9 / 1.4,
+            "environment_specialist_share": 1.0,
+            "wind_learning": False,
+            "transition_learning": False,
+        },
+    )
+    assert learned is True
+    assert model.wet_stat.weight_sum > 0.0
+    assert model.wet_bias_c > 0.0
+    assert model.light_threshold_delta_c == threshold_before
+    assert engine.assess_point(wet, model).effective_temperature_c < wet_before
+    assert engine.assess_point(dry, model).effective_temperature_c == dry_before
+
+
+def test_v042_wet_wind_synergy_is_bounded_monotone_and_needs_both_inputs():
+    assert engine._wet_wind_synergy(0.0, 1.4) == 0.0
+    assert engine._wet_wind_synergy(5.0, 0.0) == 0.0
+    baseline = engine._wet_wind_synergy(2.55, 0.9)
+    assert baseline == pytest.approx(0.3991, abs=0.001)
+    assert engine._wet_wind_synergy(4.0, 0.9) > baseline
+    assert engine._wet_wind_synergy(2.55, 1.4) > baseline
+    assert engine._wet_wind_synergy(100.0, 100.0) == pytest.approx(0.8)
+
+
+def test_v042_current_precipitation_probability_alone_is_not_current_wetness():
+    probability_only = point(
+        0, 8.0,
+        condition="cloudy",
+        precipitation_probability=95.0,
+        precipitation_mm=0.0,
+    )
+    assert engine._base_wet_penalty(probability_only, allow_probability=False) == 0.0
+
+    # At a future forecast instant, an actual predicted amount plus high
+    # probability may represent wetness at that future point.
+    future_wet = point(
+        1, 8.0,
+        condition="cloudy",
+        precipitation_probability=95.0,
+        precipitation_mm=1.0,
+    )
+    assert engine._base_wet_penalty(future_wet, allow_probability=True) == pytest.approx(0.6)
+
+
+def test_v042_boundary_only_feedback_never_trains_wet_specialist():
+    model = PersonalModel.from_answers(3, 3, 3, 3, 3)
+    before_bias = model.wet_bias_c
+    before_weight = model.wet_stat.weight_sum
+    learning.apply_feedback(
+        model,
+        rating=const.FEEDBACK_TOO_COLD,
+        jacket=const.JACKET_WARM,
+        effective_c=8.0,
+        boundary_only=True,
+        wet_base_penalty_c=1.4,
+        wet_penalty_c=1.4,
+        learning_contract={
+            "bootstrap_mode": False,
+            "humidity_warm_learning": False,
+            "humidity_cold_learning": False,
+            "solar_learning": False,
+            "wet_learning": True,
+            "wet_relevance": 1.0,
+            "environment_specialist_share": 1.0,
+            "wind_learning": False,
+            "transition_learning": False,
+        },
+    )
+    assert model.wet_bias_c == before_bias
+    assert model.wet_stat.weight_sum == before_weight
+
+
+def test_v042_pullover_result_preserves_wet_diagnostics():
+    model = PersonalModel.from_answers(3, 3, 3, 3, 3)
+    result = engine.assess_point(point(0, 8.0, condition="rainy", wind_kmh=20), model)
+    pullover = engine._result_with_pullover(result, model)
+    assert pullover.base_wet_penalty_c == result.base_wet_penalty_c
+    assert pullover.wet_penalty_c == result.wet_penalty_c
+    assert pullover.wet_wind_synergy_c == result.wet_wind_synergy_c
+
+
+def _v042_weak_summer_model(*, own_bias=0.0, own_evidence=0.0, cycle=2026):
+    model = PersonalModel.from_answers(3, 3, 3, 3, 3)
+    model.summer_season_initialized = True
+    model.summer_season_cycle_id = cycle
+    model.summer_bias_c = own_bias
+    if own_evidence:
+        model.summer_season_stat = learning.RunningStat(
+            samples=max(1, int(own_evidence)), weight_sum=own_evidence
+        )
+    model.spring_season_initialized = True
+    model.spring_bias_c = 1.0
+    model.spring_season_stat = learning.RunningStat(samples=4, weight_sum=4.0)
+    return model
+
+
+def test_v042_returning_first_year_season_with_zero_evidence_is_rescued_from_predecessor_once():
+    model = _v042_weak_summer_model()
+    when = datetime(2027, 7, 15, 12, tzinfo=timezone.utc)
+    assert learning._prepare_season_bootstrap(model, when) is True
+    assert model.summer_bias_c == pytest.approx(1.0)
+    assert model.summer_season_stat.weight_sum == 0.0  # evidence is never copied
+    assert model.summer_season_rescue_done is True
+
+    # Later changes to the predecessor never reseed/rescue the same season again.
+    model.spring_bias_c = 2.0
+    assert learning._prepare_season_bootstrap(model, when + timedelta(days=1)) is False
+    assert model.summer_bias_c == pytest.approx(1.0)
+
+
+def test_v042_returning_weak_season_blends_own_evidence_with_predecessor():
+    model = _v042_weak_summer_model(own_bias=0.2, own_evidence=1.0)
+    assert learning._prepare_season_bootstrap(
+        model, datetime(2027, 7, 15, 12, tzinfo=timezone.utc)
+    ) is True
+    # 1 / 2 evidence -> half own anchor, half well-learned predecessor.
+    assert model.summer_bias_c == pytest.approx(0.6)
+    assert model.summer_season_stat.weight_sum == pytest.approx(1.0)
+
+
+@pytest.mark.parametrize(
+    ("when", "previous_name", "next_name", "stored_cycle"),
+    [
+        (datetime(2027, 2, 14, 12, tzinfo=timezone.utc), "winter", "spring", 2026),
+        (datetime(2027, 5, 17, 12, tzinfo=timezone.utc), "spring", "summer", 2026),
+        (datetime(2027, 8, 17, 12, tzinfo=timezone.utc), "summer", "autumn", 2026),
+        (datetime(2027, 11, 16, 12, tzinfo=timezone.utc), "autumn", "winter", 2026),
+    ],
+)
+def test_v042_returning_weak_next_season_is_rescued_when_transition_blend_starts(
+    when, previous_name, next_name, stored_cycle
+):
+    model = PersonalModel.from_answers(3, 3, 3, 3, 3)
+    setattr(model, f"{previous_name}_season_initialized", True)
+    setattr(model, f"{previous_name}_bias_c", 1.0)
+    setattr(
+        model,
+        f"{previous_name}_season_stat",
+        learning.RunningStat(samples=4, weight_sum=4.0),
+    )
+    setattr(model, f"{next_name}_season_initialized", True)
+    setattr(model, f"{next_name}_bias_c", -1.0)
+    setattr(model, f"{next_name}_season_cycle_id", stored_cycle)
+    setattr(model, f"{next_name}_season_rescue_done", False)
+
+    weights = learning._season_weights(when)
+    assert next_name in weights and weights[next_name] > 0.0
+    assert learning._prepare_season_bootstrap(model, when) is True
+    assert getattr(model, f"{next_name}_bias_c") == pytest.approx(1.0)
+    assert getattr(model, f"{next_name}_season_rescue_done") is True
+    assert getattr(model, f"{next_name}_season_stat").weight_sum == 0.0
+
+
+def test_v042_established_returning_season_is_never_rescued():
+    model = _v042_weak_summer_model(own_bias=0.2, own_evidence=2.0)
+    assert learning._prepare_season_bootstrap(
+        model, datetime(2027, 7, 15, 12, tzinfo=timezone.utc)
+    ) is False
+    assert model.summer_bias_c == pytest.approx(0.2)
+    assert model.summer_season_rescue_done is False
+
+
+def test_v042_legacy_profile_records_cycle_without_changing_existing_season_value():
+    model = _v042_weak_summer_model(own_bias=-0.4, own_evidence=0.0, cycle=0)
+    when = datetime(2026, 7, 15, 12, tzinfo=timezone.utc)
+    assert learning._prepare_season_bootstrap(model, when) is True
+    assert model.summer_bias_c == pytest.approx(-0.4)
+    assert model.summer_season_cycle_id == 2026
+    assert model.summer_season_rescue_done is False
+
+
+def test_v042_v041_profile_migration_adds_only_neutral_wet_and_rescue_metadata():
+    original = PersonalModel.from_answers(2, 4, 5, 2, 4)
+    original.general_offset_c = 0.7
+    original.wind_bias_c = 0.4
+    original.humidity_warm_bias_c = 0.3
+    original.solar_bias_c = -0.2
+    original.summer_bias_c = 0.6
+    original.summer_season_initialized = True
+    original.summer_season_stat.add(1.0, weight=1.5)
+    raw = original.to_dict()
+    # Simulate an actual v0.4.1 store before v0.4.2-only fields existed.
+    for key in list(raw):
+        if key in {"wet_bias_c", "wet_stat"} or key.endswith("_season_cycle_id") or key.endswith("_season_rescue_done"):
+            raw.pop(key, None)
+
+    restored = PersonalModel.from_dict(raw)
+    assert restored.general_offset_c == pytest.approx(0.7)
+    assert restored.wind_bias_c == pytest.approx(0.4)
+    assert restored.humidity_warm_bias_c == pytest.approx(0.3)
+    assert restored.solar_bias_c == pytest.approx(-0.2)
+    assert restored.summer_bias_c == pytest.approx(0.6)
+    assert restored.summer_season_stat.weight_sum == pytest.approx(1.5)
+    assert restored.wet_bias_c == 0.0
+    assert restored.wet_stat.weight_sum == 0.0
+    assert restored.summer_season_cycle_id == 0
+    assert restored.summer_season_rescue_done is False
+
+
+def test_v042_wind_and_wet_keep_separate_learning_channels_when_both_are_relevant():
+    model = PersonalModel.from_answers(3, 3, 3, 3, 3)
+    model.general_stat = learning.RunningStat(samples=12, weight_sum=12.0)
+    learning.apply_feedback(
+        model,
+        rating=const.FEEDBACK_TOO_COLD,
+        jacket=const.JACKET_LIGHT,
+        effective_c=8.0,
+        wind_kmh=20.0,
+        wind_penalty_c=2.0,
+        wet_base_penalty_c=0.9,
+        wet_penalty_c=0.9,
+        learning_contract={
+            "bootstrap_mode": False,
+            "humidity_warm_learning": False,
+            "humidity_cold_learning": False,
+            "solar_learning": False,
+            "wet_learning": True,
+            "wet_relevance": 0.65,
+            "environment_specialist_share": 1.0,
+            "wind_learning": True,
+            "transition_learning": False,
+        },
+    )
+    assert model.wind_stat.weight_sum > 0.0
+    assert model.wet_stat.weight_sum > 0.0
+    assert model.wind_bias_c > 0.0
+    assert model.wet_bias_c > 0.0
+
+@pytest.mark.parametrize(
+    ("when", "previous_name", "next_name"),
+    [
+        (datetime(2027, 2, 14, 12, tzinfo=timezone.utc), "winter", "spring"),
+        (datetime(2027, 5, 17, 12, tzinfo=timezone.utc), "spring", "summer"),
+        (datetime(2027, 8, 17, 12, tzinfo=timezone.utc), "summer", "autumn"),
+        (datetime(2027, 11, 16, 12, tzinfo=timezone.utc), "autumn", "winter"),
+    ],
+)
+def test_v042_failed_season_rescue_is_frozen_for_the_whole_return_cycle(
+    when, previous_name, next_name
+):
+    model = PersonalModel.from_answers(3, 3, 3, 3, 3)
+    previous_cycle = learning._season_cycle_id(when, previous_name)
+    next_cycle = learning._season_cycle_id(when, next_name)
+
+    setattr(model, f"{previous_name}_season_initialized", True)
+    setattr(model, f"{previous_name}_season_cycle_id", previous_cycle)
+    setattr(model, f"{previous_name}_bias_c", 1.0)
+    setattr(
+        model,
+        f"{previous_name}_season_stat",
+        learning.RunningStat(samples=2, weight_sum=1.9),
+    )
+
+    setattr(model, f"{next_name}_season_initialized", True)
+    setattr(model, f"{next_name}_season_cycle_id", next_cycle - 1)
+    setattr(model, f"{next_name}_bias_c", -1.0)
+    setattr(model, f"{next_name}_season_rescue_done", False)
+
+    # First participation in the return blend decides "no rescue": predecessor
+    # is just below the 2.0-evidence requirement. The cycle id freezes that
+    # decision for the remainder of this return cycle.
+    assert learning._prepare_season_bootstrap(model, when) is True
+    assert getattr(model, f"{next_name}_bias_c") == pytest.approx(-1.0)
+    assert getattr(model, f"{next_name}_season_rescue_done") is False
+    assert getattr(model, f"{next_name}_season_cycle_id") == next_cycle
+
+    # Simulate a perfect overlap rating: biases do not move, but both active
+    # seasonal anchors gain evidence and the predecessor crosses 2.0.
+    getattr(model, f"{previous_name}_season_stat").add(0.0, weight=0.5)
+    getattr(model, f"{next_name}_season_stat").add(0.0, weight=0.5)
+    assert getattr(model, f"{previous_name}_season_stat").weight_sum == pytest.approx(2.4)
+
+    # Same return cycle: the newly sufficient predecessor must NOT trigger a
+    # delayed rescue or an outfit-changing seasonal jump.
+    assert learning._prepare_season_bootstrap(model, when + timedelta(minutes=1)) is False
+    assert getattr(model, f"{next_name}_bias_c") == pytest.approx(-1.0)
+    assert getattr(model, f"{next_name}_season_rescue_done") is False
+
+
+def test_v042_failed_season_rescue_may_be_reconsidered_on_a_later_year():
+    when = datetime(2027, 5, 17, 12, tzinfo=timezone.utc)
+    model = PersonalModel.from_answers(3, 3, 3, 3, 3)
+    model.spring_season_initialized = True
+    model.spring_season_cycle_id = 2027
+    model.spring_bias_c = 1.0
+    model.spring_season_stat = learning.RunningStat(samples=2, weight_sum=1.9)
+    model.summer_season_initialized = True
+    model.summer_season_cycle_id = 2026
+    model.summer_bias_c = -1.0
+
+    assert learning._prepare_season_bootstrap(model, when) is True
+    assert model.summer_bias_c == pytest.approx(-1.0)
+    assert model.summer_season_cycle_id == 2027
+
+    model.spring_season_stat.add(0.0, weight=0.5)
+    assert learning._prepare_season_bootstrap(model, when + timedelta(days=1)) is False
+    assert model.summer_bias_c == pytest.approx(-1.0)
+
+    # In the next return cycle, the now well-learned predecessor may be used.
+    later = datetime(2028, 5, 17, 12, tzinfo=timezone.utc)
+    assert learning._prepare_season_bootstrap(model, later) is True
+    assert model.summer_bias_c == pytest.approx(1.0)
+    assert model.summer_season_rescue_done is True
+
+
+def test_v042_dew_point_plausibility_blend_has_no_six_kelvin_switch():
+    temp = 23.8
+    humidity = 65.0
+    derived = engine._dew_point_c(temp, humidity)
+    assert derived is not None
+
+    at_six = engine._preferred_dew_point_c(temp, humidity, derived + 6.0)
+    just_over = engine._preferred_dew_point_c(temp, humidity, derived + 6.0001)
+    assert at_six is not None and just_over is not None
+    assert abs(at_six - just_over) < 0.001
+    # In the 4..8 K plausibility band the result is a genuine blend.
+    assert derived < at_six < derived + 6.0
+
+
+def test_v042_dew_point_plausibility_uses_provider_then_smoothly_falls_back():
+    temp = 24.0
+    humidity = 60.0
+    derived = engine._dew_point_c(temp, humidity)
+    assert derived is not None
+    assert engine._preferred_dew_point_c(temp, humidity, derived + 4.0) == pytest.approx(
+        derived + 4.0
+    )
+    assert engine._preferred_dew_point_c(temp, humidity, derived + 8.0) == pytest.approx(
+        derived
+    )
+
+
+@pytest.mark.parametrize("bad_temp", [None, "bad", {}, float("inf"), float("nan")])
+def test_v042_preferred_dew_point_rejects_malformed_temperature(bad_temp):
+    assert engine._preferred_dew_point_c(bad_temp, 60.0, 12.0) is None
+
+
+def test_v042_numeric_forecast_wetness_is_continuous_at_legacy_probability_threshold():
+    model = PersonalModel.from_answers(3, 3, 3, 3, 3)
+    model.wet_bias_c = 1.5
+    below = point(
+        1,
+        19.0,
+        condition="cloudy",
+        wind_kmh=40.0,
+        precipitation_mm=0.2,
+        precipitation_probability=64.9999,
+    )
+    edge = point(
+        1,
+        19.0,
+        condition="cloudy",
+        wind_kmh=40.0,
+        precipitation_mm=0.2,
+        precipitation_probability=65.0,
+    )
+    below_result = engine.assess_point(below, model)
+    edge_result = engine.assess_point(edge, model)
+    assert abs(edge_result.effective_temperature_c - below_result.effective_temperature_c) < 0.01
+    assert edge_result.jacket == below_result.jacket
+
+
+def test_v042_numeric_wetness_ramps_smoothly_to_legacy_saturation_points():
+    def wet(amount, probability, *, allow_probability=True):
+        p = point(
+            1,
+            10.0,
+            condition="cloudy",
+            precipitation_mm=amount,
+            precipitation_probability=probability,
+        )
+        return engine._base_wet_penalty(p, allow_probability=allow_probability)
+
+    assert wet(0.0, 65.0) == 0.0
+    assert 0.0 < wet(0.1, 65.0) < 0.6
+    assert wet(0.2, 65.0) == pytest.approx(0.6)
+
+    assert wet(0.2, 45.0) == 0.0
+    assert 0.0 < wet(0.2, 55.0) < 0.6
+    assert wet(0.2, 65.0) == pytest.approx(0.6)
+
+    # Current numeric precipitation ignores future-looking probability but uses
+    # the same smooth amount ramp instead of a 0.2-mm binary switch.
+    assert 0.0 < wet(0.1, 0.0, allow_probability=False) < 0.6
+    assert wet(0.2, 0.0, allow_probability=False) == pytest.approx(0.6)
+
+
+def test_v042_numeric_wetness_has_no_amount_switch_at_point_two_mm():
+    low = point(1, 10.0, precipitation_mm=0.199999, precipitation_probability=80.0)
+    edge = point(1, 10.0, precipitation_mm=0.2, precipitation_probability=80.0)
+    assert abs(
+        engine._base_wet_penalty(edge, allow_probability=True)
+        - engine._base_wet_penalty(low, allow_probability=True)
+    ) < 1e-6
+
+
+def test_v042_submaterial_wetness_stays_thermal_and_explained():
+    model = PersonalModel.from_answers(3, 3, 3, 3)
+    # Current-state numeric wetness uses amount directly. 0.1 mm sits halfway
+    # through the smoothstep to the historic 0.2 mm saturation point -> 0.30 K.
+    result = engine.assess_point(
+        point(0, 12.0, condition="cloudy", precipitation_mm=0.1),
+        model,
+        allow_probabilistic_wetness=False,
+    )
+    assert result.base_wet_penalty_c == pytest.approx(0.30)
+    assert result.wet_penalty_c == pytest.approx(0.30)
+    assert "wet" in result.reasons
+
+
+def test_v042_dew_point_overshoot_has_no_t_plus_two_switch_edge():
+    temp = 17.9
+    humidity = 69.0
+    at_edge = engine._preferred_dew_point_c(temp, humidity, temp + 2.0)
+    just_over = engine._preferred_dew_point_c(temp, humidity, temp + 2.0001)
+    assert at_edge is not None and just_over is not None
+    assert just_over == pytest.approx(at_edge, abs=1e-9)
+    assert just_over <= temp

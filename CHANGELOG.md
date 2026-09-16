@@ -1,5 +1,50 @@
 # Changelog
 
+## v0.4.2
+
+- Wet-Active-Learning ist jetzt an dieselbe Materialität wie der Nässe-Spezialist gebunden: kontinuierliche thermische Nässe unter 0,50 K bleibt wirksam, erzeugt aber weder `wet`-Unusual-Feedback noch Early-Specialist-Sichtbarkeit und kann dadurch nicht fälschlich allgemeine Jackengrenzen trainieren.
+- Die verbleibende Taupunktkante oberhalb `Lufttemperatur + 2 K` ist entfernt: physikalisch unmögliche Provider-Overshoots werden kontinuierlich auf die Lufttemperatur geklemmt und anschließend – sofern rF vorhanden ist – ausschließlich über das bestehende 4..8-K-Plausibilitätsblending gewichtet.
+- Season Rescue wird pro Rückkehrzyklus eingefroren: Ist der direkte Vorgänger beim ersten relevanten Zugriff dieses Zyklus noch nicht ausreichend gelernt, darf späteres Feedback denselben Saisonübergang nicht nachträglich doch noch rescue-fähig machen. Ein späteres Jahr darf erneut prüfen; Evidenz wird weiterhin nie kopiert.
+- Provider-Taupunkt-Plausibilisierung ist jetzt kontinuierlich statt binär: bis 4 K Abweichung wird der Providerwert vollständig verwendet, zwischen 4 und 8 K weich Richtung Magnus-Fallback ausgeblendet und ab 8 K vollständig auf Magnus zurückgefallen. Dadurch gibt es keine harte 6-K-Umschaltkante mehr.
+- Numerische Forecast-Nässe wird unterhalb der bisherigen Sättigungspunkte weich aufgebaut: 0,2 mm und 65 % sind weiterhin die Punkte, an denen der alte 0,6-K-Basismalus vollständig erreicht ist, aber minimale Provideränderungen schalten den gesamten personalisierten Nässekanal nicht mehr binär an/aus. Kategorisches `rainy`/`pouring` bleibt ein starkes direktes Signal.
+- `_preferred_dew_point_c()` verwirft jetzt auch direkt übergebene ungültige/nicht-endliche Lufttemperaturen defensiv statt im Fallback erneut an derselben Konvertierung zu scheitern.
+
+- Season Rescue greift jetzt bereits beim Beginn der 30-Tage-Saisonüberblendung, sobald der zurückkehrende nächste Saisonanker erstmals mitgewichtet wird. Dadurch kann kein schwacher Altanker knapp zwei Wochen einblenden und erst am meteorologischen Stichtag sprunghaft korrigiert werden.
+- Der 5-Minuten-Autocollapse wartet nur noch auf Mutation-Flights des aktuellen Config-/Profil-/Generation-Owners. Hängende Requests eines alten Kontexts können eine neu geöffnete Karte nicht mehr dauerhaft offen halten.
+- Provider-Taupunkte werden weiterhin bevorzugt, bei gleichzeitig brauchbarer relativer Feuchte aber gegen den lokal abgeleiteten Taupunkt grob plausibilisiert. Offensichtlich widersprüchliche Tupel fallen auf den Magnus-Fallback zurück; kleine normale Provider-/Rundungsabweichungen bleiben erlaubt.
+
+
+### Arbeitskontext
+- Kommende Arbeit wird erst **3 Stunden vor dem tatsächlichen Arbeitsbeginn** aktiv. Vorher beeinflusst die Schicht weder Arbeitsprofil/-anzeige noch Arbeitswetter noch die Erweiterung auf bis zu 16 Stunden.
+- Der vorhandene ±30-Minuten-Planungspuffer zieht diese Grenze nicht vor; laufende Schichten bleiben über Mitternacht hinweg aktiv und der Nachlaufpuffer nach Feierabend bleibt erhalten.
+
+### Wettermodell / Taupunkt / Nässe
+- Einen plausiblen nativen Provider-Taupunkt bevorzugen; fehlt er oder ist er unplausibel, bleibt die Magnus-Berechnung aus Temperatur + rF der Fallback.
+- Neuer separater, kompakter **Nässe-Spezialist** (`wet_bias_c` / `wet_stat`). Bestehende v0.4.1-Lerndaten werden unverändert übernommen; Nässe startet neutral mit 0 Evidenz.
+- Bisherige Regen-Basiswerte bleiben erhalten. Aktuelle reine Regenwahrscheinlichkeit macht die Person nicht thermisch nass; tatsächlicher aktueller Niederschlag bzw. der jeweilige Forecastpunkt kann weiterhin Nässe erzeugen.
+- Wind und Nässe bleiben separat lernbar. Wenn beide gleichzeitig relevant sind, kommt eine konservative zusätzliche Interaktion hinzu: harmonische Kombination der bereits personalisierten Wind-/Nässemali mit Faktor 0,30 und maximal 0,8 K. Ohne Wind oder ohne Nässe ist die Interaktion 0.
+- Kein separates „Warmwind“-Modell und kein neuer Synergie-Lernregler: Das bestehende temperaturabhängige Windmodell bleibt maßgeblich; die Interaktion personalisiert sich automatisch über Wind- und Nässe-Lernen.
+- Nässe nimmt an derselben Specialist-Attribution wie Feuchte/Solar teil, wird bei `boundary_only` nicht trainiert und hält bei klarer Aktivität mit <3 Evidenzpunkten eine sonst versteckte Empfehlung erreichbar.
+
+### Saisonmodell
+- Neuer einmaliger **Season Rescue** für den Sonderfall „JackenBerater am Ende einer Saison begonnen“: Kehrt eine erste Saison in einem späteren Jahreszyklus mit weniger als 2 eigenen Evidenzpunkten zurück, kann sie einmalig zum inzwischen gut gelernten direkten Vorgänger gezogen werden.
+- 0 eigene Evidenz erlaubt vollständige Übernahme des Vorgänger-Offsets; zwischen 0 und 2 Evidenzpunkten wird proportional mit dem eigenen Saisonwert gemischt. Evidenz/Statistik werden niemals kopiert.
+- Ab 2 eigenen Evidenzpunkten bleibt die Saison vollständig autoritativ. Bestehende v0.4.1-Profile werden beim Upgrade nicht sofort verändert: fehlende Zyklusmetadaten werden zuerst nur registriert.
+
+### Sessions / Karte
+- Passive Detailansicht öffnet sofort, erzeugt aber erst nach **1,3 Sekunden** eine Feedback-Session. Schnelles versehentliches Öffnen/Schließen erzeugt keine Opportunity; explizites manuelles Feedback darf weiterhin sofort eine aktuelle Session anfordern.
+- Reale Entscheidungs-Deduplizierung von **10 auf 30 Minuten** erhöht. Semantische Snapshot-Replacements erben weiterhin dieselbe Opportunity. Temporäres Session-Schema auf **v17** erhöht.
+- Detail- und Infoansicht klappen nach **5 Minuten Inaktivität** automatisch zusammen. Tippen, Scrollen, Wheel-, Touch- und Tastaturinteraktion starten den Timer neu; die reine Infoansicht erzeugt weiterhin keine Lernsession.
+- Frontend-Cache auf `ui=19` erhöht.
+
+### Migration / Kompatibilität
+- Allgemeines Profil, Jackengrenzen, Pullover, Wind, Saisons, Warm-/Kaltfeuchte, Solar, Transition und Transient bleiben beim Upgrade unverändert. Neu hinzu kommen nur neutrale Nässe- und Saison-Rescue-Metadaten.
+- Der sichtbare Lernfortschritt kann durch den zusätzlichen Nässe-Spezialisten geringfügig sinken, ohne dass bestehende Evidenz verloren geht.
+
+### Tests
+- `432 / 432` HA-unabhängige Python-Tests plus Frontend-Session-Vertrag, Python-Compilecheck, JS-Syntaxcheck sowie JSON-/YAML-/ZIP-Validierung.
+- Neue Regressionen decken 3-h-Arbeitsgate, Nachtarbeit, Provider-Taupunkt/Fallback, separat lernbare Nässe, Wind×Nässe-Synergie, aktuelle vs. zukünftige Nässe, Nässe-`boundary_only`, 30-Minuten-Dedupe, 1,3-s-Verklickschutz, 5-Minuten-Inaktivität sowie Saison-Rescue/Migration ab.
+
 ## v0.4.1
 
 ### Feuchte, Taupunkt und Strahlungspotenzial
@@ -36,7 +81,7 @@
 - Bei anhaltend tiefer Kälte kann der Berater Kombinationen wie **Pullover + Winterjacke** empfehlen und damit unterhalb der bisherigen Winterjacken-Grenze feiner differenzieren. Wird der weitere Zeitraum deutlich warm, greift auch dort die flexiblere Shirt+Jacke-Strategie.
 - Fünfte Setup-Frage zur persönlichen Pullover-Neigung ergänzt. Alte v0.3.x-Profile migrieren neutral, ohne bestehende Jacken-, Saison-, Wind- oder Threshold-Personalisierung zu verändern.
 - Eigene Pullover-Evidenz, Confidence und lernbarer Einsatz-Offset ergänzt. Ein „zu warm“-Feedback bei **Pullover ohne Jacke** korrigiert gezielt dessen Einsatzgrenze; ist zusätzlich eine abnehmbare Jacke beteiligt, lernt weiterhin die Außenschicht statt beide Kleidungsbereiche doppelt zu verschieben.
-- Recommendation-/Session-Lernkontext speichert die verwendete Grundschicht, damit Feedback den richtigen Pulloverkontext kennt. Das temporäre Session-Schema wird bei Änderungen der Recommendation-/Deduplizierungssemantik versioniert; aktueller Stand ist **v14**, offene Sessions älterer Semantik werden beim Upgrade verworfen.
+- Recommendation-/Session-Lernkontext speichert die verwendete Grundschicht, damit Feedback den richtigen Pulloverkontext kennt. Das temporäre Session-Schema wird bei Änderungen der Recommendation-/Deduplizierungssemantik versioniert; dieser damalige Entwicklungsschritt lag bei **v14** (aktueller v0.4.2-Stand: v17), offene Sessions älterer Semantik werden beim Upgrade verworfen.
 - Frontend zeigt `Pullover`, `Pullover + leichte/warme/Winterjacke` und formuliert spätere Hinweise so, dass nur die zusätzlich benötigte Jacke als „mitnehmen“ bezeichnet wird.
 - Pullover-Auswahl von kurzfristiger Indoor→Outdoor-Übergangskälte entkoppelt: Der Transition-Malus darf weiterhin eine abnehmbare Jacke für den Start auslösen, aber keinen Pullover für den gesamten Planungszeitraum erzwingen.
 - `stable_cool` verlangt jetzt eine lückenlose Forecastkette bereits ab **jetzt**. Liegt der erste Zukunftspunkt mehr als 90 Minuten entfernt, wird kein fester Pullover aus späteren isolierten Punkten abgeleitet.

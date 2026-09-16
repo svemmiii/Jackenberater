@@ -2346,7 +2346,7 @@ def test_previous_session_schema_is_discarded_after_dedupe_semantics_change():
     asyncio.run(run())
 
 
-def test_answered_identical_decision_is_still_deduplicated_within_ten_minutes():
+def test_answered_identical_decision_is_still_deduplicated_within_thirty_minutes():
     async def run():
         manager = make_manager()
         rec = recommendation()
@@ -3995,3 +3995,198 @@ def test_v041_old_profile_migrates_to_neutral_environment_specialists():
     assert restored.humidity_warm_stat.weight_sum == 0.0
     assert restored.humidity_cold_stat.weight_sum == 0.0
     assert restored.solar_stat.weight_sum == 0.0
+
+
+def test_v042_same_decision_reuses_session_for_thirty_minutes_then_allows_new_opportunity():
+    async def run():
+        manager = make_manager()
+        rec = recommendation()
+        contexts = {
+            "start": {"jacket": const.JACKET_LIGHT, "effective_c": 15.0},
+            "later": {"jacket": const.JACKET_LIGHT, "effective_c": 15.0},
+        }
+        base = datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc)
+        original_now = profiles.dt_util.now
+        try:
+            profiles.dt_util.now = lambda: base
+            first = await manager.async_open_session(
+                "user", rec,
+                weather_context={"temperature_c": 15.0, "condition": "cloudy"},
+                learning_contexts=contexts,
+            )
+            profiles.dt_util.now = lambda: base + timedelta(minutes=29, seconds=59)
+            within = await manager.async_open_session(
+                "user", rec,
+                weather_context={"temperature_c": 15.0, "condition": "cloudy"},
+                learning_contexts=contexts,
+            )
+            assert within["id"] == first["id"]
+            assert manager.get_model("user").feedback_opportunities == 1
+
+            profiles.dt_util.now = lambda: base + timedelta(minutes=30, seconds=1)
+            after = await manager.async_open_session(
+                "user", rec,
+                weather_context={"temperature_c": 15.0, "condition": "cloudy"},
+                learning_contexts=contexts,
+            )
+            assert after["id"] != first["id"]
+            assert manager.get_model("user").feedback_opportunities == 2
+        finally:
+            profiles.dt_util.now = original_now
+
+    asyncio.run(run())
+
+
+def test_v042_wet_relevance_change_replaces_snapshot_without_new_opportunity():
+    async def run():
+        manager = _make_mature_policy_manager()
+        rec = recommendation()
+        rec.confidence = 0.95
+        rec.effective_now_c = 10.0
+        first_contexts = {
+            "start": {
+                "jacket": const.JACKET_LIGHT,
+                "top_layer": const.TOP_SHIRT,
+                "effective_c": 10.0,
+                "wet_base_penalty_c": 1.4,
+                "wet_penalty_c": 1.4,
+                "condition": "pouring",
+            },
+            "later": {
+                "jacket": const.JACKET_LIGHT,
+                "top_layer": const.TOP_SHIRT,
+                "effective_c": 10.0,
+                "wet_base_penalty_c": 1.4,
+                "wet_penalty_c": 1.4,
+                "condition": "pouring",
+            },
+        }
+        first = await manager.async_open_session(
+            "user", rec, weather_context={"condition": "pouring"}, learning_contexts=first_contexts
+        )
+        stored = manager._find_session("user", first["id"])
+        assert stored is not None
+        assert stored["learning_contract"]["start"]["wet_learning"] is True
+        assert stored["learning_contract"]["start"]["wet_relevance"] == pytest.approx(1.0)
+
+        second_contexts = {
+            "start": {
+                "jacket": const.JACKET_LIGHT,
+                "top_layer": const.TOP_SHIRT,
+                "effective_c": 10.3,
+                "wet_base_penalty_c": 0.6,
+                "wet_penalty_c": 0.6,
+                "condition": "cloudy",
+            },
+            "later": {
+                "jacket": const.JACKET_LIGHT,
+                "top_layer": const.TOP_SHIRT,
+                "effective_c": 10.3,
+                "wet_base_penalty_c": 0.6,
+                "wet_penalty_c": 0.6,
+                "condition": "cloudy",
+            },
+        }
+        second = await manager.async_open_session(
+            "user", rec, weather_context={"condition": "cloudy"}, learning_contexts=second_contexts
+        )
+        assert second["id"] != first["id"]
+        current = manager._find_session("user", second["id"])
+        assert current is not None
+        assert current["opportunity_count"] == 1
+        assert manager.get_model("user").feedback_opportunities == 1
+        assert current["learning_contract"]["start"]["wet_relevance"] == pytest.approx(0.45)
+        old = manager._find_session("user", first["id"])
+        assert old is not None and old["superseded"] is True
+
+    asyncio.run(run())
+
+
+def test_v042_wet_feedback_is_undoable_without_touching_existing_profile_fields():
+    async def run():
+        manager = _make_mature_policy_manager()
+        before = manager.get_model("user")
+        before_general = before.general_offset_c
+        before_wind = before.wind_bias_c
+        rec = recommendation()
+        rec.jacket_now = const.JACKET_LIGHT
+        rec.jacket_later = const.JACKET_LIGHT
+        rec.effective_now_c = 9.0
+        contexts = {
+            "start": {
+                "jacket": const.JACKET_LIGHT,
+                "top_layer": const.TOP_SHIRT,
+                "effective_c": 9.0,
+                "wet_base_penalty_c": 1.4,
+                "wet_penalty_c": 1.4,
+                "condition": "pouring",
+            },
+            "later": {
+                "jacket": const.JACKET_LIGHT,
+                "top_layer": const.TOP_SHIRT,
+                "effective_c": 9.0,
+                "wet_base_penalty_c": 1.4,
+                "wet_penalty_c": 1.4,
+                "condition": "pouring",
+            },
+        }
+        session = await manager.async_open_session(
+            "user", rec, weather_context={"condition": "pouring"}, learning_contexts=contexts
+        )
+        await manager.async_feedback(
+            "user", session["id"], rating=const.FEEDBACK_TOO_COLD,
+            phase=const.PHASE_START, recommendation_used=True,
+            unusual_day=False, voluntary=True,
+        )
+        learned = manager.get_model("user")
+        assert learned.wet_bias_c > 0.0
+        assert learned.wet_stat.weight_sum > 0.0
+        assert learned.wind_bias_c == before_wind
+
+        assert await manager.async_undo_last_feedback("user") is True
+        undone = manager.get_model("user")
+        assert undone.wet_bias_c == 0.0
+        assert undone.wet_stat.weight_sum == 0.0
+        assert undone.general_offset_c == before_general
+        assert undone.wind_bias_c == before_wind
+
+    asyncio.run(run())
+
+
+def test_v042_submaterial_wetness_does_not_request_wet_feedback_or_train_wet():
+    async def run():
+        manager = _make_mature_policy_manager()
+        rec = recommendation()
+        rec.confidence = 0.95
+        rec.reasons = ["wet"]
+        contexts = {
+            "start": {
+                "jacket": const.JACKET_LIGHT,
+                "top_layer": const.TOP_SHIRT,
+                "effective_c": 15.0,
+                "wet_base_penalty_c": 0.30,
+                "wet_penalty_c": 0.30,
+                "condition": "cloudy",
+            },
+            "later": {
+                "jacket": const.JACKET_LIGHT,
+                "top_layer": const.TOP_SHIRT,
+                "effective_c": 15.0,
+                "wet_base_penalty_c": 0.30,
+                "wet_penalty_c": 0.30,
+                "condition": "cloudy",
+            },
+        }
+        session = await manager.async_open_session(
+            "user",
+            rec,
+            weather_context={"temperature_c": 15.0, "condition": "cloudy"},
+            learning_contexts=contexts,
+        )
+        stored = manager._find_session("user", session["id"])
+        assert stored is not None
+        assert stored["request_feedback"] is False
+        assert stored["learning_contract"]["start"]["wet_learning"] is False
+        assert stored["learning_contract"]["start"]["wet_relevance"] == 0.0
+
+    asyncio.run(run())

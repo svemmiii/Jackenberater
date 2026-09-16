@@ -35,6 +35,7 @@ from .const import (
     FEEDBACK_VALUES,
     MAX_FORECAST_HOURS,
     WORK_BUFFER,
+    WORK_CONTEXT_LEAD,
     PHASE_VALUES,
     PROFILE_BACKUP_ENABLED,
 )
@@ -47,6 +48,8 @@ from .time_utils import (
     elapsed,
     instant_key,
     is_after,
+    is_at_or_after,
+    is_at_or_before,
     is_before,
     is_between,
     is_between_half_open,
@@ -389,6 +392,47 @@ async def _stable_advice_snapshot(
     raise ValueError("profile_changed_retry")
 
 
+def _gate_work_context_windows(
+    now: datetime,
+    actual_windows: list[tuple[datetime, datetime]],
+    planning_windows: list[tuple[datetime, datetime]],
+) -> tuple[list[tuple[datetime, datetime]], list[tuple[datetime, datetime]]]:
+    """Keep work completely out of advice until three hours before real start.
+
+    The gate is tied to the *actual* work start, never midnight and never the
+    ±30-minute planning buffer. Running shifts remain relevant across midnight;
+    the existing +30-minute post-work buffer is preserved for the trip home.
+    """
+    lead_end = real_add(now, WORK_CONTEXT_LEAD)
+    relevant_actual: list[tuple[datetime, datetime]] = []
+    for start, end in actual_windows:
+        active = is_between_half_open(now, start, end)
+        starts_soon = (
+            is_at_or_after(start, now)
+            and is_at_or_before(start, lead_end)
+        )
+        just_ended = (
+            is_at_or_after(now, end)
+            and is_at_or_before(now, real_add(end, WORK_BUFFER))
+        )
+        if active or starts_soon or just_ended:
+            relevant_actual.append((start, end))
+
+    if not relevant_actual:
+        return [], []
+
+    relevant_planning = [
+        window
+        for window in planning_windows
+        if any(
+            is_before(window[0], real_add(end, WORK_BUFFER))
+            and is_after(window[1], real_add(start, -WORK_BUFFER))
+            for start, end in relevant_actual
+        )
+    ]
+    return relevant_actual, relevant_planning
+
+
 def _work_period_for_target(
     target: datetime,
     actual_windows: list[tuple[datetime, datetime]],
@@ -455,6 +499,10 @@ async def _recommendation(
     ) = await _calendar_context_bundle(
         hass, entry, runtime, include_work=bool(isinstance(work_entity, str) and work_entity)
     )
+    if isinstance(work_entity, str) and work_entity:
+        actual_windows, planning_windows = _gate_work_context_windows(
+            now, actual_windows, planning_windows
+        )
     base_horizon = max(DEFAULT_FORECAST_HOURS, context_horizon or 0)
     max_horizon = max(MAX_FORECAST_HOURS, min(CALENDAR_MAX_HOURS, context_horizon or 0))
 
@@ -831,6 +879,9 @@ def _learning_contexts(rec: Recommendation) -> dict[str, dict[str, Any]]:
         "humidity_base_adjustment_c": rec.current_base_humidity_adjustment_c,
         "solar_gain_c": rec.current_solar_gain_c,
         "solar_base_gain_c": rec.current_base_solar_gain_c,
+        "wet_base_penalty_c": rec.current_base_wet_penalty_c,
+        "wet_penalty_c": rec.current_wet_penalty_c,
+        "wet_wind_synergy_c": rec.current_wet_wind_synergy_c,
         "condition": rec.current_condition,
         "effective_c": rec.effective_now_c,
         "transition_penalty_c": rec.transition_penalty_c,
@@ -851,6 +902,9 @@ def _learning_contexts(rec: Recommendation) -> dict[str, dict[str, Any]]:
         "humidity_base_adjustment_c": rec.later_base_humidity_adjustment_c,
         "solar_gain_c": rec.later_solar_gain_c,
         "solar_base_gain_c": rec.later_base_solar_gain_c,
+        "wet_base_penalty_c": rec.later_base_wet_penalty_c,
+        "wet_penalty_c": rec.later_wet_penalty_c,
+        "wet_wind_synergy_c": rec.later_wet_wind_synergy_c,
         "condition": rec.later_condition,
         "effective_c": rec.later_effective_c,
         # Indoor->outdoor transition belongs to the deliberate 'go out now'

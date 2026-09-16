@@ -27,6 +27,7 @@ from .const import (
     PHASE_START,
     PULLOVER_WARMTH_C,
     TOP_PULLOVER,
+    WET_SPECIALIST_MIN_C,
 )
 
 
@@ -97,6 +98,8 @@ class PersonalModel:
     humidity_warm_bias_c: float = 0.0
     humidity_cold_bias_c: float = 0.0
     solar_bias_c: float = 0.0
+    # Positive means rain/wetness feels colder than the neutral wetness model.
+    wet_bias_c: float = 0.0
     transition_bias_c: float = 0.0
     # How willing the user is to accept a short mismatch in exchange for the
     # jacket that fits the continuing trend. 1.0 is neutral; it is deliberately
@@ -125,9 +128,17 @@ class PersonalModel:
     summer_season_initialized: bool = False
     autumn_season_initialized: bool = False
     winter_seeded_from: str = ""
+    winter_season_cycle_id: int = 0
+    winter_season_rescue_done: bool = False
     spring_seeded_from: str = ""
+    spring_season_cycle_id: int = 0
+    spring_season_rescue_done: bool = False
     summer_seeded_from: str = ""
+    summer_season_cycle_id: int = 0
+    summer_season_rescue_done: bool = False
     autumn_seeded_from: str = ""
+    autumn_season_cycle_id: int = 0
+    autumn_season_rescue_done: bool = False
 
     # Threshold deltas shift the baseline thresholds at which a warmer class is
     # selected. Positive = warmer garment is chosen sooner / at higher temp.
@@ -140,6 +151,7 @@ class PersonalModel:
     humidity_warm_stat: RunningStat = field(default_factory=RunningStat)
     humidity_cold_stat: RunningStat = field(default_factory=RunningStat)
     solar_stat: RunningStat = field(default_factory=RunningStat)
+    wet_stat: RunningStat = field(default_factory=RunningStat)
     transition_stat: RunningStat = field(default_factory=RunningStat)
     transient_stat: RunningStat = field(default_factory=RunningStat)
     winter_season_stat: RunningStat = field(default_factory=RunningStat)
@@ -256,6 +268,7 @@ class PersonalModel:
             + self.humidity_warm_stat.weight_sum
             + self.humidity_cold_stat.weight_sum
             + self.solar_stat.weight_sum
+            + self.wet_stat.weight_sum
             + self.transition_stat.weight_sum
             + self.transient_stat.weight_sum
             + self.winter_season_stat.weight_sum
@@ -263,7 +276,7 @@ class PersonalModel:
             + self.summer_season_stat.weight_sum
             + self.autumn_season_stat.weight_sum
             + self.pullover_stat.weight_sum
-        ) / 11.0
+        ) / 12.0
         evidence = (
             0.55 * self.general_stat.weight_sum
             + 0.35 * boundary_evidence
@@ -381,6 +394,7 @@ class PersonalModel:
         model.humidity_warm_bias_c = _safe_number(raw.get("humidity_warm_bias_c"), 0.0, -2.0, 3.0)
         model.humidity_cold_bias_c = _safe_number(raw.get("humidity_cold_bias_c"), 0.0, -1.0, 1.5)
         model.solar_bias_c = _safe_number(raw.get("solar_bias_c"), 0.0, -1.5, 3.0)
+        model.wet_bias_c = _safe_number(raw.get("wet_bias_c"), 0.0, -0.8, 1.5)
         model.transition_bias_c = _safe_number(raw.get("transition_bias_c"), 0.0, -1.5, 2.5)
         model.transient_tolerance = _safe_number(raw.get("transient_tolerance"), 1.0, 0.0, 1.5)
         model.pullover_threshold_delta_c = _safe_number(raw.get("pullover_threshold_delta_c"), 0.0, -4.0, 4.0)
@@ -403,6 +417,16 @@ class PersonalModel:
                 if isinstance(seeded_from, str) and seeded_from in _SEASON_NAMES
                 else "",
             )
+            setattr(
+                model,
+                f"{season}_season_cycle_id",
+                _safe_int(raw.get(f"{season}_season_cycle_id"), 0),
+            )
+            setattr(
+                model,
+                f"{season}_season_rescue_done",
+                _safe_bool(raw.get(f"{season}_season_rescue_done"), False),
+            )
         model.light_threshold_delta_c = _safe_number(raw.get("light_threshold_delta_c"), 0.0, -3.0, 4.0)
         model.warm_threshold_delta_c = _safe_number(raw.get("warm_threshold_delta_c"), 0.0, -3.0, 4.0)
         model.winter_threshold_delta_c = _safe_number(raw.get("winter_threshold_delta_c"), 0.0, -3.0, 4.0)
@@ -415,7 +439,7 @@ class PersonalModel:
 
         for name in (
             "general_stat", "wind_stat", "humidity_warm_stat", "humidity_cold_stat",
-            "solar_stat", "transition_stat", "transient_stat",
+            "solar_stat", "wet_stat", "transition_stat", "transient_stat",
             "winter_season_stat", "spring_season_stat", "summer_season_stat",
             "autumn_season_stat", "light_stat", "warm_stat", "winter_stat", "pullover_stat",
         ):
@@ -595,6 +619,8 @@ _SEASON_NAMES: tuple[str, str, str, str] = (
 _SEASON_LIMIT_C = 4.0
 _SEASON_CONSENSUS_MIN_REAL_WEIGHT = 3.0
 _SEASON_CONSENSUS_RESIDUAL_C = 0.2
+_SEASON_RESCUE_MAX_OWN_EVIDENCE = 2.0
+_SEASON_RESCUE_MIN_PREDECESSOR_EVIDENCE = 2.0
 
 
 def _season_bias_attributes() -> tuple[str, str, str, str]:
@@ -687,12 +713,20 @@ def _season_initialized(model: PersonalModel, name: str) -> bool:
     return bool(getattr(model, f"{name}_season_initialized", False))
 
 
+def _season_cycle_id(when: datetime, name: str) -> int:
+    """Return the meteorological cycle start year for one season anchor."""
+    if name == "winter" and when.month in (1, 2):
+        return when.year - 1
+    return when.year
+
+
 def _initialize_season(
     model: PersonalModel,
     name: str,
     *,
     offset_c: float = 0.0,
     seeded_from: str = "",
+    when: datetime | None = None,
 ) -> bool:
     """Initialize one season without copying any evidence or history."""
     if _season_initialized(model, name):
@@ -700,6 +734,72 @@ def _initialize_season(
     setattr(model, f"{name}_bias_c", _clamp(float(offset_c), -_SEASON_LIMIT_C, _SEASON_LIMIT_C))
     setattr(model, f"{name}_season_initialized", True)
     setattr(model, f"{name}_seeded_from", seeded_from if seeded_from in _SEASON_NAMES else "")
+    if isinstance(when, datetime):
+        setattr(model, f"{name}_season_cycle_id", _season_cycle_id(when, name))
+    setattr(model, f"{name}_season_rescue_done", False)
+    return True
+
+
+def _maybe_rescue_returning_season(
+    model: PersonalModel,
+    name: str,
+    when: datetime,
+) -> bool:
+    """One-time rescue for a weak first-year season on a later return cycle.
+
+    ``*_season_cycle_id`` doubles as the last cycle in which rescue eligibility
+    was decided for a still-weak anchor. This deliberately freezes a failed
+    rescue decision for the rest of that return cycle: feedback received later
+    in the same 30-day blend cannot suddenly make rescue fire and change an
+    otherwise identical recommendation. A later year may be evaluated again.
+
+    Existing v0.4.1 profiles have no cycle metadata; their current cycle is
+    recorded first so migration never changes an already learned value
+    immediately. Evidence is never copied.
+    """
+    if not _season_initialized(model, name):
+        return False
+    if bool(getattr(model, f"{name}_season_rescue_done", False)):
+        return False
+
+    current_cycle = _season_cycle_id(when, name)
+    cycle_attr = f"{name}_season_cycle_id"
+    stored_cycle = int(getattr(model, cycle_attr, 0) or 0)
+    if stored_cycle <= 0:
+        setattr(model, cycle_attr, current_cycle)
+        return True
+    if current_cycle <= stored_cycle:
+        return False
+
+    own_evidence = _season_stat(model, name).weight_sum
+    if own_evidence >= _SEASON_RESCUE_MAX_OWN_EVIDENCE - 1e-12:
+        # An established anchor remains authoritative; no rescue bookkeeping is
+        # needed because ordinary forward learning only strengthens it.
+        return False
+
+    predecessor = _SEASON_PREDECESSOR[name]
+    if not _season_initialized(model, predecessor):
+        # No predecessor means there is no meaningful rescue decision to freeze.
+        # This also preserves old partial/hand-built seasonal states.
+        return False
+
+    # The anchor is genuinely weak on a later return and its direct predecessor
+    # exists. Freeze the rescue decision for this cycle before testing how much
+    # predecessor evidence is currently available. Later feedback may therefore
+    # not retroactively turn a failed attempt into a mid-blend rescue.
+    setattr(model, cycle_attr, current_cycle)
+    changed = True
+
+    predecessor_evidence = _season_stat(model, predecessor).weight_sum
+    if predecessor_evidence < _SEASON_RESCUE_MIN_PREDECESSOR_EVIDENCE - 1e-12:
+        return changed
+
+    own_bias = float(getattr(model, f"{name}_bias_c"))
+    predecessor_bias = float(getattr(model, f"{predecessor}_bias_c"))
+    own_share = _clamp(own_evidence / _SEASON_RESCUE_MAX_OWN_EVIDENCE, 0.0, 1.0)
+    rescued = own_bias * own_share + predecessor_bias * (1.0 - own_share)
+    setattr(model, f"{name}_bias_c", _clamp(rescued, -_SEASON_LIMIT_C, _SEASON_LIMIT_C))
+    setattr(model, f"{name}_season_rescue_done", True)
     return True
 
 
@@ -713,8 +813,10 @@ def _prepare_season_bootstrap(model: PersonalModel, when: datetime | None) -> bo
 
     A skipped *chain* is never fabricated: if the direct predecessor itself was
     never initialized, the current season starts neutral instead of recursively
-    creating unseen seasons. Statistics and evidence are never copied. Once a
-    season is initialized it is never seeded again in later years.
+    creating unseen seasons. Statistics and evidence are never copied. A first-
+    year season that returns with less than two own evidence points may receive
+    one explicit rescue toward a well-learned direct predecessor; established
+    seasons are never reseeded.
     """
     if not isinstance(when, datetime) or not model.setup_complete:
         return False
@@ -722,7 +824,7 @@ def _prepare_season_bootstrap(model: PersonalModel, when: datetime | None) -> bo
     changed = False
     current_name = _season_name(when)
     if not any(_season_initialized(model, name) for name in _SEASON_NAMES):
-        changed |= _initialize_season(model, current_name)
+        changed |= _initialize_season(model, current_name, when=when)
 
     # Catch up a completely missed transition. This runs on ordinary model
     # access, so recommendations and any later feedback snapshot already see the
@@ -737,9 +839,15 @@ def _prepare_season_bootstrap(model: PersonalModel, when: datetime | None) -> bo
                 current_name,
                 offset_c=float(getattr(model, f"{previous_name}_bias_c")),
                 seeded_from=previous_name,
+                when=when,
             )
         else:
-            changed |= _initialize_season(model, current_name)
+            changed |= _initialize_season(model, current_name, when=when)
+
+    # A weak first-year anchor may receive one rescue only when it actually
+    # returns in a later meteorological cycle. This never copies evidence and
+    # never touches an established season.
+    changed |= _maybe_rescue_returning_season(model, current_name, when)
 
     # Do this after current-season catch-up: a user may return for the first time
     # late enough that the *next* transition is already active (for example first
@@ -755,7 +863,18 @@ def _prepare_season_bootstrap(model: PersonalModel, when: datetime | None) -> bo
                 next_name,
                 offset_c=float(getattr(model, f"{previous_name}_bias_c")),
                 seeded_from=previous_name,
+                when=when,
             )
+
+        # The next anchor already contributes throughout the 30-day blend. A
+        # weak returning season must therefore be rescued as soon as that blend
+        # starts, not only on the meteorological boundary itself. Otherwise an
+        # old weak bias can influence roughly two weeks of recommendations and
+        # then jump abruptly on 1 Mar/Jun/Sep/Dec. Newly initialized anchors are
+        # safe here because their cycle id is the current one, so rescue remains
+        # a no-op until a genuinely later cycle.
+        if _season_initialized(model, next_name):
+            changed |= _maybe_rescue_returning_season(model, next_name, when)
 
     return changed
 
@@ -769,7 +888,7 @@ def _ensure_active_seasons_for_learning(
     _prepare_season_bootstrap(model, when)
     for name in weights:
         if not _season_initialized(model, name):
-            _initialize_season(model, name)
+            _initialize_season(model, name, when=when)
 
 
 def _legacy_recenter_seasonal_biases(model: PersonalModel) -> None:
@@ -835,6 +954,8 @@ def _migrate_seasonal_model_v4(model: PersonalModel) -> None:
     for name in _SEASON_NAMES:
         setattr(model, f"{name}_season_initialized", bool(trained[name]))
         setattr(model, f"{name}_seeded_from", "")
+        setattr(model, f"{name}_season_cycle_id", 0)
+        setattr(model, f"{name}_season_rescue_done", False)
         setattr(
             model,
             f"{name}_bias_c",
@@ -1092,9 +1213,11 @@ def _environment_specialist_semantics(
     *,
     humidity_base_adjustment_c: float | None,
     solar_base_gain_c: float | None,
+    wet_base_penalty_c: float | None = None,
     warm_humidity_active: bool,
     cold_humidity_active: bool,
     solar_active: bool,
+    wet_active: bool = False,
 ) -> dict[str, float]:
     """Return the immutable learning strength for weather-specialist channels.
 
@@ -1106,6 +1229,7 @@ def _environment_specialist_semantics(
         humidity_base_adjustment_c, 0.0, -10.0, 10.0
     )
     solar_base = _safe_number(solar_base_gain_c, 0.0, -10.0, 10.0)
+    wet_base = _safe_number(wet_base_penalty_c, 0.0, 0.0, 10.0)
 
     warm_relevance = (
         _quantize_specialist_relevance(_clamp(abs(humidity_base) / 1.2, 0.25, 1.0))
@@ -1122,9 +1246,14 @@ def _environment_specialist_semantics(
         if solar_active
         else 0.0
     )
+    wet_relevance = (
+        _quantize_specialist_relevance(_clamp(wet_base / 1.4, 0.25, 1.0))
+        if wet_active
+        else 0.0
+    )
     active_channels = sum(
         1
-        for relevance in (warm_relevance, cold_relevance, solar_relevance)
+        for relevance in (warm_relevance, cold_relevance, solar_relevance, wet_relevance)
         if relevance > 0.0
     )
     share = round(1.0 / max(1, active_channels), 6)
@@ -1132,6 +1261,7 @@ def _environment_specialist_semantics(
         "humidity_warm_relevance": warm_relevance,
         "humidity_cold_relevance": cold_relevance,
         "solar_relevance": solar_relevance,
+        "wet_relevance": wet_relevance,
         "environment_specialist_share": share,
     }
 
@@ -1144,6 +1274,8 @@ def apply_feedback(
     wind_penalty_c: float | None = None,
     humidity_base_adjustment_c: float | None = None,
     solar_base_gain_c: float | None = None,
+    wet_base_penalty_c: float | None = None,
+    wet_penalty_c: float | None = None,
     transition_penalty_c: float = 0.0,
     effective_c: float | None = None,
     phase: str | None = None,
@@ -1202,6 +1334,8 @@ def apply_feedback(
     humidity_cold_learning_enabled = bool(contract.get("humidity_cold_learning"))
     solar_learning_locked = "solar_learning" in contract
     solar_learning_enabled = bool(contract.get("solar_learning"))
+    wet_learning_locked = "wet_learning" in contract
+    wet_learning_enabled = bool(contract.get("wet_learning"))
     transition_learning_locked = "transition_learning" in contract
     transition_learning_enabled = bool(contract.get("transition_learning"))
     if "transient_override" in contract:
@@ -1267,6 +1401,7 @@ def apply_feedback(
         warm_humidity_active = False
         cold_humidity_active = False
         solar_active = False
+        wet_active = False
     else:
         warm_humidity_active = (
             humidity_warm_learning_enabled
@@ -1292,13 +1427,23 @@ def apply_feedback(
                 and (solar_base_gain_c or 0.0) >= 0.75
             )
         )
+        wet_active = (
+            wet_learning_enabled
+            if wet_learning_locked
+            else (
+                not transient_override
+                and (wet_base_penalty_c or 0.0) >= WET_SPECIALIST_MIN_C
+            )
+        )
 
     specialist_semantics = _environment_specialist_semantics(
         humidity_base_adjustment_c=humidity_base_adjustment_c,
         solar_base_gain_c=solar_base_gain_c,
+        wet_base_penalty_c=wet_base_penalty_c,
         warm_humidity_active=warm_humidity_active,
         cold_humidity_active=cold_humidity_active,
         solar_active=solar_active,
+        wet_active=wet_active,
     )
     # Current-schema sessions freeze the semantic learning strength as well as
     # the on/off gates. This prevents a later provider refresh from reusing a
@@ -1322,6 +1467,13 @@ def apply_feedback(
         specialist_semantics["solar_relevance"] = _safe_number(
             contract.get("solar_relevance"),
             specialist_semantics["solar_relevance"],
+            0.0,
+            1.0,
+        )
+    if "wet_relevance" in contract:
+        specialist_semantics["wet_relevance"] = _safe_number(
+            contract.get("wet_relevance"),
+            specialist_semantics["wet_relevance"],
             0.0,
             1.0,
         )
@@ -1370,6 +1522,20 @@ def apply_feedback(
             step = _learning_step(previous) * 0.18 * weight * relevance * specialist_share
             model.solar_bias_c = _clamp(
                 model.solar_bias_c - error * step, -1.5, 3.0
+            )
+
+    if wet_active:
+        relevance = specialist_semantics["wet_relevance"]
+        previous = model.wet_stat.weight_sum
+        model.wet_stat.add(error, weight=weight * relevance * specialist_share)
+        environment_specialist_active = True
+        if error != 0.0:
+            # Too cold while actually wet => increase the future wetness penalty;
+            # too warm does the opposite. The wind×wet interaction automatically
+            # follows because it consumes this personalized wet penalty.
+            step = _learning_step(previous) * 0.30 * weight * relevance * specialist_share
+            model.wet_bias_c = _clamp(
+                model.wet_bias_c + error * step, -0.8, 1.5
             )
 
     # The pullover is a fixed mid-layer choice for the planning period, not a
