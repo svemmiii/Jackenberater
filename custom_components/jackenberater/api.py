@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from contextvars import ContextVar
 import logging
 import math
 from typing import Any
+from types import SimpleNamespace
 
 import voluptuous as vol
 
@@ -24,18 +26,36 @@ from .const import (
     CONF_INDOOR_TEMP,
     CONF_RAIN_ADVICE,
     CONF_SHARED_USER_IDS,
+    CONF_SHIFT_ANCHOR_DATE,
+    CONF_SHIFT_EARLY_END,
+    CONF_SHIFT_EARLY_START,
+    CONF_SHIFT_LATE_END,
+    CONF_SHIFT_LATE_START,
+    CONF_SHIFT_NIGHT_END,
+    CONF_SHIFT_NIGHT_START,
+    CONF_SHIFT_PATTERN,
     CONF_VACATION_CALENDAR,
     CONF_WEATHER,
+    CONF_WORK_MODE,
     CONF_WORK_WEATHER,
     CONF_WORK_ZONE,
+    CONF_WORKDAY_END,
+    CONF_WORKDAY_START,
     DEFAULT_FALLBACK_INDOOR_TEMP,
     DEFAULT_FORECAST_HOURS,
     DOMAIN,
+    FORECAST_FAILURE_RETRY,
     FORECAST_REFRESH,
     FEEDBACK_VALUES,
     MAX_FORECAST_HOURS,
     WORK_BUFFER,
     WORK_CONTEXT_LEAD,
+    WORK_MODE_NONE,
+    WORK_MODE_SHIFT,
+    WORK_MODE_WEEKDAY,
+    WORK_MODES,
+    DEFAULT_WORKDAY_START,
+    DEFAULT_WORKDAY_END,
     PHASE_VALUES,
     PROFILE_BACKUP_ENABLED,
 )
@@ -59,11 +79,14 @@ from .weather import current_weather, indoor_temperature_c
 
 _LOGGER = logging.getLogger(__name__)
 
+_ADVICE_WEATHER_ENTITY: ContextVar[str | None] = ContextVar("jackenberater_advice_weather_entity", default=None)
+_ADVICE_PROFILE_ID: ContextVar[str] = ContextVar("jackenberater_advice_profile_id", default="__legacy__")
+_ADVICE_PROFILE_CONTEXT: ContextVar[dict[str, Any] | None] = ContextVar("jackenberater_advice_profile_context", default=None)
+
 # Short shared cache: state events invalidate immediately when providers emit
 # them; this TTL limits JackenBerater-owned staleness when calendar CRUD does not
 # produce an entity-state change.
 _CONTEXT_CACHE_TTL = timedelta(minutes=1)
-_FORECAST_FAILURE_RETRY = timedelta(minutes=1)
 
 
 def async_register_api(hass: HomeAssistant) -> None:
@@ -74,6 +97,8 @@ def async_register_api(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, ws_preview)
     websocket_api.async_register_command(hass, ws_open_session)
     websocket_api.async_register_command(hass, ws_profile_setup)
+    websocket_api.async_register_command(hass, ws_profile_weather)
+    websocket_api.async_register_command(hass, ws_profile_context)
     websocket_api.async_register_command(hass, ws_feedback)
     websocket_api.async_register_command(hass, ws_profiles)
     websocket_api.async_register_command(hass, ws_profile_revision)
@@ -275,7 +300,7 @@ async def _ensure_forecast_fresh(
             for source in required_sources
         )
     if isinstance(age, timedelta) and timedelta(0) <= age < FORECAST_REFRESH:
-        if not fetch_failed or age < _FORECAST_FAILURE_RETRY:
+        if not fetch_failed or age < FORECAST_FAILURE_RETRY:
             return True
     try:
         await refresh()
@@ -359,7 +384,37 @@ async def _stable_advice_snapshot(
 
         advice_profile_revision = _profile_revision_marker(manager, profile_id)
 
-        rec = await _recommendation(hass, entry, runtime, active_model)
+        profile_weather = getattr(manager, "profile_weather_entity", None)
+        weather_entity = (
+            profile_weather(profile_id)
+            if callable(profile_weather)
+            else entry.data.get(CONF_WEATHER)
+        )
+        profile_context_getter = getattr(manager, "profile_context", None)
+        profile_context = (
+            profile_context_getter(profile_id)
+            if callable(profile_context_getter)
+            else {
+                key: entry.data.get(key)
+                for key in (
+                    CONF_CONTEXT_CALENDAR, CONF_WORK_ZONE, CONF_WORK_WEATHER,
+                    CONF_WORK_MODE, CONF_WORKDAY_START, CONF_WORKDAY_END,
+                    CONF_VACATION_CALENDAR, CONF_SHIFT_PATTERN, CONF_SHIFT_ANCHOR_DATE,
+                    CONF_SHIFT_EARLY_START, CONF_SHIFT_EARLY_END, CONF_SHIFT_LATE_START,
+                    CONF_SHIFT_LATE_END, CONF_SHIFT_NIGHT_START, CONF_SHIFT_NIGHT_END,
+                )
+                if entry.data.get(key) not in (None, "")
+            }
+        )
+        weather_token = _ADVICE_WEATHER_ENTITY.set(str(weather_entity or ""))
+        profile_id_token = _ADVICE_PROFILE_ID.set(profile_id)
+        profile_context_token = _ADVICE_PROFILE_CONTEXT.set(profile_context)
+        try:
+            rec = await _recommendation(hass, entry, runtime, active_model)
+        finally:
+            _ADVICE_PROFILE_CONTEXT.reset(profile_context_token)
+            _ADVICE_PROFILE_ID.reset(profile_id_token)
+            _ADVICE_WEATHER_ENTITY.reset(weather_token)
         _ensure_runtime_current(entry, runtime, manager)
         if profile_id not in manager.profile_ids:
             raise ValueError("profile_not_found")
@@ -477,10 +532,29 @@ async def _recommendation(
     entry: ConfigEntry,
     runtime: dict[str, Any],
     model,
+    *,
+    profile_id: str = "__legacy__",
+    profile_context: dict[str, Any] | None = None,
 ) -> Recommendation:
     coordinator = runtime["coordinator"]
+    if profile_id == "__legacy__":
+        profile_id = _ADVICE_PROFILE_ID.get()
+    if profile_context is None:
+        profile_context = _ADVICE_PROFILE_CONTEXT.get()
+    if profile_context is None:
+        profile_context = {
+            key: entry.data.get(key)
+            for key in (
+                CONF_CONTEXT_CALENDAR, CONF_WORK_ZONE, CONF_WORK_WEATHER,
+                CONF_WORK_MODE, CONF_WORKDAY_START, CONF_WORKDAY_END,
+                CONF_VACATION_CALENDAR, CONF_SHIFT_PATTERN, CONF_SHIFT_ANCHOR_DATE,
+                CONF_SHIFT_EARLY_START, CONF_SHIFT_EARLY_END, CONF_SHIFT_LATE_START,
+                CONF_SHIFT_LATE_END, CONF_SHIFT_NIGHT_START, CONF_SHIFT_NIGHT_END,
+            )
+            if entry.data.get(key) not in (None, "")
+        }
     now = dt_util.now()
-    weather_entity = str(entry.data[CONF_WEATHER])
+    weather_entity = str(_ADVICE_WEATHER_ENTITY.get() or entry.data.get(CONF_WEATHER) or "")
     home_current = current_weather(hass, weather_entity)
 
     indoor = indoor_temperature_c(
@@ -489,7 +563,7 @@ async def _recommendation(
         float(entry.data.get(CONF_FALLBACK_INDOOR_TEMP, DEFAULT_FALLBACK_INDOOR_TEMP)),
     )
     activity = activity_context_c(now, model.evening_answer)
-    work_entity = entry.data.get(CONF_WORK_WEATHER)
+    work_entity = profile_context.get(CONF_WORK_WEATHER)
     (
         context_horizon,
         context_calendar_status,
@@ -497,7 +571,11 @@ async def _recommendation(
         planning_windows,
         vacation_calendar_status,
     ) = await _calendar_context_bundle(
-        hass, entry, runtime, include_work=bool(isinstance(work_entity, str) and work_entity)
+        hass,
+        runtime,
+        profile_id=profile_id,
+        profile_context=profile_context,
+        include_work=bool(isinstance(work_entity, str) and work_entity),
     )
     if isinstance(work_entity, str) and work_entity:
         actual_windows, planning_windows = _gate_work_context_windows(
@@ -540,57 +618,59 @@ async def _recommendation(
             raise ValueError("weather_unavailable")
         current = home_current
 
-    required_sources = {"home"}
-    if (
-        isinstance(work_entity, str)
-        and work_entity
-        and work_entity != weather_entity
-        and planning_windows
-    ):
-        required_sources.add("work")
-    forecast_fresh = await _ensure_forecast_fresh(
-        coordinator, required_sources=required_sources
-    )
-    forecast_data = (
-        coordinator.data
-        if forecast_fresh and isinstance(getattr(coordinator, "data", None), dict)
-        else {}
-    )
-    forecast = (
-        list(forecast_data.get("home_forecast", []))
-        if forecast_data.get("home_forecast_success", True)
-        else []
-    )
-
-    if isinstance(work_entity, str) and work_entity:
+    # Forecasts are profile-owned just like current weather. Production uses
+    # the coordinator's entity-keyed server cache. The small legacy fallback
+    # keeps older test harnesses/backups readable without reintroducing a second
+    # decision path in Home Assistant itself.
+    forecast_for = getattr(coordinator, "async_forecast_for", None)
+    if callable(forecast_for):
+        home_result = await forecast_for(weather_entity)
+        forecast = list(home_result.points) if home_result.success else []
+        if isinstance(work_entity, str) and work_entity and planning_windows:
+            if work_entity == weather_entity:
+                work_forecast = list(forecast)
+            else:
+                work_result = await forecast_for(work_entity)
+                work_forecast = list(work_result.points) if work_result.success else []
+        else:
+            work_forecast = []
+    else:
+        required_sources = {"home"}
+        if isinstance(work_entity, str) and work_entity and planning_windows:
+            required_sources.add("work")
+        forecast_fresh = await _ensure_forecast_fresh(
+            coordinator, required_sources=required_sources
+        )
+        forecast_data = (getattr(coordinator, "data", {}) or {}) if forecast_fresh else {}
+        forecast = (
+            list(forecast_data.get("home_forecast", []))
+            if forecast_data.get("home_forecast_success", True) else []
+        )
         work_forecast = (
             list(forecast_data.get("work_forecast", []))
-            if forecast_data.get("work_forecast_success", True)
-            else []
+            if forecast_data.get("work_forecast_success", True) else []
         )
-        if planning_windows:
-            if work_start is None:
-                chosen_window = (actual_windows or planning_windows)[0]
-                work_start = chosen_window[0]
-                work_end = chosen_window[1] if actual_windows else None
-            work_points = [
-                point
-                for point in work_forecast
-                if is_after(point.dt, current.dt)
-                and any(
-                    is_between(point.dt, start, end)
-                    for start, end in planning_windows
-                )
-            ]
-            work_forecast_coverage = _work_forecast_coverage(
-                current.dt, work_forecast, planning_windows
+
+    if isinstance(work_entity, str) and work_entity and planning_windows:
+        if work_start is None:
+            chosen_window = (actual_windows or planning_windows)[0]
+            work_start = chosen_window[0]
+            work_end = chosen_window[1] if actual_windows else None
+        work_points = [
+            point
+            for point in work_forecast
+            if is_after(point.dt, current.dt)
+            and any(
+                is_between(point.dt, start, end)
+                for start, end in planning_windows
             )
-            # Work forecast replaces home forecast only inside the planned work
-            # windows. Missing work points stay missing instead of silently using
-            # the wrong location.
-            forecast = merge_location_timeline(
-                forecast, work_forecast, planning_windows
-            )
+        ]
+        work_forecast_coverage = _work_forecast_coverage(
+            current.dt, work_forecast, planning_windows
+        )
+        forecast = merge_location_timeline(
+            forecast, work_forecast, planning_windows
+        )
 
     # If work planning extends the recommendation beyond the ordinary 12-hour
     # weather window, evaluate the complete claimed period.
@@ -605,7 +685,7 @@ async def _recommendation(
         )
 
     work_name = None
-    work_zone = entry.data.get(CONF_WORK_ZONE)
+    work_zone = profile_context.get(CONF_WORK_ZONE)
     if isinstance(work_zone, str) and work_zone:
         zone_state = hass.states.get(work_zone)
         if zone_state is not None:
@@ -731,32 +811,35 @@ def _work_forecast_coverage(
 
 async def _cached_work_window_sets(
     hass: HomeAssistant,
-    entry: ConfigEntry,
-    runtime: dict[str, Any],
+    entry_or_runtime,
+    runtime: dict[str, Any] | None = None,
+    *,
+    profile_id: str = "__legacy__",
+    profile_context: dict[str, Any] | None = None,
 ) -> tuple[list[tuple[datetime, datetime]], list[tuple[datetime, datetime]], str]:
+    if runtime is None:
+        runtime = entry_or_runtime
+    elif profile_context is None:
+        profile_context = dict(getattr(entry_or_runtime, "data", {}) or {})
+    if profile_context is None:
+        profile_context = {}
     now = dt_util.now()
-    cache = runtime.setdefault("context_cache", {})
+    cache_root = runtime.setdefault("context_cache", {})
+    cache = cache_root if profile_id == "__legacy__" else cache_root.setdefault(profile_id, {})
     updated = cache.get("updated")
     age = elapsed(updated, now) if isinstance(updated, datetime) else None
     if isinstance(age, timedelta) and timedelta(0) <= age < _CONTEXT_CACHE_TTL:
         return (
             list(cache.get("work_windows_actual", [])),
             list(cache.get("work_windows_planning", [])),
-            str(
-                cache.get(
-                    "vacation_calendar_status", CALENDAR_STATUS_NOT_CONFIGURED
-                )
-            ),
+            str(cache.get("vacation_calendar_status", CALENDAR_STATUS_NOT_CONFIGURED)),
         )
 
-    # At most one retry: if a calendar event invalidates the cache while the
-    # service request is in flight, never use that now-stale answer for the
-    # current recommendation. A second concurrent invalidation falls back
-    # conservatively instead of spinning forever.
+    context_entry = SimpleNamespace(data=profile_context)
     for attempt in range(2):
         generation = int(runtime.get("context_cache_generation", 0))
         actual, planning, vacation_status = await work_windows(
-            hass, entry, now, return_actual=True
+            hass, context_entry, now, return_actual=True
         )
         if int(runtime.get("context_cache_generation", 0)) != generation:
             if attempt == 0:
@@ -772,13 +855,23 @@ async def _cached_work_window_sets(
 
 async def _cached_calendar_horizon(
     hass: HomeAssistant,
-    entry: ConfigEntry,
-    runtime: dict[str, Any],
+    entry_or_runtime,
+    runtime: dict[str, Any] | None = None,
+    *,
+    profile_id: str = "__legacy__",
+    profile_context: dict[str, Any] | None = None,
 ) -> tuple[int | None, str]:
-    if not entry.data.get(CONF_CONTEXT_CALENDAR):
+    if runtime is None:
+        runtime = entry_or_runtime
+    elif profile_context is None:
+        profile_context = dict(getattr(entry_or_runtime, "data", {}) or {})
+    if profile_context is None:
+        profile_context = {}
+    if not profile_context.get(CONF_CONTEXT_CALENDAR):
         return None, CALENDAR_STATUS_NOT_CONFIGURED
     now = dt_util.now()
-    cache = runtime.setdefault("context_cache", {})
+    cache_root = runtime.setdefault("context_cache", {})
+    cache = cache_root if profile_id == "__legacy__" else cache_root.setdefault(profile_id, {})
     updated = cache.get("calendar_updated")
     age = elapsed(updated, now) if isinstance(updated, datetime) else None
     if isinstance(age, timedelta) and timedelta(0) <= age < _CONTEXT_CACHE_TTL:
@@ -786,9 +879,10 @@ async def _cached_calendar_horizon(
         status = str(cache.get("calendar_status", CALENDAR_STATUS_AVAILABLE))
         return (int(value) if isinstance(value, int) else None), status
 
+    context_entry = SimpleNamespace(data=profile_context)
     for attempt in range(2):
         generation = int(runtime.get("context_cache_generation", 0))
-        value, status = await calendar_context_horizon(hass, entry, now)
+        value, status = await calendar_context_horizon(hass, context_entry, now)
         if int(runtime.get("context_cache_generation", 0)) != generation:
             if attempt == 0:
                 continue
@@ -802,9 +896,11 @@ async def _cached_calendar_horizon(
 
 async def _calendar_context_bundle(
     hass: HomeAssistant,
-    entry: ConfigEntry,
-    runtime: dict[str, Any],
+    entry_or_runtime,
+    runtime: dict[str, Any] | None = None,
     *,
+    profile_id: str = "__legacy__",
+    profile_context: dict[str, Any] | None = None,
     include_work: bool,
 ) -> tuple[
     int | None,
@@ -813,19 +909,21 @@ async def _calendar_context_bundle(
     list[tuple[datetime, datetime]],
     str,
 ]:
-    """Read all calendar-derived inputs from one cache generation.
-
-    The individual cache helpers already reject responses invalidated while
-    their own service call is in flight. This outer guard prevents one
-    recommendation from knowingly combining a context-horizon result from one
-    generation with work/vacation windows from a newer generation.
-    """
+    """Read all profile-local calendar-derived inputs coherently."""
+    if runtime is None:
+        runtime = entry_or_runtime
+    elif profile_context is None:
+        profile_context = dict(getattr(entry_or_runtime, "data", {}) or {})
+    if profile_context is None:
+        profile_context = {}
     for attempt in range(2):
         generation = int(runtime.get("context_cache_generation", 0))
-        horizon, context_status = await _cached_calendar_horizon(hass, entry, runtime)
+        horizon, context_status = await _cached_calendar_horizon(
+            hass, runtime, profile_id=profile_id, profile_context=profile_context
+        )
         if include_work:
             actual, planning, vacation_status = await _cached_work_window_sets(
-                hass, entry, runtime
+                hass, runtime, profile_id=profile_id, profile_context=profile_context
             )
         else:
             actual, planning = [], []
@@ -836,9 +934,6 @@ async def _calendar_context_bundle(
         if attempt == 0:
             continue
 
-    # A second concurrent invalidation means external calendar state is moving
-    # faster than this recommendation can obtain a coherent snapshot. Fall back
-    # conservatively rather than mixing known-stale generations.
     return (
         None,
         CALENDAR_STATUS_UNAVAILABLE,
@@ -846,6 +941,85 @@ async def _calendar_context_bundle(
         [],
         CALENDAR_STATUS_UNAVAILABLE if include_work else CALENDAR_STATUS_NOT_APPLICABLE,
     )
+
+
+def _profile_watched_entities(
+    entry: ConfigEntry, manager: ProfileManager, profile_id: str
+) -> list[str]:
+    """Return entities that can change the visible advice for one profile."""
+    context_getter = getattr(manager, "profile_context", None)
+    context = (context_getter(profile_id) if profile_id in manager.profile_ids and callable(context_getter) else {})
+    weather_getter = getattr(manager, "profile_weather_entity", None)
+    work_enabled = context.get(CONF_WORK_MODE, WORK_MODE_NONE) != WORK_MODE_NONE
+    return list(dict.fromkeys(
+        entity_id
+        for entity_id in (
+            (weather_getter(profile_id) if profile_id in manager.profile_ids and callable(weather_getter) else entry.data.get(CONF_WEATHER)),
+            context.get(CONF_WORK_WEATHER) if work_enabled else None,
+            entry.data.get(CONF_INDOOR_TEMP),
+            context.get(CONF_CONTEXT_CALENDAR),
+            context.get(CONF_VACATION_CALENDAR) if work_enabled else None,
+            context.get(CONF_WORK_ZONE) if work_enabled else None,
+        )
+        if isinstance(entity_id, str) and entity_id
+    ))
+
+
+def _normalize_profile_context_payload(raw: Any) -> dict[str, Any]:
+    """Validate one profile's personal work/calendar configuration."""
+    if not isinstance(raw, dict):
+        raise ValueError("invalid_profile_context")
+    allowed = {
+        CONF_CONTEXT_CALENDAR, CONF_WORK_ZONE, CONF_WORK_WEATHER, CONF_WORK_MODE,
+        CONF_WORKDAY_START, CONF_WORKDAY_END, CONF_VACATION_CALENDAR,
+        CONF_SHIFT_PATTERN, CONF_SHIFT_ANCHOR_DATE, CONF_SHIFT_EARLY_START,
+        CONF_SHIFT_EARLY_END, CONF_SHIFT_LATE_START, CONF_SHIFT_LATE_END,
+        CONF_SHIFT_NIGHT_START, CONF_SHIFT_NIGHT_END,
+    }
+    context = {
+        key: value for key, value in raw.items()
+        if key in allowed and value not in (None, "")
+    }
+    mode = str(context.get(CONF_WORK_MODE, WORK_MODE_NONE)).strip().lower()
+    if mode not in WORK_MODES:
+        raise ValueError("invalid_work_mode")
+    context[CONF_WORK_MODE] = mode
+    context.setdefault(CONF_WORKDAY_START, DEFAULT_WORKDAY_START)
+    context.setdefault(CONF_WORKDAY_END, DEFAULT_WORKDAY_END)
+
+    def time_key(value: Any) -> tuple[int, int] | None:
+        try:
+            parts = str(value).split(":")
+            hour, minute = int(parts[0]), int(parts[1])
+            if 0 <= hour <= 23 and 0 <= minute <= 59:
+                return hour, minute
+        except (TypeError, ValueError, IndexError):
+            pass
+        return None
+
+    def require_distinct(start_key: str, end_key: str, default_start: str, default_end: str) -> None:
+        start_value = context.get(start_key, default_start)
+        end_value = context.get(end_key, default_end)
+        a, b = time_key(start_value), time_key(end_value)
+        if a is None or b is None or a == b:
+            raise ValueError("invalid_work_time")
+
+    require_distinct(CONF_WORKDAY_START, CONF_WORKDAY_END, DEFAULT_WORKDAY_START, DEFAULT_WORKDAY_END)
+    if mode == WORK_MODE_SHIFT:
+        tokens = [x.strip().upper() for x in str(context.get(CONF_SHIFT_PATTERN, "")).split(",") if x.strip()]
+        if not tokens or any(token not in {"F", "S", "N", "X"} for token in tokens):
+            raise ValueError("invalid_shift_pattern")
+        if not context.get(CONF_SHIFT_ANCHOR_DATE):
+            raise ValueError("shift_anchor_required")
+        for start_key, end_key, default_start, default_end in (
+            (CONF_SHIFT_EARLY_START, CONF_SHIFT_EARLY_END, "06:00", "14:00"),
+            (CONF_SHIFT_LATE_START, CONF_SHIFT_LATE_END, "14:00", "22:00"),
+            (CONF_SHIFT_NIGHT_START, CONF_SHIFT_NIGHT_END, "22:00", "06:00"),
+        ):
+            require_distinct(start_key, end_key, default_start, default_end)
+    if mode != WORK_MODE_NONE and not context.get(CONF_WORK_WEATHER):
+        raise ValueError("work_weather_required")
+    return context
 
 
 def _effective_wind(wind_kmh: float | None, gust_kmh: float | None) -> float | None:
@@ -935,31 +1109,79 @@ async def ws_preview(hass, connection, msg) -> None:
             allow_shared_read=True,
         )
         _ensure_runtime_current(entry, runtime, manager)
-        (
-            active_model,
-            rec,
-            simulation_active,
-            advice_revision,
-            advice_directory_revision,
-        ) = await _stable_advice_snapshot(
-            hass,
-            connection,
-            entry,
-            runtime,
-            manager,
-            profile_id,
-            allow_simulation=True,
-        )
         read_only_shared = _is_shared_account(connection, entry) and not connection.user.is_admin
         summary = _profile_summary_for_connection(
             connection, entry, manager.get_profile_summary(profile_id)
         )
+        base_result = {
+            "entry_id": entry.entry_id,
+            "profile": summary,
+            "watched_entities": _profile_watched_entities(entry, manager, profile_id),
+            "profile_revision": _revision_token_for_connection(
+                connection, entry, manager, profile_id
+            ),
+            "directory_revision": _directory_revision_marker(manager),
+        }
+
+        # Setup/profile repair must never depend on a working weather provider.
+        # An incomplete profile therefore exposes its shell without attempting
+        # recommendation calculation at all.
+        if not model.setup_complete:
+            result = {
+                **base_result,
+                "recommendation": None,
+                "advice_error": None,
+                "feedback": [],
+                "latest_session": None,
+            }
+            if not read_only_shared:
+                result["diagnostics"] = model_diagnostics(model, simulation_active=False)
+            connection.send_result(msg["id"], result)
+            return
+
+        try:
+            (
+                active_model,
+                rec,
+                simulation_active,
+                advice_revision,
+                advice_directory_revision,
+            ) = await _stable_advice_snapshot(
+                hass,
+                connection,
+                entry,
+                runtime,
+                manager,
+                profile_id,
+                allow_simulation=True,
+            )
+        except ValueError as err:
+            # A broken/missing personal weather source is a recoverable profile
+            # state, not a reason to hide the UI that can repair it. The same is
+            # true for personal work weather.
+            if str(err) not in {"weather_unavailable", "work_weather_unavailable"}:
+                raise
+            active_model = manager.get_model(profile_id)
+            result = {
+                **base_result,
+                "recommendation": None,
+                "advice_error": str(err),
+                "feedback": manager.feedback_candidates(profile_id),
+                "latest_session": (None if read_only_shared else manager.latest_session(profile_id)),
+            }
+            if not read_only_shared:
+                result["diagnostics"] = model_diagnostics(active_model, simulation_active=False)
+            connection.send_result(msg["id"], result)
+            return
+
         feedback = manager.feedback_candidates(profile_id)
         result = {
             "entry_id": entry.entry_id,
             "profile": summary,
             "recommendation": rec.as_dict(),
+            "advice_error": None,
             "feedback": [] if simulation_active else feedback,
+            "watched_entities": _profile_watched_entities(entry, manager, profile_id),
             "profile_revision": advice_revision,
             "directory_revision": advice_directory_revision,
             "latest_session": (
@@ -968,8 +1190,6 @@ async def ws_preview(hass, connection, msg) -> None:
                 else manager.latest_session(profile_id)
             ),
         }
-        # Detailed model values are personal diagnostics. Shared control
-        # surfaces receive only the selected profile's advice and due feedback.
         if not read_only_shared:
             result["diagnostics"] = model_diagnostics(
                 active_model, simulation_active=simulation_active
@@ -1020,6 +1240,9 @@ async def ws_open_session(hass, connection, msg) -> None:
         )
         if profile_id not in manager.profile_ids:
             raise ValueError("profile_not_found")
+        # ProfileManager is the single authority for cross-device reuse. It
+        # compares recommendation, weather snapshot, learning contract and policy
+        # before deciding whether the phone/tablet may join an existing session.
         session = await manager.async_open_session(
             profile_id,
             rec,
@@ -1063,6 +1286,7 @@ async def ws_open_session(hass, connection, msg) -> None:
         vol.Required("wind"): vol.All(int, vol.Range(min=1, max=5)),
         vol.Required("evening"): vol.All(int, vol.Range(min=1, max=5)),
         vol.Optional("pullover", default=3): vol.All(int, vol.Range(min=1, max=5)),
+        vol.Optional("weather_entity"): str,
     }
 )
 @websocket_api.async_response
@@ -1072,6 +1296,9 @@ async def ws_profile_setup(hass, connection, msg) -> None:
         manager: ProfileManager = runtime["profiles"]
         profile_id, _ = await _profile(connection, manager, msg.get("profile_id"), entry)
         _ensure_runtime_current(entry, runtime, manager)
+        setup_weather = msg.get("weather_entity") or manager.profile_weather_entity(profile_id)
+        if not setup_weather or not str(setup_weather).startswith("weather.") or hass.states.get(str(setup_weather)) is None:
+            raise ValueError("invalid_weather_entity")
         await manager.async_setup_profile(
             profile_id,
             cold=msg["cold"],
@@ -1079,11 +1306,85 @@ async def ws_profile_setup(hass, connection, msg) -> None:
             wind=msg["wind"],
             evening=msg["evening"],
             pullover=msg["pullover"],
+            weather_entity=str(setup_weather),
         )
         _ensure_runtime_current(entry, runtime, manager)
         connection.send_result(msg["id"], manager.get_profile_summary(profile_id))
     except ValueError as err:
         connection.send_error(msg["id"], "unavailable", str(err))
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "jackenberater/profile_weather",
+        vol.Optional("entry_id"): str,
+        vol.Optional("profile_id"): str,
+        vol.Required("weather_entity"): str,
+    }
+)
+@websocket_api.async_response
+async def ws_profile_weather(hass, connection, msg) -> None:
+    """Set the weather source owned by one personal advice profile."""
+    try:
+        entry, runtime = _runtime(hass, msg.get("entry_id"))
+        manager: ProfileManager = runtime["profiles"]
+        profile_id, _ = await _profile(
+            connection, manager, msg.get("profile_id"), entry
+        )
+        _ensure_runtime_current(entry, runtime, manager)
+        entity_id = str(msg["weather_entity"])
+        state = hass.states.get(entity_id)
+        if not entity_id.startswith("weather.") or state is None:
+            raise ValueError("invalid_weather_entity")
+        await manager.async_set_weather_entity(profile_id, entity_id)
+        _ensure_runtime_current(entry, runtime, manager)
+        connection.send_result(
+            msg["id"], manager.get_profile_summary(profile_id)
+        )
+    except (ValueError, KeyError) as err:
+        message = "profile_not_found" if isinstance(err, KeyError) else str(err)
+        connection.send_error(msg["id"], "unavailable", message)
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "jackenberater/profile_context",
+        vol.Optional("entry_id"): str,
+        vol.Optional("profile_id"): str,
+        vol.Required("context"): dict,
+    }
+)
+@websocket_api.async_response
+async def ws_profile_context(hass, connection, msg) -> None:
+    """Replace one personal profile's work/calendar context."""
+    try:
+        entry, runtime = _runtime(hass, msg.get("entry_id"))
+        manager: ProfileManager = runtime["profiles"]
+        profile_id, _ = await _profile(connection, manager, msg.get("profile_id"), entry)
+        _ensure_runtime_current(entry, runtime, manager)
+        context = _normalize_profile_context_payload(msg.get("context"))
+
+        entity_domains = {
+            CONF_CONTEXT_CALENDAR: "calendar.",
+            CONF_VACATION_CALENDAR: "calendar.",
+            CONF_WORK_WEATHER: "weather.",
+            CONF_WORK_ZONE: "zone.",
+        }
+        for key, prefix in entity_domains.items():
+            entity_id = context.get(key)
+            if entity_id and (not str(entity_id).startswith(prefix) or hass.states.get(str(entity_id)) is None):
+                raise ValueError(f"invalid_{key}")
+
+        await manager.async_set_profile_context(profile_id, context)
+        # Context cache is scoped per profile. A config mutation must take effect
+        # immediately rather than waiting for the normal one-minute TTL.
+        runtime.setdefault("context_cache", {}).pop(profile_id, None)
+        runtime["context_cache_generation"] = int(runtime.get("context_cache_generation", 0)) + 1
+        _ensure_runtime_current(entry, runtime, manager)
+        connection.send_result(msg["id"], manager.get_profile_summary(profile_id))
+    except (ValueError, KeyError) as err:
+        message = "profile_not_found" if isinstance(err, KeyError) else str(err)
+        connection.send_error(msg["id"], "unavailable", message)
 
 
 @websocket_api.websocket_command(
@@ -1231,17 +1532,14 @@ async def ws_profiles(hass, connection, msg) -> None:
                 connection, entry, manager, requested_for_revision
             ),
             "directory_revision": _directory_revision_marker(manager),
-            "watched_entities": list(dict.fromkeys(
-                entity_id
-                for entity_id in (
-                    entry.data.get(CONF_WEATHER),
-                    entry.data.get(CONF_WORK_WEATHER),
-                    entry.data.get(CONF_INDOOR_TEMP),
-                    entry.data.get(CONF_CONTEXT_CALENDAR),
-                    entry.data.get(CONF_VACATION_CALENDAR),
-                )
-                if isinstance(entity_id, str) and entity_id
-            )),
+            "watched_entities": (
+                _profile_watched_entities(entry, manager, requested_for_revision or own_id)
+                if (requested_for_revision or own_id) in manager.profile_ids
+                else [
+                    entity_id for entity_id in (entry.data.get(CONF_INDOOR_TEMP),)
+                    if isinstance(entity_id, str) and entity_id
+                ]
+            ),
             "profiles": summaries,
         },
     )

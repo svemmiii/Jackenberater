@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import timedelta
 
 DOMAIN = "jackenberater"
-INTEGRATION_VERSION = "0.4.2"
+INTEGRATION_VERSION = "0.5.0"
 PLATFORMS = ["sensor"]
 PROFILE_BACKUP_ENABLED = False
 
@@ -69,6 +69,7 @@ WORK_BUFFER = timedelta(minutes=30)
 WORK_CONTEXT_LEAD = timedelta(hours=3)
 SESSION_DEDUPE = timedelta(minutes=30)
 FORECAST_REFRESH = timedelta(minutes=15)
+FORECAST_FAILURE_RETRY = timedelta(minutes=1)
 SESSION_EXPIRY = timedelta(hours=36)
 FEEDBACK_MIN_DELAY = timedelta(minutes=30)
 WET_SPECIALIST_MIN_C = 0.50

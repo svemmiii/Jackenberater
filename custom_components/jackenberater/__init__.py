@@ -11,7 +11,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
-from homeassistant.helpers.event import async_track_state_change_event, async_track_time_interval
+from homeassistant.helpers.event import async_track_time_interval
 
 from .api import async_register_api
 from .const import (
@@ -39,7 +39,7 @@ FRONTEND_URL = "/jackenberater/frontend"
 FRONTEND_FILE = "jackenberater-card.js"
 # Frontend cache revision. The release version already busts the resource URL;
 # keep a small independent revision for frontend-only fixes within the same release.
-FRONTEND_CACHE_REVISION = "19"
+FRONTEND_CACHE_REVISION = "23"
 LEGACY_PROFILE_ENTITY_SUFFIXES = (
     "_learning_enabled",
     "_reset_learning",
@@ -216,11 +216,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
     coordinator = JackenWeatherCoordinator(hass, entry)
     await coordinator.async_config_entry_first_refresh()
-    # DataUpdateCoordinator only schedules update_interval polling while at least
-    # one listener is registered. JackenBerater consumes the coordinator directly
-    # from its WebSocket API instead of through CoordinatorEntity, so keep one
-    # integration-owned listener alive or the startup forecast would slowly age
-    # away until only the final cached hour remained.
+    # Keep the coordinator lifecycle active. In v0.5.0 its periodic refresh does
+    # not poll a global weather source; personal forecasts are fetched on demand
+    # and cached by entity through the server-side advice path.
     entry.async_on_unload(coordinator.async_add_listener(lambda: None))
 
     entry.runtime_data = {
@@ -232,32 +230,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "unloading": False,
     }
 
-    # Calendar windows are cached for efficiency, but an explicit calendar state
-    # change should invalidate that cache immediately. This keeps last-minute
-    # vacation/absence edits and context-calendar changes from lingering for up to
-    # the short internal TTL.
-    calendar_entities = [
-        entity_id
-        for entity_id in (
-            entry.data.get(CONF_CONTEXT_CALENDAR),
-            entry.data.get(CONF_VACATION_CALENDAR),
-        )
-        if isinstance(entity_id, str) and entity_id
-    ]
-    if calendar_entities:
-        def _invalidate_calendar_cache(_event) -> None:
-            runtime = getattr(entry, "runtime_data", None)
-            if isinstance(runtime, dict):
-                runtime["context_cache_generation"] = int(
-                    runtime.get("context_cache_generation", 0)
-                ) + 1
-                runtime.setdefault("context_cache", {}).clear()
+    # Personal profiles may point at different calendars and can change those
+    # selections at runtime. Listen once for calendar state changes instead of
+    # registering a static list from the integration-wide config entry.
+    def _invalidate_calendar_cache(event) -> None:
+        entity_id = str(event.data.get("entity_id") or "")
+        if not entity_id.startswith("calendar."):
+            return
+        runtime = getattr(entry, "runtime_data", None)
+        if isinstance(runtime, dict):
+            runtime["context_cache_generation"] = int(
+                runtime.get("context_cache_generation", 0)
+            ) + 1
+            runtime.setdefault("context_cache", {}).clear()
 
-        entry.async_on_unload(
-            async_track_state_change_event(
-                hass, list(dict.fromkeys(calendar_entities)), _invalidate_calendar_cache
-            )
-        )
+    entry.async_on_unload(hass.bus.async_listen("state_changed", _invalidate_calendar_cache))
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     entry.async_on_unload(entry.add_update_listener(_async_reload))

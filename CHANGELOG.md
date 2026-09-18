@@ -1,5 +1,54 @@
 # Changelog
 
+## v0.5.0
+
+### Personenprofile / Migration
+- Wetterquelle, Arbeitsmodus, Schichtmuster, Arbeitszeiten, Arbeitswetter, Arbeitszone sowie Kontext- und Abwesenheitskalender sind jetzt profilbezogen statt integrationsweit. Bestehende Personenprofile übernehmen beim Upgrade die bisherigen globalen persönlichen Werte einmalig; neu angelegte Profile starten neutral und erben keine fremde Wetter-/Arbeitskonfiguration.
+- Die Integration selbst enthält nur noch gemeinsame technische Optionen und Shared-/Wandtablet-Zugriffe. Ein Shared-Konto ist kein Beratungsprofil.
+
+### Serverseitiger Lifecycle
+- Empfehlung, Forecast-Auswertung, Sessionzustand und Lernen werden serverseitig pro Profil geführt. Handy und Wandtablet verwenden dieselbe fertige Profilauswertung; die bestehende Hauptkarte und Shared-Tablet-Bedienung bleiben optisch unverändert.
+- `preview` liefert Profilmetadaten auch bei noch fehlender oder defekter Weather-Entity. Erst-Setup und Recovery bleiben dadurch erreichbar; das Setup übernimmt beim Öffnen den ersten tatsächlich gültigen `weather.*`-Wert auch intern.
+- Bei einer defekten Profil-Wetterquelle kann der Eigentümer/Admin die Entity im bestehenden Info-Bereich reparieren, ohne dass die Fehlerkarte den Zugang blockiert.
+- `ws_open_session` delegiert jede Sessionentscheidung an `ProfileManager.async_open_session()`. Semantische Recommendation-, Weather-, Learning-Contract- und Policy-Prüfungen können damit nicht mehr durch einen vereinfachten 30-Minuten-Shortcut umgangen werden.
+- `watched_entities` kommen mit dem Preview des tatsächlich dargestellten Profils. Ein aus `localStorage` restauriertes Shared-Profil beobachtet daher sofort seine eigene Wetter-/Kalenderquelle statt bis zum Vollrefresh einen Default.
+
+### Profilpflege
+- Persönlicher Arbeits-/Schicht-/Kalenderkontext ist im vorhandenen Info-Bereich editierbar. Änderungen verwerfen offene Sessions des alten Entscheidungskontexts.
+- Die ursprünglichen fünf Startantworten können bewusst erneut bearbeitet werden. Das vorhandene vollständige Re-Setup ersetzt Lernmodell und alte Sessions; die UI warnt vor dem Reset.
+
+### Forecast-Retry / Effizienz
+- Profilbezogene Forecastfehler verwenden jetzt denselben kurzen Retry wie der Legacy-Pfad: erfolgreiche Abrufe (auch erfolgreich leere Forecasts) bleiben 15 Minuten gecacht, echte Provider-/Parsingfehler nur 1 Minute. Eine kurze Wetteranbieter-Störung blockiert damit keine Zukunftsberatung mehr bis zu 15 Minuten.
+- Arbeitsforecast wird nur noch abgefragt, wenn tatsächlich ein relevantes `planning_window` existiert. Bei `work_mode = none` bleiben gespeicherte Arbeitswerte erhalten, werden aber nicht unnötig beobachtet oder gecacht.
+
+### Home-Assistant-Neustart / Frontend-Recovery
+- Die Karte lauscht auf `disconnected` und `ready` der Home-Assistant-WebSocket-Verbindung. Ein Core-Neustart lässt dadurch keinen transienten Verbindungsfehler dauerhaft in der Karte stehen.
+- Der Restart-Race ist jetzt explizit abgedeckt: `ready` kann bereits eintreffen, während JackenBerater selbst noch `integration_reloading`, `JackenBerater is not loaded` oder kurzzeitig `unknown_command` liefert. Solche Fehler verwenden einen eigenen schnellen Retry (0,5 / 1 / 2 / 4 / 8 / 15 / 30 s) statt des normalen 60-Sekunden-State-Backoffs.
+- Während der Socket wirklich getrennt ist, werden keine sinnlosen Requests erzeugt; die letzte gültige Beratung bleibt bei einer bereits geladenen Karte sichtbar. Nach erfolgreichem Profil-/Preview-Refresh endet der Recovery-Modus automatisch.
+- Connection- und Recovery-Timer werden beim Entfernen bzw. Neukonfigurieren der Karte sauber aufgeräumt.
+
+### Release
+- Frontend-Cache auf `ui=23` erhöht.
+- Haupt-Beratungskarte bleibt im normalen Zustand bewusst auf dem v0.4.2-Look; der erfolgreiche Compact-/Full-Renderzweig wurde direkt gegen v0.4.2 verglichen und ist unverändert. Neue Bedienelemente befinden sich nur in Setup/Info/Recovery.
+- **448 / 448** HA-unabhängige Python-Tests bestanden, zusätzlich JS-Syntaxcheck, Python-Compilecheck sowie JSON-/YAML-Validierung. Der echte HA-Runtime-Smoke bleibt Aufgabe der CI bzw. einer Umgebung mit installiertem Home Assistant; die lokale Prüfcontainer-Umgebung enthält das `homeassistant`-Paket nicht.
+
+## v0.4.3
+
+### Profilwetter / gemeinsames Tablet
+- Die primäre Wetterquelle gehört jetzt zum **JackenBerater-Profil** statt zum anzeigenden Gerät. Bestehende v0.4.2-Profile übernehmen beim Upgrade automatisch einmalig die bisherige globale Wetterentität, sodass keine Neueinrichtung nötig ist.
+- Jedes persönliche Profil kann seine eigene `weather.*`-Entität verwenden. Handy und gemeinsames Wandtablet lesen damit dieselbe serverseitig berechnete Beratung für das ausgewählte Profil; das Tablet besitzt keine eigene Wetterentscheidung.
+- Die bisher globale Wetterentität im Integrations-Setup ist nur noch optionaler Alt-/Standardwert. Ein reines Shared-/Wandtablet benötigt keine eigene Wetterquelle.
+- Die Profil-Wetterquelle kann im persönlichen Setup und später im Info-Bereich geändert werden. Ein Wechsel verwirft offene Feedback-Sessions des alten Wetterkontexts, damit keine Bewertung gegen eine andere Quelle trainiert wird.
+- Mobile/profilbezogene Forecasts werden serverseitig für den normalen 15-Minuten-Zeitraum gecacht. Dadurch entstehen bei mehreren Oberflächen keine doppelten Forecast-Abfragen pro Anzeige.
+
+### Profilweite Sessions
+- Eine frisch geöffnete Session gehört jetzt für 30 Minuten dem **Profil**, nicht dem Gerät. Öffnet das Wandtablet eine Session und kurz danach dasselbe Profil auf dem Handy, wird dieselbe Session wiederverwendet statt parallel eine zweite zu erzeugen.
+- Profilwahl, Feedback und die bestehende Shared-Tablet-Bedienlogik bleiben unverändert; insbesondere behält das Tablet seine zuletzt gewählte Person und kann fälliges Feedback für das ausgewählte Profil beantworten.
+
+### Tests
+- HA-unabhängige Regressionen um Profil-Wettertrennung und profilweite aktive Sessions ergänzt; bestehender Frontend-Session-Vertrag bleibt grün.
+- Frontend-Cache auf `ui=20` erhöht.
+
 ## v0.4.2
 
 - Wet-Active-Learning ist jetzt an dieselbe Materialität wie der Nässe-Spezialist gebunden: kontinuierliche thermische Nässe unter 0,50 K bleibt wirksam, erzeugt aber weder `wet`-Unusual-Feedback noch Early-Specialist-Sichtbarkeit und kann dadurch nicht fälschlich allgemeine Jackengrenzen trainieren.

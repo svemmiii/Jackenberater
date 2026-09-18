@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 import logging
 import math
 from typing import Any
@@ -10,18 +10,12 @@ from typing import Any
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 from homeassistant.util.unit_conversion import DistanceConverter, TemperatureConverter
 from homeassistant.const import UnitOfLength, UnitOfTemperature
 
-from .const import (
-    CONF_WEATHER,
-    CONF_WORK_MODE,
-    CONF_WORK_WEATHER,
-    FORECAST_REFRESH,
-    WORK_MODE_NONE,
-)
+from .const import FORECAST_FAILURE_RETRY, FORECAST_REFRESH
 from .models import WeatherPoint
 from .time_utils import instant_key
 
@@ -288,44 +282,47 @@ class JackenWeatherCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             update_interval=FORECAST_REFRESH,
         )
         self.entry = entry
+        self._profile_forecasts: dict[str, tuple[datetime, ForecastFetchResult]] = {}
+
+    async def async_forecast_for(self, entity_id: str) -> ForecastFetchResult:
+        """Return the server-cached hourly forecast for one profile entity.
+
+        v0.5.0 deliberately has no integration-wide Home/Work weather owner.
+        Every personal profile names the entities it needs and all UIs consume
+        the same entity-keyed cache through the server-side advice path.
+        """
+        entity_id = str(entity_id or "").strip()
+        if not entity_id.startswith("weather."):
+            return ForecastFetchResult([], False)
+
+        cached = self._profile_forecasts.get(entity_id)
+        now = dt_util.now()
+        if cached is not None:
+            cached_at, result = cached
+            ttl = FORECAST_REFRESH if result.success else FORECAST_FAILURE_RETRY
+            if timedelta(0) <= now - cached_at < ttl:
+                return ForecastFetchResult(list(result.points), result.success)
+
+        result = await _fetch_hourly(self.hass, entity_id)
+        self._profile_forecasts[entity_id] = (now, result)
+        return ForecastFetchResult(list(result.points), result.success)
 
     async def _async_update_data(self) -> dict[str, Any]:
-        home_entity = str(self.entry.data[CONF_WEATHER])
-        home_result = await _fetch_hourly(self.hass, home_entity)
-        home = home_result.points
+        """Maintain coordinator health without polling any personal weather.
 
-        work_enabled = self.entry.data.get(CONF_WORK_MODE) != WORK_MODE_NONE
-        work_entity = self.entry.data.get(CONF_WORK_WEATHER) if work_enabled else None
-        work_result = ForecastFetchResult([], True)
-        work: list[WeatherPoint] = []
-        if isinstance(work_entity, str) and work_entity and work_entity != home_entity:
-            work_result = await _fetch_hourly(self.hass, work_entity)
-            work = work_result.points
-        elif work_entity == home_entity:
-            work_result = ForecastFetchResult(list(home), home_result.success)
-            work = list(home)
-
-        # The recommendation layer decides which current location is relevant.
-        # Do not make a broken home source poison a healthy work source before
-        # that work-context decision can be made. Only fail the coordinator when
-        # neither configured location has forecast nor usable current weather.
-        home_usable = bool(home) or current_weather(self.hass, home_entity) is not None
-        work_usable = False
-        if isinstance(work_entity, str) and work_entity:
-            work_usable = bool(work) or current_weather(self.hass, work_entity) is not None
-        if not home_usable and not work_usable:
-            raise UpdateFailed("No configured weather source is currently usable")
-
-        updated = dt_util.now()
-        configured_results = [home_result]
-        if isinstance(work_entity, str) and work_entity and work_entity != home_entity:
-            configured_results.append(work_result)
-        return {
-            "home_forecast": home,
-            "work_forecast": work,
-            "home_forecast_success": home_result.success,
-            "work_forecast_success": work_result.success,
-            "forecast_fetch_failed": any(not result.success for result in configured_results),
-            "updated": updated,
+        Forecast network calls are demand-driven by ``async_forecast_for``.
+        The coordinator refresh clock only prunes expired cache entries so a
+        stale legacy ConfigEntry can never cause hidden duplicate Home/Work
+        requests after profiles have become the source of truth.
+        """
+        now = dt_util.now()
+        self._profile_forecasts = {
+            entity_id: cached
+            for entity_id, cached in self._profile_forecasts.items()
+            if timedelta(0) <= now - cached[0]
+            < (FORECAST_REFRESH if cached[1].success else FORECAST_FAILURE_RETRY)
         }
-
+        return {
+            "forecast_fetch_failed": False,
+            "updated": now,
+        }

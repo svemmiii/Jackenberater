@@ -1,4 +1,4 @@
-# JackenBerater v0.4.2
+# JackenBerater v0.5.0
 
 JackenBerater ist eine Home-Assistant-Integration für persönliche Jackenempfehlungen. Sie verwendet aktuelle Wetterdaten, den Forecast und optional persönliche Rückmeldungen.
 
@@ -27,19 +27,24 @@ JackenBerater wird derzeit als **Custom Repository** hinzugefügt:
 
 ## Einrichtung
 
-Pflicht:
+Die Integration selbst enthält ab v0.5.0 nur noch gemeinsame technische Einstellungen. Ein normales Benutzerkonto richtet anschließend direkt sein **persönliches Profil** in der Karte ein; ein Shared-/Wandtablet ist nur eine Bedienoberfläche und besitzt kein eigenes Beratungsprofil.
 
-- Wetterquelle für Zuhause
-
-Optional:
+Integrationweit optional:
 
 - Innenraum-Temperatursensor
 - Fallback-Innentemperatur
-- Kalender für längere Zeitkontexte
-- Wetterquelle für den Arbeitsort
-- normale Arbeitswoche oder Schichtmodell
-- Abwesenheitskalender für den Arbeitskontext
+- Regenhinweis
 - Shared-/Wandtablet-Konten
+
+Persönlich pro Profil:
+
+- eigene `weather.*`-Wetterquelle
+- fünf Startantworten zum persönlichen Wärmeempfinden
+- optional Kontext-/Terminkalender
+- optional eigene Arbeitswetterquelle, normale Arbeitswoche oder Schichtmodell und Arbeitszone
+- optional eigener Abwesenheitskalender für den Arbeitskontext
+
+Ein neu angelegtes Profil erbt ab v0.5.0 keine Wetter-, Arbeits-, Schicht- oder Kalenderwerte eines anderen Profils. Beim Upgrade werden die bisherigen globalen Werte dagegen einmalig in bereits vorhandene Personenprofile übernommen, damit deren Verhalten erhalten bleibt.
 
 Der normale Forecast-Horizont beträgt 9 Stunden. Bei relevanten Änderungen kann er erweitert werden; Arbeits- und Kalenderkontext können einen längeren Zeitraum erforderlich machen. Eine kommende Schicht wird ab v0.4.2 jedoch erst **3 Stunden vor ihrem tatsächlichen Arbeitsbeginn** in Arbeitsprofil, Arbeitswetter und die mögliche Erweiterung auf bis zu 16 Stunden einbezogen. Laufende Schichten bleiben selbstverständlich aktiv – auch über Mitternacht. Der vorhandene ±30-Minuten-Planungspuffer zieht diese 3-Stunden-Grenze nicht vor.
 
@@ -52,7 +57,7 @@ Jeder normale Home-Assistant-Benutzer hat sein eigenes Lernprofil. Beim ersten E
 - Zu warm
 - Nicht genutzt
 
-Das allgemeine Profil ist der ganzjährige persönliche Grundwert. Winter, Frühling, Sommer und Herbst besitzen daneben jeweils einen eigenen Offset. Normales thermisches Feedback verändert nach der Initialisierung nur die gerade beteiligte Jahreszeit; während der rund 30-tägigen Überblendung um den meteorologischen Saisonwechsel lernen ausschließlich die beiden benachbarten Saisonanker. Die saisonale Lernrate richtet sich nach der eigenen echten Evidenz der jeweiligen Jahreszeit und bleibt auch nach vielen Jahren reaktionsfähig.
+Der ganzjährige persönliche Grundwert (`Main`) ist die Basis des persönlichen Lernmodells. Winter, Frühling, Sommer und Herbst besitzen daneben jeweils einen eigenen Offset. Normales thermisches Feedback verändert nach der Initialisierung nur die gerade beteiligte Jahreszeit; während der rund 30-tägigen Überblendung um den meteorologischen Saisonwechsel lernen ausschließlich die beiden benachbarten Saisonanker. Die saisonale Lernrate richtet sich nach der eigenen echten Evidenz der jeweiligen Jahreszeit und bleibt auch nach vielen Jahren reaktionsfähig.
 
 Beim allerersten Übergang in eine noch unbekannte Jahreszeit übernimmt sie einmalig nur den Offset der direkten Vorgängersaison als Startwert. Wird die komplette 30-Tage-Übergangszone verpasst, wird dieses einmalige Seeding beim ersten späteren Zugriff in der neuen Saison nachgeholt. Evidenz, Statistik und Lernhistorie werden nie mitkopiert. Beginnt jemand JackenBerater allerdings erst ganz am Ende einer Saison und sammelt dort bis zum nächsten Jahr weniger als zwei eigene Evidenzpunkte, darf diese **erste schwache Saison beim ersten Wiederkommen einmalig gerettet** werden: Bei 0 eigener Evidenz kann sie den inzwischen gut gelernten direkten Vorgänger übernehmen, bei etwas eigener Evidenz wird proportional gemischt. Eine ausreichend selbst gelernte Saison wird niemals automatisch verändert; nach dem einmaligen Rescue findet ebenfalls kein weiteres automatisches Nachziehen statt. Wurden mehrere ganze Jahreszeiten übersprungen und ist die direkte Vorgängersaison selbst unbekannt, wird keine künstliche Seed-Kette erzeugt: Nur die aktuell erreichte Saison startet dann neutral bei 0 relativ zu Main. Erst wenn alle vier Jahreszeiten ausreichend eigene Evidenz besitzen und ihre Offsets denselben gemeinsamen positiven oder negativen Sockel zeigen, wird dieser gemeinsame Anteil verlustfrei in den ganzjährigen Grundwert verschoben. `Main + Saisonoffset` bleibt dadurch für jede Jahreszeit unverändert. Bestehende v0.3.0-Profile werden beim Laden automatisch in dieses Modell migriert; synthetische Saisonwerte ohne eigene Evidenz werden dabei nicht als echte Saisonerfahrung übernommen.
 
@@ -100,6 +105,14 @@ Bei anhaltend starker Kälte darf der Pullover zusätzlich mit einer Jacke kombi
 
 Bestehende v0.3.x-Profile werden neutral migriert: Die bisherige Jacken-, Saison-, Wind- und Threshold-Personalisierung bleibt erhalten; der neue Pulloverbereich startet neutral und sammelt erst anschließend eigene Evidenz. Ein „zu warm“-Feedback bei **Pullover ohne Jacke** verschiebt gezielt die Pulloverentscheidung zu kühleren Bedingungen – auch wenn die Empfehlung zugleich eine kurzfristige Transient-Ausnahme verwendet. Ist zusätzlich eine abnehmbare Jacke beteiligt, wird weiterhin zuerst deren Außenschichtentscheidung bewertet, statt beide Kleidungsbereiche doppelt zu verändern.
 
+## Personenprofile und serverseitige Beratung
+
+Ab v0.5.0 gehören Wetterquelle, Arbeits-/Schichtkontext und persönliche Kalender zum jeweiligen JackenBerater-Profil. Die Integration besitzt kein allgemeines Beratungsprofil mehr. Bestehende Profile übernehmen beim Upgrade einmalig die früher global gespeicherten persönlichen Werte; neue Profile starten neutral und wählen ihre eigene Wetterquelle.
+
+Empfehlung, Forecast-Auswertung, Sessions und Lernen werden serverseitig pro Profil berechnet. Handy und Wandtablet erhalten dieselbe fertige Auswertung und zeigen sie über ihre bestehende Oberfläche an. Das Tablet benötigt keine eigene Wetterquelle und fällt kein zweites Urteil. Seine Profilwahl, Feedback-Bedienung und die sichtbare Beratungskarte bleiben unverändert.
+
+Ist eine Profil-Wetterquelle gelöscht oder umbenannt worden, bleibt das Profil weiterhin erreichbar und die Quelle kann im Info-Bereich repariert werden. Noch nicht eingerichtete Profile können ihr Setup ebenfalls ohne vorher erfolgreiche Wetterberechnung öffnen. Die fünf Startantworten lassen sich später bewusst erneut bearbeiten; ein vollständiges Re-Setup ersetzt dabei wie bisher das Lernmodell und verwirft Sessions des alten Modells.
+
 ## Wandtablet / Shared-Konto
 
 Ein als Shared-Konto freigegebener Home-Assistant-Benutzer wählt vor der Beratung ein vorhandenes Personenprofil aus. Konten, die aktuell selbst als Shared-/Steuerkonto konfiguriert sind, werden dabei nicht als beratbare Person angeboten; ihr eventuell früher gelerntes persönliches Profil bleibt nur konserviert und erscheint automatisch wieder, wenn der Shared-Status später entfernt wird.
@@ -131,7 +144,7 @@ title: Jacke heute
 
 Bei vollständig YAML-verwaltetem Lovelace muss die Ressource manuell eingetragen werden:
 
-`/jackenberater/frontend/jackenberater-card.js?v=0.4.2&ui=19`
+`/jackenberater/frontend/jackenberater-card.js?v=0.5.0&ui=23`
 
 Nach einem JackenBerater-Update sollte die Lovelace-Seite einmal vollständig neu geladen werden. Bereits registrierte Browser-Custom-Elements können innerhalb derselben JavaScript-Session technisch nicht durch eine neu geladene Klasse ersetzt werden; der versionsgebundene Ressourcenpfad verhindert dabei normale Cache-Probleme.
 
@@ -139,7 +152,7 @@ Die beiden aufklappbaren Bereiche der Karte sind gegenseitig exklusiv: Entweder 
 
 ## Arbeitskontext
 
-Wenn eine Arbeitswetterquelle eingerichtet ist, kann JackenBerater für geplante Arbeitszeiten das Wetter am Arbeitsort berücksichtigen. Das aktuelle Arbeitswetter wird während der tatsächlichen Arbeitszeit verwendet. Außerhalb davon bleibt Zuhause die aktuelle Wetterquelle. Für die Planung gilt weiterhin der ±30-Minuten-Puffer; nach dem echten Schichtende wird dieser ausdrücklich als Puffer und nicht als laufende Arbeitszeit bezeichnet. Bei stündlichen Forecasts darf ein ausreichend frischer Forecastanker ein kurzes Restfenster bis zum Pufferende abdecken, damit zum Feierabend nicht fälschlich „Arbeitsforecast fehlt“ erscheint.
+Wenn im persönlichen Profil eine Arbeitswetterquelle eingerichtet ist, kann JackenBerater für die dort konfigurierten Arbeitszeiten das Wetter am Arbeitsort berücksichtigen. Das aktuelle Arbeitswetter wird während der tatsächlichen Arbeitszeit verwendet. Außerhalb davon bleibt Zuhause die aktuelle Wetterquelle. Für die Planung gilt weiterhin der ±30-Minuten-Puffer; nach dem echten Schichtende wird dieser ausdrücklich als Puffer und nicht als laufende Arbeitszeit bezeichnet. Bei stündlichen Forecasts darf ein ausreichend frischer Forecastanker ein kurzes Restfenster bis zum Pufferende abdecken, damit zum Feierabend nicht fälschlich „Arbeitsforecast fehlt“ erscheint.
 
 State-Änderungen des Kontext-/Terminkalenders oder Abwesenheitskalenders invalidieren den Arbeitskontext-Cache unmittelbar. Home Assistant garantiert allerdings nicht bei jeder Kalender-CRUD-Änderung sofort einen Entity-State-Change. Deshalb ist der JackenBerater-eigene Cache zusätzlich auf nur **1 Minute** begrenzt; providerseitige Aktualisierungsintervalle von Home Assistant bzw. der jeweiligen Kalenderintegration können unabhängig davon weiterhin gelten.
 

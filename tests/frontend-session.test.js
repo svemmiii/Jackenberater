@@ -375,6 +375,161 @@ assert.ok(Card, "jackenberater-card must register itself");
   await retryCard._refresh();
   assert.equal(retryCard._refreshFailures, 2, "repeated failures must increase backoff");
   assert.equal(retryCard._retryIntervalMs(), 120 * 1000, "repeated failures should back off instead of retrying on every HA state update");
+  assert.ok(retryCard._stateRefreshTimer, "failed refresh must schedule its own recovery retry instead of waiting for unrelated HA activity");
+  clearTimeout(retryCard._stateRefreshTimer);
+  retryCard._stateRefreshTimer = null;
+
+  // Home Assistant keeps custom cards mounted while its websocket reconnects
+  // after a Core restart. The connection's `ready` event must clear transient
+  // backoff/error state and immediately request a fresh server snapshot so the
+  // user never has to reload Lovelace manually.
+  const connectionListeners = new Map();
+  const fakeConnection = {
+    connected: true,
+    addEventListener(type, callback) {
+      if (!connectionListeners.has(type)) connectionListeners.set(type, new Set());
+      connectionListeners.get(type).add(callback);
+    },
+    removeEventListener(type, callback) {
+      connectionListeners.get(type)?.delete(callback);
+    },
+    fire(type) {
+      for (const callback of connectionListeners.get(type) || []) callback(this);
+    },
+  };
+  const reconnectCard = new Card();
+  reconnectCard._config = { type: "custom:jackenberater-card" };
+  reconnectCard._render = () => {};
+  let reconnectRefreshes = 0;
+  reconnectCard._refresh = async () => { reconnectRefreshes += 1; };
+  reconnectCard.hass = { language: "de", states: {}, connection: fakeConnection };
+  assert.equal(reconnectRefreshes, 1, "initial hass assignment should still load the card once");
+  assert.equal(connectionListeners.get("ready")?.size, 1, "card must listen for HA websocket reconnect readiness");
+  reconnectCard._refreshFailures = 4;
+  reconnectCard._lastRefreshAttemptAt = Date.now();
+  reconnectCard._handleConnectionReady();
+  assert.equal(reconnectRefreshes, 2, "websocket ready after restart must trigger an immediate card refresh");
+  assert.equal(reconnectCard._refreshFailures, 0, "successful reconnect path must reset stale retry backoff before refreshing");
+  assert.equal(reconnectCard._lastRefreshAttemptAt, 0, "reconnect refresh must bypass the previous failed-attempt throttle");
+  reconnectCard.disconnectedCallback();
+  assert.equal(connectionListeners.get("ready")?.size, 0, "disconnected card must remove its websocket ready listener");
+  assert.equal(connectionListeners.get("disconnected")?.size, 0, "disconnected card must remove its websocket disconnected listener");
+
+  const restartRecoveryCard = new Card();
+  restartRecoveryCard._config = { type: "custom:jackenberater-card" };
+  restartRecoveryCard._render = () => {};
+  restartRecoveryCard._hass = { language: "de", states: {}, connection: fakeConnection };
+  restartRecoveryCard._bindConnectionEvents();
+  let backendOnline = false;
+  restartRecoveryCard._send = async (type) => {
+    if (!backendOnline) throw new Error("Connection lost");
+    if (type === "jackenberater/profiles") {
+      return { current_user_id: "user", shared_account: false, is_admin: false, profiles: [{ id: "user", name: "User" }] };
+    }
+    if (type === "jackenberater/preview") {
+      return { recommendation: { display_mode: "full" }, profile: { id: "user", setup_complete: true }, feedback: [] };
+    }
+    throw new Error(`unexpected message: ${type}`);
+  };
+  fakeConnection.connected = false;
+  await restartRecoveryCard._refresh();
+  assert.equal(restartRecoveryCard._error, "", "connection loss during a restart must not latch a permanent error card");
+  assert.ok(restartRecoveryCard._reconnectRefreshTimer == null, "while the socket is down the card should wait for the authoritative ready event");
+  // The websocket library can also reject a command with the raw numeric
+  // ERR_CONNECTION_LOST constant (3), not only an object/message. Treat it as
+  // the same restart condition.
+  const numericLossCard = new Card();
+  numericLossCard._config = { type: "custom:jackenberater-card" };
+  numericLossCard._render = () => {};
+  numericLossCard._hass = { language: "de", states: {}, connection: fakeConnection };
+  numericLossCard._preview = { recommendation: { display_mode: "full" }, profile: { id: "user", setup_complete: true }, feedback: [] };
+  numericLossCard._send = async () => { throw 3; };
+  await numericLossCard._refresh();
+  assert.equal(numericLossCard._error, "", "raw ERR_CONNECTION_LOST=3 must not latch a restart error card");
+  assert.equal(numericLossCard._connectionRecovering, true, "raw ERR_CONNECTION_LOST=3 must enter reconnect recovery");
+
+  backendOnline = true;
+  fakeConnection.connected = true;
+  fakeConnection.fire("ready");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(restartRecoveryCard._error, "", "ready reconnect must heal the transient restart error without a page reload");
+  assert.equal(restartRecoveryCard._preview?.profile?.id, "user", "reconnect refresh must restore the server-side profile snapshot");
+  restartRecoveryCard.disconnectedCallback();
+
+  // Websocket `ready` can precede completion of JackenBerater's own
+  // async_setup_entry(). In that window the first request can return
+  // integration_reloading even though the socket is healthy. Retry quickly.
+  const reconnectSetTimeout = context.setTimeout;
+  let reconnectRetryCallback = null;
+  let reconnectRetryDelay = null;
+  context.setTimeout = (fn, ms) => { reconnectRetryCallback = fn; reconnectRetryDelay = ms; return 777; };
+  const startupRaceCard = new Card();
+  startupRaceCard._config = { type: "custom:jackenberater-card" };
+  startupRaceCard._render = () => {};
+  startupRaceCard._hass = { language: "de", states: {}, connection: fakeConnection };
+  startupRaceCard._bindConnectionEvents();
+  startupRaceCard._preview = { recommendation: { display_mode: "full" }, profile: { id: "user", setup_complete: true }, feedback: [] };
+  let startupRuntimeReady = false;
+  startupRaceCard._send = async (type) => {
+    if (!startupRuntimeReady) throw new Error("integration_reloading");
+    if (type === "jackenberater/profiles") {
+      return { current_user_id: "user", shared_account: false, is_admin: false, profiles: [{ id: "user", name: "User" }] };
+    }
+    if (type === "jackenberater/preview") {
+      return { recommendation: { display_mode: "full" }, profile: { id: "user", setup_complete: true }, feedback: [] };
+    }
+    throw new Error(`unexpected message: ${type}`);
+  };
+  fakeConnection.fire("ready");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(startupRaceCard._error, "", "post-ready integration startup race must preserve the last valid card");
+  assert.equal(reconnectRetryDelay, 500, "first post-ready integration retry should happen after 500 ms, not 60 seconds");
+  assert.ok(reconnectRetryCallback, "startup race must arm the fast reconnect retry");
+  startupRuntimeReady = true;
+  const retryNow = reconnectRetryCallback;
+  reconnectRetryCallback = null;
+  retryNow();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(startupRaceCard._connectionRecovering, false, "successful retry must leave reconnect recovery mode");
+  assert.equal(startupRaceCard._preview?.profile?.id, "user", "fast retry must restore the current profile without page refresh");
+  startupRaceCard.disconnectedCallback();
+
+  // Core and JackenBerater can be ready before the selected weather integration
+  // has restored its entity. A successful preview carrying weather_unavailable
+  // must therefore keep the short startup recovery alive.
+  reconnectRetryCallback = null;
+  reconnectRetryDelay = null;
+  const weatherStartupCard = new Card();
+  weatherStartupCard._config = { type: "custom:jackenberater-card" };
+  weatherStartupCard._render = () => {};
+  weatherStartupCard._hass = { language: "de", states: {}, connection: fakeConnection };
+  weatherStartupCard._connectionRecovering = true;
+  let weatherEntityReady = false;
+  weatherStartupCard._send = async (type) => {
+    if (type === "jackenberater/profiles") {
+      return { current_user_id: "user", shared_account: false, is_admin: false, profiles: [{ id: "user", name: "User" }] };
+    }
+    if (type === "jackenberater/preview") {
+      return weatherEntityReady
+        ? { recommendation: { display_mode: "full" }, advice_error: null, profile: { id: "user", setup_complete: true }, feedback: [] }
+        : { recommendation: null, advice_error: "weather_unavailable", profile: { id: "user", setup_complete: true }, feedback: [] };
+    }
+    throw new Error(`unexpected message: ${type}`);
+  };
+  await weatherStartupCard._refresh();
+  assert.equal(weatherStartupCard._connectionRecovering, true, "startup weather_unavailable must remain in restart recovery briefly");
+  assert.equal(reconnectRetryDelay, 500, "startup weather recovery should use the fast 500 ms first retry");
+  assert.ok(reconnectRetryCallback, "startup weather outage must schedule an automatic retry");
+  weatherEntityReady = true;
+  const weatherRetryNow = reconnectRetryCallback;
+  reconnectRetryCallback = null;
+  weatherRetryNow();
+  await new Promise((resolve) => reconnectSetTimeout(resolve, 0));
+  assert.equal(weatherStartupCard._connectionRecovering, false, "healthy weather preview must finish restart recovery");
+  assert.equal(weatherStartupCard._preview?.advice_error, null, "weather startup retry must replace the temporary unavailable snapshot");
+  weatherStartupCard.disconnectedCallback();
+  context.setTimeout = reconnectSetTimeout;
+
 
 
   const timerCard = new Card();

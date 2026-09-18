@@ -4190,3 +4190,141 @@ def test_v042_submaterial_wetness_does_not_request_wet_feedback_or_train_wet():
         assert stored["learning_contract"]["start"]["wet_relevance"] == 0.0
 
     asyncio.run(run())
+
+
+def test_profile_weather_entity_is_strictly_profile_scoped_after_v050_migration():
+    manager = object.__new__(profiles.ProfileManager)
+    manager.entry = types.SimpleNamespace(data={const.CONF_WEATHER: "weather.legacy"})
+    manager._profiles = {
+        "sven": {"weather_entity": "weather.sven"},
+        "frau": {"weather_entity": "weather.frau"},
+        "new": {},
+    }
+    assert manager.profile_weather_entity("sven") == "weather.sven"
+    assert manager.profile_weather_entity("frau") == "weather.frau"
+    # Legacy values are copied once during async_load; runtime lookup must never
+    # silently turn the integration-wide old value back into a general profile.
+    assert manager.profile_weather_entity("new") is None
+
+
+def test_recent_active_session_is_profile_wide_not_device_scoped():
+    manager = object.__new__(profiles.ProfileManager)
+    now = ha_dt.now()
+    manager._profiles = {
+        "sven": {
+            "sessions": [
+                {
+                    "id": "tablet-session",
+                    "session_schema_version": profiles._SESSION_SCHEMA_VERSION,
+                    "created_at": (now - timedelta(minutes=5)).isoformat(),
+                    "feedback": None,
+                    "superseded": False,
+                    "opened_by_user_id": "wall-tablet",
+                }
+            ]
+        }
+    }
+    session = manager.recent_active_session("sven")
+    assert session is not None
+    assert session["id"] == "tablet-session"
+
+
+def test_v050_async_load_migrates_legacy_personal_context_only_for_existing_profiles():
+    class LoadStore:
+        def __init__(self):
+            self.save_calls = 0
+
+        async def async_load(self):
+            model = learning.PersonalModel.from_answers(3, 3, 3, 3)
+            return {
+                "profiles": {
+                    "existing": {
+                        "name": "Existing",
+                        "model": model.to_dict(),
+                        "sessions": [],
+                    }
+                }
+            }
+
+        def async_delay_save(self, *args, **kwargs):
+            self.save_calls += 1
+
+    async def run():
+        manager = object.__new__(profiles.ProfileManager)
+        manager.hass = None
+        manager.entry = types.SimpleNamespace(
+            entry_id="entry",
+            data={
+                const.CONF_WEATHER: "weather.legacy_mobile",
+                const.CONF_WORK_MODE: const.WORK_MODE_SHIFT,
+                const.CONF_WORK_WEATHER: "weather.legacy_work",
+                const.CONF_SHIFT_PATTERN: "F,S,N,X",
+                const.CONF_SHIFT_ANCHOR_DATE: "2026-09-01",
+                const.CONF_CONTEXT_CALENDAR: "calendar.legacy",
+            },
+        )
+        manager.store = LoadStore()
+        manager._profiles = {}
+        manager._revision = 0
+        manager._runtime_generation = "migration-test"
+        await manager.async_load()
+
+        assert manager.profile_weather_entity("existing") == "weather.legacy_mobile"
+        context = manager.profile_context("existing")
+        assert context[const.CONF_WORK_MODE] == const.WORK_MODE_SHIFT
+        assert context[const.CONF_WORK_WEATHER] == "weather.legacy_work"
+        assert context[const.CONF_SHIFT_PATTERN] == "F,S,N,X"
+        assert context[const.CONF_CONTEXT_CALENDAR] == "calendar.legacy"
+        assert manager.store.save_calls == 1
+
+    asyncio.run(run())
+
+
+def test_v050_new_profile_does_not_inherit_legacy_person_weather_or_work_context():
+    async def run():
+        manager = make_manager()
+        manager.entry = types.SimpleNamespace(
+            entry_id="entry",
+            data={
+                const.CONF_WEATHER: "weather.someone_else",
+                const.CONF_WORK_MODE: const.WORK_MODE_SHIFT,
+                const.CONF_WORK_WEATHER: "weather.someone_else_work",
+                const.CONF_SHIFT_PATTERN: "F,S,N,X",
+            },
+        )
+        await manager.async_ensure_profile("new-person", "New Person")
+        assert manager.profile_weather_entity("new-person") is None
+        context = manager.profile_context("new-person")
+        assert context[const.CONF_WORK_MODE] == const.WORK_MODE_NONE
+        assert const.CONF_WORK_WEATHER not in context
+        assert const.CONF_SHIFT_PATTERN not in context
+
+    asyncio.run(run())
+
+
+def test_v050_profile_context_isolated_and_context_change_invalidates_old_sessions():
+    async def run():
+        manager = make_manager()
+        manager._profiles["other"] = {
+            "name": "Other",
+            "model": learning.PersonalModel.from_answers(3, 3, 3, 3).to_dict(),
+            "sessions": [{"id": "other-session"}],
+            "weather_entity": "weather.other",
+            "context": profiles._default_profile_context(),
+        }
+        manager._profiles["user"]["sessions"] = [{"id": "old-user-session"}]
+        await manager.async_set_profile_context(
+            "user",
+            {
+                const.CONF_WORK_MODE: const.WORK_MODE_WEEKDAY,
+                const.CONF_WORK_WEATHER: "weather.user_work",
+                const.CONF_WORKDAY_START: "06:30",
+                const.CONF_WORKDAY_END: "14:30",
+            },
+        )
+        assert manager.profile_context("user")[const.CONF_WORK_WEATHER] == "weather.user_work"
+        assert manager._profiles["user"]["sessions"] == []
+        assert manager.profile_context("other")[const.CONF_WORK_MODE] == const.WORK_MODE_NONE
+        assert manager._profiles["other"]["sessions"] == [{"id": "other-session"}]
+
+    asyncio.run(run())

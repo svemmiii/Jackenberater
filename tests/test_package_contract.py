@@ -107,7 +107,7 @@ def test_frontend_registration_does_not_hide_unexpected_runtime_errors():
 
 
 def test_release_version_is_consistent_across_current_release_files():
-    version = "0.4.2"
+    version = "0.5.0"
     manifest = json.loads((INTEGRATION / "manifest.json").read_text(encoding="utf-8"))
     const_source = (INTEGRATION / "const.py").read_text(encoding="utf-8")
     init_source = (INTEGRATION / "__init__.py").read_text(encoding="utf-8")
@@ -174,7 +174,7 @@ def test_user_card_does_not_expose_internal_effective_temperature():
 
 def test_bug_report_template_targets_current_release():
     bug = (ROOT / ".github" / "ISSUE_TEMPLATE" / "bug_report.yml").read_text(encoding="utf-8")
-    assert 'value: "0.4.2"' in bug
+    assert 'value: "0.5.0"' in bug
 
 
 def test_release_ci_covers_declared_minimum_current_and_latest_home_assistant():
@@ -212,7 +212,8 @@ def test_frontend_has_no_undocumented_fixed_profile_id_config_path():
 def test_release_hardening_invalidates_calendar_cache_and_documents_diagnostics_privacy():
     init_source = (INTEGRATION / "__init__.py").read_text(encoding="utf-8")
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    assert "async_track_state_change_event" in init_source
+    assert 'hass.bus.async_listen("state_changed"' in init_source
+    assert 'entity_id.startswith("calendar.")' in init_source
     assert 'runtime.setdefault("context_cache", {}).clear()' in init_source
     assert 'context_cache_generation' in init_source
     assert "Kontext-/Terminkalenders" in readme

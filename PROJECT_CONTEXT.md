@@ -4,7 +4,7 @@ Dieses lokale Projekt wurde ursprünglich am 2. September 2026 aus dem ChatGPT-P
 
 - Quellprojekt: https://chatgpt.com/g/g-p-6a983d3dc0288191b241cbfcd430cacf-jackenberater/project
 - Übernommener Chat: „Kältegefühl Tracken“
-- Aktueller Entwicklungsstand: **JackenBerater v0.4.2**
+- Aktueller Entwicklungsstand: **JackenBerater v0.5.0**
 - CI prüft den deklarierten Mindeststand Home Assistant 2026.6.0, einen reproduzierbar gepinnten aktuellen Stand und zusätzlich den jeweils neuesten verfügbaren HA-Teststack unter Python 3.14.
 
 ## Zweck
@@ -14,8 +14,9 @@ JackenBerater erzeugt aus aktuellem Wetter, stündlichem Forecast, persönlichem
 ## Aktuelle Produktregeln
 
 - Normale Betrachtung: 9 reale Stunden, bei relevanten Änderungen bis etwa 12 Stunden; Kalender-/Arbeitskontext kann bis maximal 16 Stunden erweitern.
-- Aktuelle Wetterquelle ist zuhause, außer innerhalb einer tatsächlichen konfigurierten Arbeitszeit; dann ist das Arbeitswetter maßgeblich. Ein ausgefallenes Zuhause-Wetter darf eine gesunde Arbeitsquelle nicht blockieren.
-- Arbeitsforecast ersetzt Zuhause-Forecast nur innerhalb der geplanten Arbeitsfenster. Fehlende Arbeitsdaten werden nicht still mit Zuhause-Wetter gefüllt und müssen sichtbar gewarnt werden.
+- Wetterquelle, Arbeits-/Schichtkontext und persönliche Kalender gehören ab v0.5.0 zum jeweiligen Personenprofil. Innerhalb einer tatsächlichen dort konfigurierten Arbeitszeit ist dessen Arbeitswetter maßgeblich; außerhalb davon dessen primäre Profil-Wetterquelle. Ein ausgefallenes primäres Wetter darf eine gesunde Arbeitsquelle nicht blockieren.
+- Arbeitsforecast ersetzt den primären Profil-Forecast nur innerhalb der geplanten Arbeitsfenster. Fehlende Arbeitsdaten werden nicht still mit der primären Wetterquelle gefüllt und müssen sichtbar gewarnt werden.
+- Profilbezogene Forecasts cachen erfolgreiche Abrufe 15 Minuten, echte Abruffehler dagegen nur 1 Minute. Erfolgreich leere Forecasts gelten weiterhin als Erfolg. Arbeitsforecast wird nur bei einem tatsächlich relevanten Planungsfenster abgefragt.
 - Eine sichtbare Karte erzeugt keine Session. Erst bewusstes Aufklappen erzeugt eine Nutzungssession; das Infofeld allein nicht.
 - Nahezu identische bewusste Öffnungen desselben Profils innerhalb von 30 Minuten zählen profilweit als eine reale Jackenentscheidung, unabhängig vom Gerät/Login.
 - Fälliges Feedback gehört zum Profil und kann deshalb auf einem freigegebenen Wandtablet beantwortet werden, auch wenn die Session am persönlichen Gerät entstand.
@@ -44,7 +45,7 @@ JackenBerater erzeugt aus aktuellem Wetter, stündlichem Forecast, persönlichem
 
 ## Letzter lokal verifizierter Prüfstand
 
-- **432 / 432 Python-Tests bestanden** (`pytest -q tests --ignore=tests/ha_runtime`)
+- **448 / 448 HA-unabhängige Python-Tests bestanden** (`pytest -q tests --ignore=tests/ha_runtime`), zusätzlich JS-Syntaxcheck, Python-Compilecheck und JSON-/YAML-Validierung. Der echte HA-Runtime-Smoke benötigt eine Umgebung mit installiertem `homeassistant` und konnte im lokalen Prüfcontainer nicht gesammelt werden.
 - Neue v0.4.0-Regressionen decken die Pullover-Schicht zusätzlich gegen kurzfristige Indoor→Outdoor-Übergangskälte, Forecast-Lücken vor dem ersten Zukunftspunkt, falsche Jackengrenzen-Evidenz bei `Pullover + Jacke`, verschobene Pullover-Transientgrenzen in beide Richtungen, korrekte Lernattribution bei `Pullover + keine Jacke + transient` sowie reine `pullover_reason`-Änderungen ohne neue Lernsession, das vollständige Abtrainieren von Warming-/Cooling-Transient-Overrides einschließlich des 0-Grad-Minuten-Grenzfalls, reine `weather.condition`-Labelwechsel und reine `rain_status`-Hinweiswechsel ohne neue Lernsession, reine Work-/Kontextmetadatenwechsel, den realistischen Fall eines nachträglich verfügbaren Work-Forecasts bei unverändertem Outfit sowie Lernsemantik-Grenzen bei `14,8 → 15,2 °C`, Wind-Malus `0,4 → 0,6` und Transition-Malus `0,7 → 0,9` ab; zusätzlich sind Transient-/Bootstrap-Fälle gegen semantisch wirkungslose Grenzrefreshes sowie Confidence-Änderungen innerhalb bzw. über die `< 0,55`-Policygrenze abgesichert. Setup-Speichern ist außerdem Single-Flight gegen Doppelklick. Der v13-Learning-Contract friert die Lernbedeutung einer Session unveränderlich ein: Bootstrap/Mature, `Perfekt`-Grenzziel, Wind-/Transition-Aktivierung und Saisongewichte werden beim Öffnen gespeichert und beim späteren Feedback tatsächlich durchgesetzt. `PHASE_ALL` kann dadurch innerhalb einer Bewertung nicht die Lernphase wechseln. Die Active-Learning-Policy dedupliziert nach dem tatsächlichen Ergebnis `informative_feedback` statt nach einzelnen OR-Ursachen; identische Saisongewichte über Mitternacht bleiben dieselbe Lernsemantik. Frontend-Mutation-Flights sind zusätzlich an Config-/Profil-/Generation gebunden, sodass alte Setup-/Maintenance-Requests einen neuen Kontext weder blockieren noch entsperren können. Der v14-Stand bindete zusätzlich jede Active-Learning-Opportunity an die reale Entscheidung: beantwortete identische Entscheidungen blieben im damaligen v14-Stand 10 Minuten Dedupe-Anker (seit v0.4.2: 30 Minuten), während semantische Snapshot-Replacements ihre ursprüngliche `opportunity_count` erben. Pausierte Display-Sessions werden innerhalb derselben Pause wiederverwendet, bleiben nach Resume aber dauerhaft untrainierbar. Active-Work setzt im Fallback konsistent `stay_context=work`; beschädigte `inf`-/`seeded_from`-Storagewerte werden defensiv normalisiert.
 - Neue v0.4.1-Regressionen prüfen Taupunkt-/Schwüleberechnung, trockene Gegenfälle, getrennte Warm-/Kaltfeuchte-Persistenz, langsames Solarlernen, neutrales `partlycloudy` ohne sichere Tageslicht-/Expositionsinformation, Priorisierung des Feuchtekanals bei `Pullover + keine Jacke + zu warm`, unverändertes Pulloverlernen unter trockenen Bedingungen, geteilte Lernstärke bei gleichzeitig aktiver Schwüle + Sonne, eingefrorene/quantisierte Specialist-Relevanz mit Opportunity-erhaltendem Snapshot-Replacement, Kaltfeuchte `zu kalt`/`zu warm`/`perfekt`, `PHASE_LATER`/`boundary_only` ohne Feuchte-/Solar-Doppellernen, Sichtbarkeit materiell aktiver Spezialisten mit <3 eigener Evidenz sowie defensive Bereinigung nicht-dictförmiger Session-Storageeinträge und beschädigter Specialist-Contract-Werte.
 
@@ -71,6 +72,26 @@ Eine Jackenstufe soll nicht wegen eines winzigen Zeitfensters zur Hauptempfehlun
 - Laufzeitdaten eines geladenen Config Entries liegen in `entry.runtime_data`; `hass.data[DOMAIN]` bleibt nur für integrationsglobale Frontend-/API-Marker.
 - Der Forecast-Coordinator erhält den `ConfigEntry` explizit und die automatisch verwaltete Lovelace-Ressource wird beim endgültigen Entfernen des Eintrags aufgeräumt.
 
+
+
+## v0.5.0 Personenprofile / Server-Lifecycle
+
+- Kein allgemeines Beratungsprofil mehr: neue Personen starten neutral mit eigener Wetterquelle und eigenem Arbeits-/Schicht-/Kalenderkontext. Bestehende Profile migrieren die früher globalen persönlichen Werte einmalig.
+- Empfehlung, Wetterauswertung, Sessions und Lernen sind serverseitiger Profilzustand; Handy und Shared-Tablet sind Darstellungs-/Bedienclients derselben Auswertung. Die sichtbare Hauptkarte bleibt gegenüber v0.4.2 unverändert.
+- Preview liefert einen Profil-Shell auch ohne berechenbare Empfehlung, damit Erst-Setup und Weather-Recovery nie von `weather_unavailable` verdeckt werden.
+- `ProfileManager.async_open_session()` ist die einzige Session-Dedupe-Instanz. Die WebSocket-API besitzt keinen vereinfachten Vorab-Shortcut mehr.
+- Profilbezogene `watched_entities` werden mit dem angezeigten Preview geliefert, sodass ein restauriertes Shared-Profil sofort seine tatsächlichen Wetter-/Kalenderquellen beobachtet.
+- Startantworten können aus dem bestehenden Info-Bereich bewusst neu gesetzt werden; vollständiges Re-Setup ersetzt Modell und Sessions wie bisher.
+- Frontend-Recovery bei HA-Core-Neustarts: Die Karte nutzt `disconnected`/`ready` der HA-WebSocket-Verbindung und besitzt zusätzlich einen schnellen Restart-Retry für den Zeitraum, in dem der Socket schon wieder bereit ist, der JackenBerater-ConfigEntry aber noch `integration_reloading`/nicht geladen meldet. Die normale Karte benötigt dadurch keinen manuellen Browser-Refresh. Frontend-Cache: `ui=23`.
+
+## v0.4.3 Profilwetter / Shared-UI
+
+- Primäres Wetter ist profilbezogen (`weather_entity` im Profilstore); bestehende Profile migrieren einmalig vom bisherigen globalen `CONF_WEATHER`.
+- Shared-/Wandtablet bleibt reine Bedien-/Anzeigeoberfläche: ausgewähltes Profil bestimmt Wetter, Empfehlung, Session und Feedback. Das Tablet benötigt keine eigene Wetterentität und berechnet keine separate Beratung.
+- Persönliche Profile können die Wetterentität im Setup und später im Info-Bereich wechseln. Ein Wechsel leert offene Sessions des alten Wetterkontexts.
+- Nicht-globale Profil-Forecasts werden serverseitig 15 Minuten gecacht.
+- Eine frische Session wird 30 Minuten profilweit als aktive Interaktion wiederverwendet, damit Tablet und Handy nicht parallel zwei Sessions desselben Profils erzeugen.
+- Die bestehende Shared-Profilwahl per localStorage, Warn-/Profilanzeige und profilbezogenes Feedback bleiben erhalten.
 
 ## v0.4.2 Arbeitsgate / Nässe / Sessions / Season Rescue
 

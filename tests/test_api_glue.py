@@ -2168,3 +2168,178 @@ def test_shared_profile_list_excludes_all_current_shared_control_accounts_and_ad
         assert str(err) == "shared_profile_is_control"
     else:
         raise AssertionError("current shared-control accounts must never be advice targets")
+
+
+def test_v050_incomplete_profile_preview_never_requires_weather_and_returns_profile_watch_list():
+    results = []
+    model = learning.PersonalModel()  # setup_complete=False
+    entry = types.SimpleNamespace(entry_id="entry", data={const.CONF_SHARED_USER_IDS: []})
+
+    async def ensure_profile(*args, **kwargs):
+        return model
+
+    manager = types.SimpleNamespace(
+        async_ensure_profile=ensure_profile,
+        profile_ids={"person"},
+        get_model=lambda profile_id: model,
+        get_profile_summary=lambda profile_id: {
+            "id": profile_id,
+            "name": "Person",
+            "setup_complete": False,
+            "weather_entity": None,
+        },
+        profile_weather_entity=lambda profile_id: None,
+        profile_context=lambda profile_id: {},
+        profile_revision_token=lambda profile_id: "runtime:p:0",
+        directory_revision_token="runtime:d:0",
+    )
+    hass = types.SimpleNamespace(
+        config_entries=types.SimpleNamespace(async_entries=lambda domain: [entry]),
+        data={const.DOMAIN: {"entry": {"profiles": manager, "simulations": {}}}},
+    )
+    connection = types.SimpleNamespace(
+        user=types.SimpleNamespace(id="person", name="Person", is_admin=False),
+        send_error=lambda *args: (_ for _ in ()).throw(AssertionError(args)),
+        send_result=lambda *args: results.append(args[1]),
+    )
+    original = api._recommendation
+    async def forbidden(*args, **kwargs):
+        raise AssertionError("incomplete setup must not calculate advice")
+    api._recommendation = forbidden
+    try:
+        asyncio.run(api.ws_preview(hass, connection, {"id": 1, "profile_id": "person"}))
+    finally:
+        api._recommendation = original
+
+    assert results[0]["profile"]["setup_complete"] is False
+    assert results[0]["recommendation"] is None
+    assert results[0]["advice_error"] is None
+    assert results[0]["watched_entities"] == []
+
+
+def test_v050_broken_personal_weather_returns_repairable_preview_shell():
+    results = []
+    model = learning.PersonalModel.from_answers(3, 3, 3, 3)
+    entry = types.SimpleNamespace(entry_id="entry", data={const.CONF_SHARED_USER_IDS: []})
+
+    async def ensure_profile(*args, **kwargs):
+        return model
+
+    manager = types.SimpleNamespace(
+        async_ensure_profile=ensure_profile,
+        profile_ids={"person"},
+        get_model=lambda profile_id: model,
+        get_profile_summary=lambda profile_id: {
+            "id": profile_id,
+            "name": "Person",
+            "setup_complete": True,
+            "weather_entity": "weather.missing",
+        },
+        profile_weather_entity=lambda profile_id: "weather.missing",
+        profile_context=lambda profile_id: {},
+        feedback_candidates=lambda profile_id: [],
+        latest_session=lambda profile_id: None,
+        profile_revision_token=lambda profile_id: "runtime:p:0",
+        directory_revision_token="runtime:d:0",
+    )
+    hass = types.SimpleNamespace(
+        config_entries=types.SimpleNamespace(async_entries=lambda domain: [entry]),
+        data={const.DOMAIN: {"entry": {"profiles": manager, "simulations": {}}}},
+    )
+    connection = types.SimpleNamespace(
+        user=types.SimpleNamespace(id="person", name="Person", is_admin=False),
+        send_error=lambda *args: (_ for _ in ()).throw(AssertionError(args)),
+        send_result=lambda *args: results.append(args[1]),
+    )
+    original = api._stable_advice_snapshot
+    async def unavailable(*args, **kwargs):
+        raise ValueError("weather_unavailable")
+    api._stable_advice_snapshot = unavailable
+    try:
+        asyncio.run(api.ws_preview(hass, connection, {"id": 1, "profile_id": "person"}))
+    finally:
+        api._stable_advice_snapshot = original
+
+    assert results[0]["recommendation"] is None
+    assert results[0]["advice_error"] == "weather_unavailable"
+    assert results[0]["profile"]["weather_entity"] == "weather.missing"
+    assert results[0]["watched_entities"] == ["weather.missing"]
+
+
+def test_work_forecast_is_not_fetched_without_relevant_planning_window():
+    home = point(18)
+    calls = []
+
+    class Coordinator:
+        async def async_forecast_for(self, entity_id):
+            calls.append(entity_id)
+            return types.SimpleNamespace(points=[], success=True)
+
+    entry = types.SimpleNamespace(data={
+        const.CONF_WEATHER: "weather.home",
+        const.CONF_FALLBACK_INDOOR_TEMP: 21.5,
+        const.CONF_RAIN_ADVICE: True,
+    })
+    runtime = {"coordinator": Coordinator(), "context_cache": {}}
+    model = learning.PersonalModel.from_answers(3, 3, 3, 3)
+    profile_context = {
+        const.CONF_WORK_MODE: const.WORK_MODE_NONE,
+        const.CONF_WORK_WEATHER: "weather.old_work",
+    }
+
+    original_current = api.current_weather
+    original_indoor = api.indoor_temperature_c
+    original_bundle = api._calendar_context_bundle
+    api.current_weather = lambda hass, entity_id: home if entity_id == "weather.home" else None
+    api.indoor_temperature_c = lambda *args, **kwargs: 21.5
+
+    async def no_windows(*args, **kwargs):
+        return (
+            None,
+            const.CALENDAR_STATUS_NOT_CONFIGURED,
+            [],
+            [],
+            const.CALENDAR_STATUS_NOT_APPLICABLE,
+        )
+
+    api._calendar_context_bundle = no_windows
+    token = api._ADVICE_WEATHER_ENTITY.set("weather.home")
+    try:
+        asyncio.run(api._recommendation(
+            types.SimpleNamespace(states=types.SimpleNamespace(get=lambda *_: None)),
+            entry,
+            runtime,
+            model,
+            profile_id="person",
+            profile_context=profile_context,
+        ))
+    finally:
+        api._ADVICE_WEATHER_ENTITY.reset(token)
+        api.current_weather = original_current
+        api.indoor_temperature_c = original_indoor
+        api._calendar_context_bundle = original_bundle
+
+    assert calls == ["weather.home"]
+
+
+def test_inactive_work_entities_are_not_watched():
+    class Manager:
+        profile_ids = {"person"}
+
+        def profile_weather_entity(self, profile_id):
+            assert profile_id == "person"
+            return "weather.home"
+
+        def profile_context(self, profile_id):
+            assert profile_id == "person"
+            return {
+                const.CONF_WORK_MODE: const.WORK_MODE_NONE,
+                const.CONF_WORK_WEATHER: "weather.old_work",
+                const.CONF_WORK_ZONE: "zone.work",
+                const.CONF_VACATION_CALENDAR: "calendar.vacation",
+                const.CONF_CONTEXT_CALENDAR: "calendar.context",
+            }
+
+    entry = types.SimpleNamespace(data={const.CONF_INDOOR_TEMP: "sensor.indoor"})
+    watched = api._profile_watched_entities(entry, Manager(), "person")
+    assert watched == ["weather.home", "sensor.indoor", "calendar.context"]

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import importlib.util
 from pathlib import Path
 import sys
@@ -163,12 +163,11 @@ def test_normalize_forecast_sorts_before_24_point_limit():
     assert normalized[-1].dt.isoformat() == "2026-09-06T23:00:00+00:00"
 
 
-def test_coordinator_skips_work_forecast_when_work_mode_is_disabled():
+def test_coordinator_does_not_poll_legacy_global_weather_in_v050():
     import asyncio
 
     calls = []
     original_fetch = weather._fetch_hourly
-    original_current = weather.current_weather
 
     async def fetch(_hass, entity_id):
         calls.append(entity_id)
@@ -177,13 +176,12 @@ def test_coordinator_skips_work_forecast_when_work_mode_is_disabled():
         )
 
     weather._fetch_hourly = fetch
-    weather.current_weather = lambda *_args, **_kwargs: None
     entry = types.SimpleNamespace(
         entry_id="entry",
         data={
-            weather.CONF_WEATHER: "weather.home",
-            weather.CONF_WORK_WEATHER: "weather.work",
-            weather.CONF_WORK_MODE: weather.WORK_MODE_NONE,
+            "weather_entity": "weather.legacy_home",
+            "work_weather_entity": "weather.legacy_work",
+            "work_mode": "weekday",
         },
     )
     coordinator = weather.JackenWeatherCoordinator(types.SimpleNamespace(), entry)
@@ -191,10 +189,9 @@ def test_coordinator_skips_work_forecast_when_work_mode_is_disabled():
         result = asyncio.run(coordinator._async_update_data())
     finally:
         weather._fetch_hourly = original_fetch
-        weather.current_weather = original_current
     assert coordinator.config_entry is entry
-    assert calls == ["weather.home"]
-    assert result["work_forecast"] == []
+    assert calls == []
+    assert result["forecast_fetch_failed"] is False
 
 
 
@@ -376,3 +373,86 @@ def test_normalize_forecast_preserves_provider_dew_point():
     }])
     assert len(result) == 1
     assert result[0].dew_point_c == 17.5
+
+
+def test_profile_forecast_failure_retries_after_one_minute():
+    import asyncio
+
+    entity_id = "weather.test"
+    calls = []
+    current_time = [datetime(2026, 9, 18, 12, 0, tzinfo=timezone.utc)]
+    original_now = weather.dt_util.now
+    original_fetch = weather._fetch_hourly
+
+    async def fetch(_hass, requested):
+        calls.append((requested, current_time[0]))
+        if len(calls) == 1:
+            return weather.ForecastFetchResult([], False)
+        return weather.ForecastFetchResult(
+            [types.SimpleNamespace(dt=current_time[0] + timedelta(hours=1))], True
+        )
+
+    weather.dt_util.now = lambda: current_time[0]
+    weather._fetch_hourly = fetch
+    coordinator = weather.JackenWeatherCoordinator(
+        types.SimpleNamespace(), types.SimpleNamespace(entry_id="entry", data={})
+    )
+    try:
+        first = asyncio.run(coordinator.async_forecast_for(entity_id))
+        assert first.success is False
+        assert len(calls) == 1
+
+        current_time[0] += timedelta(seconds=59)
+        second = asyncio.run(coordinator.async_forecast_for(entity_id))
+        assert second.success is False
+        assert len(calls) == 1
+
+        current_time[0] += timedelta(seconds=2)
+        third = asyncio.run(coordinator.async_forecast_for(entity_id))
+        assert third.success is True
+        assert len(calls) == 2
+    finally:
+        weather.dt_util.now = original_now
+        weather._fetch_hourly = original_fetch
+
+
+def test_profile_forecast_successful_empty_result_keeps_normal_refresh_ttl():
+    import asyncio
+
+    entity_id = "weather.test"
+    calls = []
+    current_time = [datetime(2026, 9, 18, 12, 0, tzinfo=timezone.utc)]
+    original_now = weather.dt_util.now
+    original_fetch = weather._fetch_hourly
+
+    async def fetch(_hass, requested):
+        calls.append((requested, current_time[0]))
+        return weather.ForecastFetchResult([], True)
+
+    weather.dt_util.now = lambda: current_time[0]
+    weather._fetch_hourly = fetch
+    coordinator = weather.JackenWeatherCoordinator(
+        types.SimpleNamespace(), types.SimpleNamespace(entry_id="entry", data={})
+    )
+    try:
+        first = asyncio.run(coordinator.async_forecast_for(entity_id))
+        assert first.success is True and first.points == []
+        assert len(calls) == 1
+
+        current_time[0] += timedelta(minutes=1, seconds=1)
+        second = asyncio.run(coordinator.async_forecast_for(entity_id))
+        assert second.success is True and second.points == []
+        assert len(calls) == 1
+
+        current_time[0] += timedelta(minutes=13, seconds=58)
+        third = asyncio.run(coordinator.async_forecast_for(entity_id))
+        assert third.success is True and third.points == []
+        assert len(calls) == 1
+
+        current_time[0] += timedelta(seconds=2)
+        fourth = asyncio.run(coordinator.async_forecast_for(entity_id))
+        assert fourth.success is True and fourth.points == []
+        assert len(calls) == 2
+    finally:
+        weather.dt_util.now = original_now
+        weather._fetch_hourly = original_fetch

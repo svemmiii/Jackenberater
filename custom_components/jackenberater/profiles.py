@@ -15,6 +15,24 @@ from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
 from .const import (
+    CONF_CONTEXT_CALENDAR,
+    CONF_SHIFT_ANCHOR_DATE,
+    CONF_SHIFT_EARLY_END,
+    CONF_SHIFT_EARLY_START,
+    CONF_SHIFT_LATE_END,
+    CONF_SHIFT_LATE_START,
+    CONF_SHIFT_NIGHT_END,
+    CONF_SHIFT_NIGHT_START,
+    CONF_SHIFT_PATTERN,
+    CONF_VACATION_CALENDAR,
+    CONF_WEATHER,
+    CONF_WORK_MODE,
+    CONF_WORK_WEATHER,
+    CONF_WORK_ZONE,
+    CONF_WORKDAY_END,
+    CONF_WORKDAY_START,
+    DEFAULT_WORKDAY_END,
+    DEFAULT_WORKDAY_START,
     FEEDBACK_MIN_DELAY,
     FEEDBACK_PERFECT,
     FEEDBACK_TOO_COLD,
@@ -59,6 +77,47 @@ from .time_utils import (
 _LOGGER = logging.getLogger(__name__)
 
 _SESSION_SCHEMA_VERSION = 17
+
+_PROFILE_CONTEXT_KEYS = (
+    CONF_CONTEXT_CALENDAR,
+    CONF_WORK_ZONE,
+    CONF_WORK_WEATHER,
+    CONF_WORK_MODE,
+    CONF_WORKDAY_START,
+    CONF_WORKDAY_END,
+    CONF_VACATION_CALENDAR,
+    CONF_SHIFT_PATTERN,
+    CONF_SHIFT_ANCHOR_DATE,
+    CONF_SHIFT_EARLY_START,
+    CONF_SHIFT_EARLY_END,
+    CONF_SHIFT_LATE_START,
+    CONF_SHIFT_LATE_END,
+    CONF_SHIFT_NIGHT_START,
+    CONF_SHIFT_NIGHT_END,
+)
+
+
+def _default_profile_context() -> dict[str, Any]:
+    """Return neutral context for a newly created personal profile."""
+    return {
+        CONF_WORK_MODE: "none",
+        CONF_WORKDAY_START: DEFAULT_WORKDAY_START,
+        CONF_WORKDAY_END: DEFAULT_WORKDAY_END,
+    }
+
+
+def _legacy_profile_context(entry_data: dict[str, Any] | None) -> dict[str, Any]:
+    """Copy the former integration-wide personal context into one existing profile."""
+    data = entry_data if isinstance(entry_data, dict) else {}
+    context = {key: deepcopy(data[key]) for key in _PROFILE_CONTEXT_KEYS if data.get(key) not in (None, "")}
+    context.setdefault(CONF_WORKDAY_START, DEFAULT_WORKDAY_START)
+    context.setdefault(CONF_WORKDAY_END, DEFAULT_WORKDAY_END)
+    # A bare default weekday mode without a work weather source never affected
+    # recommendations in older versions. Store that state explicitly as disabled.
+    if not context.get(CONF_WORK_WEATHER):
+        context[CONF_WORK_MODE] = "none"
+    return context
+
 
 
 # Feedback undo must only touch state that one rating can actually train.
@@ -226,6 +285,19 @@ class ProfileManager:
         if isinstance(raw, dict) and isinstance(raw.get("profiles"), dict):
             self._profiles = raw["profiles"]
         before_cleanup = deepcopy(self._profiles)
+        # v0.5.0: all person-specific context belongs to the advice profile, not
+        # the integration or rendering device. Existing profiles inherit the
+        # former global values exactly once so upgrades preserve behaviour.
+        entry_data = getattr(self.entry, "data", {})
+        legacy_weather = entry_data.get(CONF_WEATHER) if isinstance(entry_data, dict) else None
+        legacy_context = _legacy_profile_context(entry_data if isinstance(entry_data, dict) else {})
+        for profile in self._profiles.values():
+            if not isinstance(profile, dict):
+                continue
+            if isinstance(legacy_weather, str) and legacy_weather and not profile.get("weather_entity"):
+                profile["weather_entity"] = legacy_weather
+            if not isinstance(profile.get("context"), dict):
+                profile["context"] = deepcopy(legacy_context)
         self._cleanup_all()
         # Persist normalization/expiry cleanup once, but avoid an unnecessary
         # write on every Home Assistant restart when storage was already clean.
@@ -371,10 +443,73 @@ class ProfileManager:
             "total_feedback": model.total_feedback,
             "confidence": round(model.confidence(), 3),
             "learning_progress": round(model.learning_progress(), 3),
+            "weather_entity": self.profile_weather_entity(profile_id),
+            "setup_answers": {
+                "cold": model.cold_answer,
+                "warm": model.warm_answer,
+                "wind": model.wind_answer,
+                "evening": model.evening_answer,
+                "pullover": model.pullover_answer,
+            },
+            "context": self.profile_context(profile_id),
         }
 
     def summaries(self) -> list[dict[str, Any]]:
         return [self.get_profile_summary(pid) for pid in self.profile_ids]
+
+    def profile_weather_entity(self, profile_id: str) -> str | None:
+        raw = self._profiles.get(profile_id, {})
+        value = raw.get("weather_entity") if isinstance(raw, dict) else None
+        if isinstance(value, str) and value:
+            return value
+        return None
+
+    def profile_context(self, profile_id: str) -> dict[str, Any]:
+        raw = self._profiles.get(profile_id, {})
+        context = raw.get("context") if isinstance(raw, dict) else None
+        if not isinstance(context, dict):
+            context = _default_profile_context()
+        result = {key: deepcopy(context[key]) for key in _PROFILE_CONTEXT_KEYS if context.get(key) not in (None, "")}
+        result.setdefault(CONF_WORKDAY_START, DEFAULT_WORKDAY_START)
+        result.setdefault(CONF_WORKDAY_END, DEFAULT_WORKDAY_END)
+        result.setdefault(CONF_WORK_MODE, "none")
+        return result
+
+    async def async_set_profile_context(self, profile_id: str, context: dict[str, Any]) -> None:
+        if profile_id not in self._profiles:
+            raise KeyError("profile not found")
+        cleaned = {
+            key: deepcopy(value)
+            for key, value in context.items()
+            if key in _PROFILE_CONTEXT_KEYS and value not in (None, "")
+        }
+        cleaned.setdefault(CONF_WORKDAY_START, DEFAULT_WORKDAY_START)
+        cleaned.setdefault(CONF_WORKDAY_END, DEFAULT_WORKDAY_END)
+        cleaned.setdefault(CONF_WORK_MODE, "none")
+        if self.profile_context(profile_id) == cleaned:
+            return
+        self._profiles[profile_id]["context"] = cleaned
+        # Context is part of the immutable decision snapshot just like weather.
+        # Do not let feedback sessions created under old work/calendar semantics
+        # train a freshly changed profile configuration.
+        self._profiles[profile_id]["sessions"] = []
+        self._schedule_save()
+        self._updated(profile_id)
+
+    async def async_set_weather_entity(self, profile_id: str, entity_id: str) -> None:
+        if profile_id not in self._profiles:
+            raise KeyError("profile not found")
+        entity_id = str(entity_id or "").strip()
+        if not entity_id.startswith("weather."):
+            raise ValueError("invalid_weather_entity")
+        if self._profiles[profile_id].get("weather_entity") == entity_id:
+            return
+        self._profiles[profile_id]["weather_entity"] = entity_id
+        # Weather is part of the profile's advice contract. Existing sessions
+        # describe the old source and must not be trained against the new one.
+        self._profiles[profile_id]["sessions"] = []
+        self._schedule_save()
+        self._updated(profile_id)
 
     def sync_user_directory(self, users: list[Any]) -> bool:
         """Prune deleted HA users and refresh stored display names."""
@@ -413,6 +548,8 @@ class ProfileManager:
                 "name": name or "Home-Assistant-Nutzer",
                 "model": PersonalModel().to_dict(),
                 "sessions": [],
+                "weather_entity": None,
+                "context": _default_profile_context(),
             }
         else:
             wanted_name = name or self.profile_name(profile_id)
@@ -448,6 +585,7 @@ class ProfileManager:
         wind: int,
         evening: int,
         pullover: int = 3,
+        weather_entity: str | None = None,
     ) -> PersonalModel:
         raw = self._profiles[profile_id]
         old = self.get_model(profile_id)
@@ -455,6 +593,8 @@ class ProfileManager:
         fresh.learning_enabled = old.learning_enabled
         fresh.prepare_seasons_for(dt_util.now())
         raw["model"] = fresh.to_dict()
+        if isinstance(weather_entity, str) and weather_entity:
+            raw["weather_entity"] = weather_entity
         # A full setup replaces the personal model.  Feedback sessions contain
         # recommendation/weather/learning context from the previous model and
         # must not be answerable or undoable against the newly initialized one.
@@ -520,6 +660,30 @@ class ProfileManager:
         self._schedule_save()
         self._updated(profile_id)
         return model
+
+    def recent_active_session(self, profile_id: str) -> dict[str, Any] | None:
+        """Return a recent unresolved session for diagnostics/compatibility only.
+
+        The WebSocket API deliberately never uses this shortcut in v0.5.0. All
+        real cross-device reuse decisions must pass through async_open_session(),
+        which validates the recommendation and immutable learning context.
+        """
+        now = dt_util.now()
+        for session in reversed(self._sessions(profile_id)):
+            if session.get("feedback") is not None or session.get("superseded") is True:
+                continue
+            if session.get("session_schema_version") != _SESSION_SCHEMA_VERSION:
+                continue
+            created = _parse_dt(session.get("created_at"))
+            if created is None:
+                continue
+            age = elapsed(created, now).total_seconds()
+            if age < 0:
+                continue
+            if age <= SESSION_DEDUPE.total_seconds():
+                return _public_session(session)
+            break
+        return None
 
     async def async_open_session(
         self,

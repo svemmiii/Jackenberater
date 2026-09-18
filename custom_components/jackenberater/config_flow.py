@@ -86,12 +86,12 @@ def _schema(
     shared_options: list[SelectOptionDict] | None = None,
     language: str | None = None,
 ) -> vol.Schema:
+    """Integration-wide settings only. Personal advice settings live in profiles."""
     return vol.Schema(
         {
             vol.Required(SECTION_BASIC): section(
                 vol.Schema(
                     {
-                        vol.Required(CONF_WEATHER): _entity("weather"),
                         vol.Optional(CONF_INDOOR_TEMP): _entity(
                             "sensor", device_class=SensorDeviceClass.TEMPERATURE
                         ),
@@ -112,33 +112,6 @@ def _schema(
                 ),
                 SectionConfig(collapsed=False),
             ),
-            vol.Optional(SECTION_CONTEXT): section(
-                vol.Schema(
-                    {
-                        vol.Optional(CONF_CONTEXT_CALENDAR): _entity("calendar"),
-                    }
-                ),
-                SectionConfig(collapsed=True),
-            ),
-            vol.Optional(SECTION_WORK): section(
-                vol.Schema(
-                    {
-                        vol.Optional(CONF_WORK_ZONE): _entity("zone"),
-                        vol.Optional(CONF_WORK_WEATHER): _entity("weather"),
-                        vol.Optional(CONF_WORK_MODE, default=WORK_MODE_WEEKDAY): SelectSelector(
-                            SelectSelectorConfig(
-                                options=_work_mode_options(language),
-                                multiple=False,
-                                mode=SelectSelectorMode.DROPDOWN,
-                            )
-                        ),
-                        vol.Optional(CONF_WORKDAY_START, default=DEFAULT_WORKDAY_START): selector({"time": {}}),
-                        vol.Optional(CONF_WORKDAY_END, default=DEFAULT_WORKDAY_END): selector({"time": {}}),
-                        vol.Optional(CONF_VACATION_CALENDAR): _entity("calendar"),
-                    }
-                ),
-                SectionConfig(collapsed=True),
-            ),
             vol.Optional(SECTION_SHARED): section(
                 vol.Schema(
                     {
@@ -153,28 +126,13 @@ def _schema(
                 ),
                 SectionConfig(collapsed=True),
             ),
-            vol.Optional(SECTION_SHIFT): section(
-                vol.Schema(
-                    {
-                        vol.Optional(CONF_SHIFT_PATTERN): TextSelector(
-                            TextSelectorConfig(autocomplete="off")
-                        ),
-                        vol.Optional(CONF_SHIFT_ANCHOR_DATE): selector({"date": {}}),
-                        vol.Optional(CONF_SHIFT_EARLY_START, default="06:00"): selector({"time": {}}),
-                        vol.Optional(CONF_SHIFT_EARLY_END, default="14:00"): selector({"time": {}}),
-                        vol.Optional(CONF_SHIFT_LATE_START, default="14:00"): selector({"time": {}}),
-                        vol.Optional(CONF_SHIFT_LATE_END, default="22:00"): selector({"time": {}}),
-                        vol.Optional(CONF_SHIFT_NIGHT_START, default="22:00"): selector({"time": {}}),
-                        vol.Optional(CONF_SHIFT_NIGHT_END, default="06:00"): selector({"time": {}}),
-                    }
-                ),
-                SectionConfig(collapsed=True),
-            ),
         }
     )
 
 
 def _flatten(user_input: dict[str, Any]) -> dict[str, Any]:
+    # Keep accepting legacy sections for import/reconfigure compatibility even
+    # though v0.5.0 no longer renders person-specific fields in ConfigFlow.
     result: dict[str, Any] = {}
     for section_name in (SECTION_BASIC, SECTION_CONTEXT, SECTION_WORK, SECTION_SHARED, SECTION_SHIFT):
         values = user_input.get(section_name)
@@ -207,20 +165,21 @@ def _normalize_mode_data(data: dict[str, Any]) -> dict[str, Any]:
 
 
 def _section_defaults(data: dict[str, Any]) -> dict[str, Any]:
+    # Legacy values remain representable so an upgrade can migrate them into
+    # profiles before the next ConfigFlow save removes them from entry.data.
     basic = {
-        CONF_WEATHER: data.get(CONF_WEATHER),
         CONF_FALLBACK_INDOOR_TEMP: data.get(
             CONF_FALLBACK_INDOOR_TEMP, DEFAULT_FALLBACK_INDOOR_TEMP
         ),
         CONF_RAIN_ADVICE: data.get(CONF_RAIN_ADVICE, True),
     }
+    if data.get(CONF_WEATHER):
+        basic[CONF_WEATHER] = data[CONF_WEATHER]
     if data.get(CONF_INDOOR_TEMP):
         basic[CONF_INDOOR_TEMP] = data[CONF_INDOOR_TEMP]
-
     context = {}
     if data.get(CONF_CONTEXT_CALENDAR):
         context[CONF_CONTEXT_CALENDAR] = data[CONF_CONTEXT_CALENDAR]
-
     work = {
         CONF_WORK_MODE: data.get(CONF_WORK_MODE, WORK_MODE_WEEKDAY),
         CONF_WORKDAY_START: data.get(CONF_WORKDAY_START, DEFAULT_WORKDAY_START),
@@ -232,26 +191,18 @@ def _section_defaults(data: dict[str, Any]) -> dict[str, Any]:
     shared = {}
     if data.get(CONF_SHARED_USER_IDS):
         shared[CONF_SHARED_USER_IDS] = list(data[CONF_SHARED_USER_IDS])
-
     shift = {
         key: data[key]
         for key in (
-            CONF_SHIFT_PATTERN,
-            CONF_SHIFT_ANCHOR_DATE,
-            CONF_SHIFT_EARLY_START,
-            CONF_SHIFT_EARLY_END,
-            CONF_SHIFT_LATE_START,
-            CONF_SHIFT_LATE_END,
-            CONF_SHIFT_NIGHT_START,
-            CONF_SHIFT_NIGHT_END,
+            CONF_SHIFT_PATTERN, CONF_SHIFT_ANCHOR_DATE, CONF_SHIFT_EARLY_START,
+            CONF_SHIFT_EARLY_END, CONF_SHIFT_LATE_START, CONF_SHIFT_LATE_END,
+            CONF_SHIFT_NIGHT_START, CONF_SHIFT_NIGHT_END,
         )
         if data.get(key)
     }
-    result: dict[str, Any] = {SECTION_BASIC: basic}
+    result: dict[str, Any] = {SECTION_BASIC: basic, SECTION_WORK: work}
     if context:
         result[SECTION_CONTEXT] = context
-    if work:
-        result[SECTION_WORK] = work
     if shared:
         result[SECTION_SHARED] = shared
     if shift:
@@ -277,11 +228,13 @@ def _same_time(start: Any, end: Any) -> bool:
 
 
 def _validate(data: dict[str, Any]) -> dict[str, str]:
+    # Used for legacy migration/tests; current ConfigFlow supplies only global
+    # technical keys, so these checks are dormant unless old personal keys are
+    # explicitly present.
     errors: dict[str, str] = {}
     mode = str(data.get(CONF_WORK_MODE, WORK_MODE_WEEKDAY))
     pattern = data.get(CONF_SHIFT_PATTERN)
     anchor = data.get(CONF_SHIFT_ANCHOR_DATE)
-
     if mode == WORK_MODE_SHIFT:
         tokens = [x.strip().upper() for x in str(pattern or "").split(",") if x.strip()]
         if not tokens or any(x not in {"F", "S", "N", "X"} for x in tokens):
@@ -302,7 +255,6 @@ def _validate(data: dict[str, Any]) -> dict[str, str]:
         data.get(CONF_WORKDAY_END, DEFAULT_WORKDAY_END),
     ):
         errors["base"] = "invalid_work_time"
-
     work_weather = data.get(CONF_WORK_WEATHER)
     work_context_present = bool(
         data.get(CONF_WORK_ZONE)
