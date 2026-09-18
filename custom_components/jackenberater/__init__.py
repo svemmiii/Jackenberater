@@ -15,9 +15,7 @@ from homeassistant.helpers.event import async_track_time_interval
 
 from .api import async_register_api
 from .const import (
-    CONF_CONTEXT_CALENDAR,
     CONF_SHIFT_PATTERN,
-    CONF_VACATION_CALENDAR,
     CONF_WORK_CALENDAR,
     CONF_WORK_MODE,
     CONF_WORKDAY_END,
